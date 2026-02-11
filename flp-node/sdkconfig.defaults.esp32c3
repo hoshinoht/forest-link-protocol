@@ -1,0 +1,9 @@
+# ESP32-C3 Pico (RISC-V, BLE + WiFi, no LoRa)
+
+CONFIG_IDF_TARGET="esp32c3"
+
+# Flash
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Single-core — adjust FreeRTOS
+CONFIG_FREERTOS_UNICORE=y

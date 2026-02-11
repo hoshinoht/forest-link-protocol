@@ -1,0 +1,42 @@
+menu "Forest Link Protocol"
+
+    config FLP_NODE_ROLE
+        int "Node role (0=sensor, 1=relay, 2=gateway)"
+        default 0
+        range 0 2
+        help
+            Determines the default role of this node in the mesh.
+
+    menu "LoRa SPI Pins (LilyGo T3)"
+        config FLP_LORA_MOSI
+            int "MOSI GPIO"
+            default 27
+
+        config FLP_LORA_MISO
+            int "MISO GPIO"
+            default 19
+
+        config FLP_LORA_SCK
+            int "SCK GPIO"
+            default 5
+
+        config FLP_LORA_CS
+            int "CS GPIO"
+            default 18
+
+        config FLP_LORA_RST
+            int "RST GPIO"
+            default 23
+
+        config FLP_LORA_DIO0
+            int "DIO0 (IRQ) GPIO"
+            default 26
+    endmenu
+
+    config FLP_MQTT_BROKER_URI
+        string "MQTT Broker URI"
+        default "mqtt://broker.local"
+        help
+            URI of the MQTT broker for cloud gateway connectivity.
+
+endmenu
