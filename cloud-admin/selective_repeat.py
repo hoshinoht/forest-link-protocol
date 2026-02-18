@@ -76,5 +76,6 @@ class CloudSelectiveRepeat:
         """Return transfer progress as a percentage."""
         if self.total_chunks == 0:
             return 0.0
-        received = sum(bin(b).count('1') for b in self.received_bitmap) if self.received_bitmap else 0
+        received = sum(bin(b).count('1')
+                       for b in self.received_bitmap) if self.received_bitmap else 0
         return received / self.total_chunks * 100.0

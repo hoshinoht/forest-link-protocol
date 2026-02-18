@@ -10,11 +10,11 @@ Dense forest canopies (the "Green Wall Effect") severely attenuate 2.4 GHz WiFi 
 
 FLP bridges this gap with an **adaptive multi-protocol mesh** running on ESP32 nodes. It combines three communication layers:
 
-| Layer | Protocol | Role |
-|-------|----------|------|
-| Short-range mesh | **BLE** | High-bandwidth inter-node data transfer (up to 504 bytes/packet) |
-| Long-range mesh | **LoRa** (SX1276) | Extended-range fallback for discovery and small payloads (up to 247 bytes/packet) |
-| Cloud gateway | **WiFi + MQTT-SN** | Opportunistic data exfiltration when internet is available |
+| Layer            | Protocol           | Role                                                                              |
+| ---------------- | ------------------ | --------------------------------------------------------------------------------- |
+| Short-range mesh | **BLE**            | High-bandwidth inter-node data transfer (up to 504 bytes/packet)                  |
+| Long-range mesh  | **LoRa** (SX1276)  | Extended-range fallback for discovery and small payloads (up to 247 bytes/packet) |
+| Cloud gateway    | **WiFi + MQTT-SN** | Opportunistic data exfiltration when internet is available                        |
 
 ### How It Works
 
@@ -77,10 +77,10 @@ forest-link-protocol/
 
 This project enforces the [Barr-C:2018 Embedded C Coding Standard](https://barrgroup.com/embedded-systems/books/embedded-c-coding-standard) via `.clang-format` and VS Code settings. Install the following extensions:
 
-| Extension | ID | Purpose |
-|---|---|---|
-| **clangd** | `llvm-vs-code-extensions.vscode-clangd` | C language server, format-on-save using `.clang-format` |
-| **C/C++** | `ms-vscode.cpptools` | C++ language server, format-on-save using `.clang-format` |
+| Extension  | ID                                      | Purpose                                                   |
+| ---------- | --------------------------------------- | --------------------------------------------------------- |
+| **clangd** | `llvm-vs-code-extensions.vscode-clangd` | C language server, format-on-save using `.clang-format`   |
+| **C/C++**  | `ms-vscode.cpptools`                    | C++ language server, format-on-save using `.clang-format` |
 
 The `.vscode/settings.json` committed to the repo enables format-on-save so all C/C++ files are automatically formatted to Barr-C style (Allman braces, 4-space indent, 80-column limit, pointer-right alignment). No manual setup needed — just install the extensions and open the workspace.
 
@@ -152,14 +152,14 @@ bash idf.sh <command> [options]
 
 Common commands:
 
-| Command | Description |
-|---------|-------------|
-| `bash idf.sh build` | Compile the firmware |
-| `bash idf.sh flash` | Flash to connected ESP32 |
-| `bash idf.sh monitor` | Open serial monitor |
-| `bash idf.sh flash monitor` | Flash then immediately monitor |
-| `bash idf.sh menuconfig` | Open Kconfig configuration UI |
-| `bash idf.sh fullclean` | Delete build directory and start fresh |
+| Command                       | Description                              |
+| ----------------------------- | ---------------------------------------- |
+| `bash idf.sh build`           | Compile the firmware                     |
+| `bash idf.sh flash`           | Flash to connected ESP32                 |
+| `bash idf.sh monitor`         | Open serial monitor                      |
+| `bash idf.sh flash monitor`   | Flash then immediately monitor           |
+| `bash idf.sh menuconfig`      | Open Kconfig configuration UI            |
+| `bash idf.sh fullclean`       | Delete build directory and start fresh   |
 | `bash idf.sh size-components` | Show per-component binary size breakdown |
 
 If your ESP-IDF is installed somewhere other than `~/esp/esp-idf`, edit the `source` path at the top of `flp-node/idf.sh`.
@@ -168,11 +168,11 @@ If your ESP-IDF is installed somewhere other than `~/esp/esp-idf`, edit the `sou
 
 The `cloud-admin/deploy.sh` script automates the full gateway stack on a Raspberry Pi:
 
-| Component | Description | Port |
-|-----------|-------------|------|
-| **Mosquitto** | MQTT broker | TCP 1883 |
-| **MQTT-SN Gateway** | Eclipse Paho UDP→MQTT translator | UDP 1885 |
-| **FLP MQTT Admin** | Python file transfer manager | connects to localhost:1883 |
+| Component           | Description                      | Port                       |
+| ------------------- | -------------------------------- | -------------------------- |
+| **Mosquitto**       | MQTT broker                      | TCP 1883                   |
+| **MQTT-SN Gateway** | Eclipse Paho UDP→MQTT translator | UDP 1885                   |
+| **FLP MQTT Admin**  | Python file transfer manager     | connects to localhost:1883 |
 
 ### Quick Start
 
@@ -217,11 +217,11 @@ Received files are saved to `cloud-admin/received_files/`.
 
 ## Team
 
-| Name | SIT ID |
-|------|--------|
-| Po Haoting | 2401280 |
-| Ong Tun Siang | 2402091 |
-| Kenny Leck | 2403543 |
+| Name           | SIT ID  |
+| -------------- | ------- |
+| Po Haoting     | 2401280 |
+| Ong Tun Siang  | 2402091 |
+| Kenny Leck     | 2403543 |
 | Chia Wei Sheng | 2400953 |
 
 ## License

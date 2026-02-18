@@ -53,7 +53,7 @@ Network Resilience: Providing a fail-safe communication framework that remains "
 4. What specific gap or challenge in the field does this work address?
 This work addresses the gap between Low-Power Wide-Area Networks (LPWAN) and High-Speed Wireless Local Area Networks (WLAN).
 The Bandwidth Gap: LoRaWAN is restricted by 1% duty cycles and low bitrates, making a 3MB file transfer take days.
-The Reliability Gap: Standard TCP/IP meshes suffer from "Management Collapse" in forests; if the WiFi link drops, the entire protocol state fails. 
+The Reliability Gap: Standard TCP/IP meshes suffer from "Management Collapse" in forests; if the WiFi link drops, the entire protocol state fails.
 The Power and Range Trade-off: Existing solutions do not implement adaptive switching between BLE (power-efficient short-range) and LoRa (power-hungry long-range) based on network conditions, forcing them to only use one protocol with relatively low efficiency.
 
 FLP v3.7 fills this gap by using an Adaptive Multi-Protocol Architecture that intelligently switches between BLE and LoRa for internal mesh communications based on power budget, hop count, and RSSI, while reserving Wi-Fi for MQTT-based external data exfiltration when connected to the internet.
@@ -97,7 +97,7 @@ Out of N the nodes within the mesh, there is at least one node that is capable o
 The assumption is that in a real-world environment, this ESP32 node is located near a place with internet connection, or mobile data access via 5G/4G
 
 Data transfer does not need to be immediate; however, it should be able to deliver data back to the cloud in a reasonable amount of time, compared to using existing protocols such as LoRa to transfer data over long ranges.
-All ESP32 nodes are running an MQTT-SN Client and store a lookup table that is synchronised with the MQTT Admin (cloud) to ensure publishes are sent to the correct nodes. 
+All ESP32 nodes are running an MQTT-SN Client and store a lookup table that is synchronised with the MQTT Admin (cloud) to ensure publishes are sent to the correct nodes.
 Data transfer on the meshes will transfer one file at a time, not multiple
 
 Data Transfer (Forest -> Cloud)
@@ -108,7 +108,7 @@ When there is data that needs to be transmitted from an ESP32 node to the intern
 Once the Nodes have been elected for data transfer, they become exit nodes, where they will forward data over to the MQTT Gateway using the lightweight MQTT-SN protocol, and Node A will start to send fragmented data packets over to D and C, using Bluetooth or LoRa, where the choice of protocol selection is based on factors such as Power Budget, Priority, Available connection. If Bluetooth is selected, intermediate nodes will become relays to pass the data over to the exit nodes.
 
 
-The MQTT-SN adopts a selective repeat sliding window algorithm for flow control and to handle missing packets. Where the MQTT Admin is in charge of 
+The MQTT-SN adopts a selective repeat sliding window algorithm for flow control and to handle missing packets. Where the MQTT Admin is in charge of
 Reconstructing fragmented packets
 Discarding duplicates
 Reconstructing the original data (i.e. image, etc.)
@@ -133,8 +133,7 @@ Functional Requirements
 [FR-MQTT1] The MQTT Admin must be capable of publishing and subscribing to topics
 [FR-MQTT2] The MQTT Admin must be capable of maintaining a selective repeat sliding window during data transfers
 [FR-MQTT3] The MQTT Admin will retain a FIFO Queue of pending file transfers, and the Mesh Network shall not transfer multiple files at once. With the MQTT Admin controlling the file transfer flow, to ensure data integrity.
-[FR-MQTT4] The ESP32 Node’s MQTT-SN client must be capable of supporting different Quality of Service (QoS) levels, to ensure network reliability 
+[FR-MQTT4] The ESP32 Node’s MQTT-SN client must be capable of supporting different Quality of Service (QoS) levels, to ensure network reliability
 Non-Functional Requirements
 [NFR-MESH1] The Mesh network must be capable of delivering a 1MB file over the mesh into the MQTT cloud within 20 minutes.
 [NFR-MESH2] The ESP32 Nodes packet processing must be interrupt-driven, and not polling-driven
-

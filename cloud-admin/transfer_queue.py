@@ -36,7 +36,8 @@ class TransferQueue:
             total_size=total_size, chunk_count=chunk_count, crc32=crc32
         )
         self.queue.append(session)
-        print(f"[Queue] Enqueued transfer: {filename} from node {node_id} ({total_size} bytes, {chunk_count} chunks)")
+        print(
+            f"[Queue] Enqueued transfer: {filename} from node {node_id} ({total_size} bytes, {chunk_count} chunks)")
         if self.active_transfer is None:
             self.start_next()
         return session
@@ -47,10 +48,12 @@ class TransferQueue:
             return None
         self.active_transfer = self.queue.popleft()
         self.active_transfer.started_at = time.time()
-        print(f"[Queue] Starting transfer: {self.active_transfer.filename} from {self.active_transfer.node_id}")
+        print(
+            f"[Queue] Starting transfer: {self.active_transfer.filename} from {self.active_transfer.node_id}")
         # Send START command to node
         if self.cmd_callback:
-            self.cmd_callback(self.active_transfer.node_id, "START", self.active_transfer.session_id)
+            self.cmd_callback(self.active_transfer.node_id,
+                              "START", self.active_transfer.session_id)
         return self.active_transfer
 
     def complete_active(self):
@@ -58,7 +61,8 @@ class TransferQueue:
         if self.active_transfer:
             self.active_transfer.completed_at = time.time()
             elapsed = self.active_transfer.completed_at - self.active_transfer.started_at
-            print(f"[Queue] Transfer complete: {self.active_transfer.filename} in {elapsed:.1f}s")
+            print(
+                f"[Queue] Transfer complete: {self.active_transfer.filename} in {elapsed:.1f}s")
             self.completed.append(self.active_transfer)
             self.active_transfer = None
             self.start_next()
