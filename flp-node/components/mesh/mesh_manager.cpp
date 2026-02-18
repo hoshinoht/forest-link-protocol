@@ -24,9 +24,6 @@ using namespace flp;
 
 static const char *TAG = "mesh_mgr";
 
-// Intent broadcast timeout before retry
-static constexpr int64_t INTENT_TIMEOUT_US = 5000000LL; // 5 seconds
-
 // ── Task 1: WiFi status setter ──────────────────────────────────────────────
 
 void MeshManager::set_has_internet(bool v)
@@ -76,6 +73,14 @@ void MeshManager::init()
                const uint8_t *data,
                size_t len)
         {
+            if (PACKET_HEADER_SIZE + len > MAX_MTU)
+            {
+                ESP_LOGW(TAG,
+                         "ARQ send: payload %zu exceeds MAX_MTU, dropping",
+                         len);
+                return;
+            }
+
             uint8_t buf[MAX_MTU];
             PacketHeader hdr = {};
             hdr.set_ver_type(PROTOCOL_VERSION, type);
@@ -158,11 +163,18 @@ void MeshManager::run()
             xQueueSend(packet_queue_, &rpkt, 0);
         }
 
-        // Process unified queue — short timeout to keep periodic tasks
-        // responsive
+        // Process unified queue — drain up to 8 packets per iteration to
+        // avoid starving packet processing under burst (NFR-MESH2).
+        // First receive uses a short timeout to keep periodic tasks
+        // responsive; subsequent receives in the batch are non-blocking.
         RxPacket pkt;
-        if (xQueueReceive(packet_queue_, &pkt, pdMS_TO_TICKS(100)) == pdTRUE)
+        for (uint8_t drain = 0; drain < 8; drain++)
         {
+            TickType_t wait = (drain == 0) ? pdMS_TO_TICKS(100) : 0;
+            if (xQueueReceive(packet_queue_, &pkt, wait) != pdTRUE)
+            {
+                break;
+            }
             process_packet(pkt);
         }
 
@@ -176,8 +188,13 @@ void MeshManager::run()
             discovery_timer_ms_ = now;
         }
 
-        // Prune stale neighbors (30s timeout)
-        route_table_.prune_stale(30000);
+        // Prune stale neighbors (30s timeout) — only every 5 seconds to
+        // avoid O(n) scan on every loop iteration.
+        if (now - prune_timer_ms_ > 5000)
+        {
+            route_table_.prune_stale(30000);
+            prune_timer_ms_ = now;
+        }
 
         // ARQ tick for timeout retransmits
         arq_.tick();
@@ -243,6 +260,12 @@ void MeshManager::process_packet(const RxPacket &pkt)
 
     PacketHeader hdr;
     memcpy(&hdr, pkt.data, PACKET_HEADER_SIZE);
+
+    // Drop our own packets (e.g. LoRa broadcast echoes back to sender)
+    if (hdr.src_addr == my_addr_)
+    {
+        return;
+    }
 
     if (hdr.version() != PROTOCOL_VERSION)
     {
@@ -329,9 +352,11 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         route_table_.set_has_internet(hdr.src_addr, true);
     }
 
-    // Store hops_to_internet from discovery payload into route table
-    route_table_.update_neighbor(
-        hdr.src_addr, disc.rssi, 1, false, true, disc.hops_to_internet);
+    // Store hops_to_internet from the discovery payload.
+    // process_packet already called update_neighbor with the correct
+    // transport/RSSI/hops from the RxPacket, so we must not call
+    // update_neighbor again with hardcoded values that would overwrite them.
+    route_table_.set_hops_to_internet(hdr.src_addr, disc.hops_to_internet);
 
     // Respond with our own discovery (unicast back)
     DiscoveryPayload resp = {};
@@ -376,6 +401,10 @@ void MeshManager::handle_transfer_ad(const PacketHeader &hdr,
              ad.file_size,
              ad.fragment_count);
 
+    // Store the filename so handle_data can publish it via MQTT (Bug 6)
+    strncpy(transfer_.filename, ad.filename, sizeof(transfer_.filename) - 1);
+    transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
+
     // If we have internet, respond as exit node candidate
     if (has_internet_)
     {
@@ -389,7 +418,11 @@ void MeshManager::handle_transfer_ad(const PacketHeader &hdr,
                     reinterpret_cast<const uint8_t *>(&ack),
                     sizeof(ack));
 
-        // Prepare receiver for incoming file transfer
+        // TODO: init_receiver is called before election confirmation, so
+        // PSRAM is allocated here even if this node is not ultimately
+        // elected as the exit node. Fixing this properly requires a
+        // protocol-level handshake (e.g. a TRANSFER_START unicast from the
+        // sender after election completes).
         arq_.init_receiver(ad.fragment_count, ad.fragment_size, ad.file_size);
         arq_.set_peer_addr(hdr.src_addr);
 
@@ -513,10 +546,14 @@ void MeshManager::send_discovery()
     }
     disc.rssi = 0;
 
-    // Task 2: Use broadcast retry instead of single send
-    send_broadcast_with_retry(PacketType::DISCOVERY,
-                              reinterpret_cast<const uint8_t *>(&disc),
-                              sizeof(disc));
+    // Single send — discovery is already periodic (every 10s), so retrying
+    // here would block the main loop for up to 3.5s unnecessarily.
+    // send_broadcast_with_retry is reserved for infrequent TRANSFER_AD
+    // broadcasts where the extra reliability is worth the delay.
+    send_packet(BROADCAST_ADDR,
+                PacketType::DISCOVERY,
+                reinterpret_cast<const uint8_t *>(&disc),
+                sizeof(disc));
 
     ESP_LOGD(TAG,
              "Sent discovery broadcast (hops_to_inet=%u)",
@@ -649,6 +686,14 @@ void MeshManager::send_packet(uint16_t dst,
                               const uint8_t *payload,
                               size_t payload_len)
 {
+    if (PACKET_HEADER_SIZE + payload_len > MAX_MTU)
+    {
+        ESP_LOGW(TAG,
+                 "send_packet: payload %zu exceeds MAX_MTU, dropping",
+                 payload_len);
+        return;
+    }
+
     uint8_t buf[MAX_MTU];
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, type);

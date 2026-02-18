@@ -155,6 +155,7 @@ class MeshManager
     EventGroupHandle_t events_ = nullptr;
     uint16_t my_addr_ = 0;
     uint32_t discovery_timer_ms_ = 0;
+    uint32_t prune_timer_ms_ = 0;
     bool has_internet_ = false;
     uint8_t lora_rx_priority_ = 5;
 

@@ -194,6 +194,20 @@ class RouteTable
         xSemaphoreGive(mutex_);
     }
 
+    void set_hops_to_internet(uint16_t addr, uint8_t hops)
+    {
+        xSemaphoreTake(mutex_, portMAX_DELAY);
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == addr)
+            {
+                neighbors_[i].hops_to_internet = hops;
+                break;
+            }
+        }
+        xSemaphoreGive(mutex_);
+    }
+
     uint8_t min_hops_to_internet() const
     {
         xSemaphoreTake(mutex_, portMAX_DELAY);
