@@ -44,5 +44,8 @@
     "*.h": "c",
     "*.hpp": "cpp",
     "*.cpp": "cpp"
-  }
+},
+"[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one"
+}
 }

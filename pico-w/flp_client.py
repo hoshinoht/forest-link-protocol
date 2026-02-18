@@ -15,12 +15,12 @@ from machine import UART, Pin
 
 # Frame commands
 CMD_FILE_BEGIN = 0x01
-CMD_FILE_DATA  = 0x02
-CMD_FILE_END   = 0x03
-CMD_STATUS     = 0x04
+CMD_FILE_DATA = 0x02
+CMD_FILE_END = 0x03
+CMD_STATUS = 0x04
 
-RESP_ACK         = 0x80
-RESP_NACK        = 0x81
+RESP_ACK = 0x80
+RESP_NACK = 0x81
 RESP_STATUS_RESP = 0x82
 
 SYNC1 = 0xAA
@@ -31,7 +31,8 @@ CHUNK_SIZE = 1024
 
 class FLPClient:
     def __init__(self, uart_id=0, tx_pin=0, rx_pin=1, baud=115200):
-        self.uart = UART(uart_id, baudrate=baud, tx=Pin(tx_pin), rx=Pin(rx_pin))
+        self.uart = UART(uart_id, baudrate=baud,
+                         tx=Pin(tx_pin), rx=Pin(rx_pin))
 
     def _send_frame(self, cmd, payload=b""):
         header = struct.pack("<BBBh", SYNC1, SYNC2, cmd, len(payload))

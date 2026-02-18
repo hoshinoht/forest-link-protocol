@@ -13,11 +13,11 @@ Pico W                          ESP32
 └──────────┘                    └──────────────┘
 ```
 
-| Pico W Pin | Wire  | ESP32 Pin         | Notes             |
-|------------|-------|-------------------|-------------------|
-| GP0        | TX →  | GPIO16            | Pico TX to ESP RX |
-| GP1        | ← RX  | GPIO17            | ESP TX to Pico RX |
-| GND        | ——    | GND               | Common ground     |
+| Pico W Pin | Wire | ESP32 Pin | Notes             |
+| ---------- | ---- | --------- | ----------------- |
+| GP0        | TX → | GPIO16    | Pico TX to ESP RX |
+| GP1        | ← RX | GPIO17    | ESP TX to Pico RX |
+| GND        | ——   | GND       | Common ground     |
 
 > **No power connection.** Each board is powered by its own USB cable.
 > Do NOT connect 3V3 between the two boards — both run 3.3V logic, but
@@ -81,9 +81,9 @@ I (uart_ingest): FILE_END: "hello.txt" received 18/18 bytes
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Timeout waiting for ACK | Check TX/RX aren't swapped. TX→RX means Pico GP0 goes to ESP32 GPIO16. |
-| Garbage / framing errors | Confirm both sides are 115200 baud, 8N1. |
-| No output on ESP32 | Make sure GND is connected. UART won't work without a common ground. |
-| NACK with error 0x01 | PSRAM allocation failed. Check the ESP32 has SPIRAM enabled in menuconfig. |
+| Symptom                  | Fix                                                                        |
+| ------------------------ | -------------------------------------------------------------------------- |
+| Timeout waiting for ACK  | Check TX/RX aren't swapped. TX→RX means Pico GP0 goes to ESP32 GPIO16.     |
+| Garbage / framing errors | Confirm both sides are 115200 baud, 8N1.                                   |
+| No output on ESP32       | Make sure GND is connected. UART won't work without a common ground.       |
+| NACK with error 0x01     | PSRAM allocation failed. Check the ESP32 has SPIRAM enabled in menuconfig. |

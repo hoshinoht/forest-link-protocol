@@ -42,7 +42,8 @@ class FileReassembler:
 
     def verify_crc(self):
         """Verify CRC32 of reassembled data against expected value."""
-        actual = binascii.crc32(bytes(self.buffer[:self.total_size])) & 0xFFFFFFFF
+        actual = binascii.crc32(
+            bytes(self.buffer[:self.total_size])) & 0xFFFFFFFF
         return actual == self.expected_crc
 
     def save(self, output_dir="./received_files"):

@@ -54,7 +54,8 @@ class FlpMqttAdmin:
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
-            print(f"[MQTT] Connected to broker at {self.broker_host}:{self.broker_port}")
+            print(
+                f"[MQTT] Connected to broker at {self.broker_host}:{self.broker_port}")
             # FR-MQTT1: Subscribe to node topics
             client.subscribe("flp/+/file/meta", qos=1)
             client.subscribe("flp/+/file/data", qos=1)
@@ -92,7 +93,8 @@ class FlpMqttAdmin:
             self.nodes[node_id] = {**status, "last_seen": time.time()}
             print(f"[Status] Node {node_id}: {status}")
         except json.JSONDecodeError:
-            print(f"[Status] Node {node_id}: {payload.decode('utf-8', errors='replace')}")
+            print(
+                f"[Status] Node {node_id}: {payload.decode('utf-8', errors='replace')}")
 
     def _handle_file_meta(self, node_id, payload):
         """Handle file transfer metadata — enqueue transfer."""
@@ -104,10 +106,12 @@ class FlpMqttAdmin:
             chunk_count = meta["chunk_count"]
             crc32 = meta.get("crc32", 0)
 
-            print(f"[Meta] File transfer from {node_id}: {filename} ({total_size} bytes, {chunk_count} chunks)")
+            print(
+                f"[Meta] File transfer from {node_id}: {filename} ({total_size} bytes, {chunk_count} chunks)")
 
             with self._lock:
-                session = self.transfer_queue.enqueue(session_id, node_id, filename, total_size, chunk_count, crc32)
+                session = self.transfer_queue.enqueue(
+                    session_id, node_id, filename, total_size, chunk_count, crc32)
 
                 # If this is now the active transfer, set up reassembler and SR
                 if self.transfer_queue.active_transfer and self.transfer_queue.active_transfer.session_id == session_id:
@@ -125,7 +129,8 @@ class FlpMqttAdmin:
             expected_crc=session.crc32
         )
         self.sr.start_session(session.chunk_count)
-        print(f"[Transfer] Active: {session.filename} — waiting for {session.chunk_count} chunks")
+        print(
+            f"[Transfer] Active: {session.filename} — waiting for {session.chunk_count} chunks")
 
     def _handle_file_data(self, node_id, payload):
         """Handle file data chunk."""
@@ -150,7 +155,8 @@ class FlpMqttAdmin:
                 # Progress update
                 progress = self.reassembler.progress()
                 if int(progress) % 10 == 0 and int(progress) != 0:
-                    print(f"[Transfer] {self.reassembler.filename}: {progress:.1f}% ({self.reassembler.chunks_received}/{self.reassembler.chunk_count})")
+                    print(
+                        f"[Transfer] {self.reassembler.filename}: {progress:.1f}% ({self.reassembler.chunks_received}/{self.reassembler.chunk_count})")
 
             # Check completion
             if self.reassembler.is_complete():
@@ -160,10 +166,12 @@ class FlpMqttAdmin:
         """Handle completed file transfer."""
         if self.reassembler.verify_crc():
             path = self.reassembler.save()
-            print(f"[Transfer] SUCCESS: {self.reassembler.filename} saved to {path} (CRC verified)")
+            print(
+                f"[Transfer] SUCCESS: {self.reassembler.filename} saved to {path} (CRC verified)")
         else:
             path = self.reassembler.save()
-            print(f"[Transfer] WARNING: {self.reassembler.filename} saved to {path} (CRC MISMATCH)")
+            print(
+                f"[Transfer] WARNING: {self.reassembler.filename} saved to {path} (CRC MISMATCH)")
 
         self.reassembler = None
         self.transfer_queue.complete_active()
@@ -179,15 +187,18 @@ class FlpMqttAdmin:
 
     def _send_command(self, node_id, command, session_id):
         """Publish control command to flp/admin/cmd."""
-        payload = json.dumps({"command": command, "node_id": node_id, "session_id": session_id})
+        payload = json.dumps(
+            {"command": command, "node_id": node_id, "session_id": session_id})
         self.client.publish("flp/admin/cmd", payload, qos=1)
-        print(f"[Cmd] Sent {command} to node {node_id} for session {session_id}")
+        print(
+            f"[Cmd] Sent {command} to node {node_id} for session {session_id}")
 
     def run(self):
         """Main loop."""
         self._running = True
 
-        print(f"[Admin] Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
+        print(
+            f"[Admin] Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
 
@@ -223,9 +234,12 @@ class FlpMqttAdmin:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="FLP MQTT Admin — Cloud-side file transfer manager")
-    parser.add_argument("--broker", "-b", default="localhost", help="MQTT broker hostname (default: localhost)")
-    parser.add_argument("--port", "-p", type=int, default=1883, help="MQTT broker port (default: 1883)")
+    parser = argparse.ArgumentParser(
+        description="FLP MQTT Admin — Cloud-side file transfer manager")
+    parser.add_argument("--broker", "-b", default="localhost",
+                        help="MQTT broker hostname (default: localhost)")
+    parser.add_argument("--port", "-p", type=int, default=1883,
+                        help="MQTT broker port (default: 1883)")
     args = parser.parse_args()
 
     admin = FlpMqttAdmin(broker_host=args.broker, broker_port=args.port)
