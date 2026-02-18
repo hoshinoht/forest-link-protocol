@@ -33,10 +33,36 @@ menu "Forest Link Protocol"
             default 26
     endmenu
 
+    config FLP_WIFI_SSID
+        string "WiFi SSID"
+        default "ForestLink_AP"
+        help
+            SSID of the WiFi access point for MQTT cloud connectivity.
+
+    config FLP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "forestlink"
+        help
+            Password for the WiFi access point.
+
     config FLP_MQTT_BROKER_URI
         string "MQTT Broker URI"
         default "mqtt://broker.local"
         help
             URI of the MQTT broker for cloud gateway connectivity.
+
+    menu "UART Ingest API"
+        config FLP_UART_TX_PIN
+            int "TX GPIO"
+            default 17
+
+        config FLP_UART_RX_PIN
+            int "RX GPIO"
+            default 16
+    endmenu
+
+    config FLP_DEMO_BUTTON_PIN
+        int "Demo button GPIO"
+        default 0
 
 endmenu

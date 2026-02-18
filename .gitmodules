@@ -1,3 +1,0 @@
-[submodule "mqttsn-picow"]
-	path = mqttsn-picow
-	url = git@github.com:hoshinoht/mqttsn-picow.git

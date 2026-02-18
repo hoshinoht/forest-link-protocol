@@ -17,96 +17,158 @@
 //   ProtocolSelector::select() — shared component
 // =============================================================================
 
-#include <cstdint>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/event_groups.h"
-
-#include "packet.hpp"
-#include "route_table.hpp"
 #include "ble_transport.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "lora_transport.hpp"
+#include "packet.hpp"
 #include "protocol_selector.hpp"
-#include "mqtt_sn_client.hpp"
+#include "route_table.hpp"
+#include "selective_repeat.hpp"
 
-namespace flp {
+#define FLP_EVT_WIFI_CONNECTED    BIT0
+#define FLP_EVT_TRANSFER_COMPLETE BIT1
+#define FLP_EVT_EXIT_NODE_ELECTED BIT2
 
-// =============================================================================
-// Raw packet envelope — what sits in the FreeRTOS RX queue (NFR-MESH2)
-// Posted by BLE/LoRa transport callbacks, consumed by run()
-// =============================================================================
-struct RxEnvelope {
-    uint8_t   data[256];
-    size_t    len;
-    int8_t    rssi;
-    Transport transport;
+namespace flp
+{
+
+class MqttSnClient; // forward declaration
+
+enum class RxTransport : uint8_t
+{
+    BLE,
+    LORA,
 };
 
-// =============================================================================
-// MeshManager
-// =============================================================================
-class MeshManager {
-public:
+struct RxPacket
+{
+    uint8_t data[MAX_MTU];
+    size_t len;
+    int8_t rssi;
+    RxTransport source;
+};
+
+// Exit node election candidate
+struct ExitCandidate
+{
+    uint16_t addr;
+    int8_t rssi_to_gw;
+    uint8_t hops_to_gw;
+};
+
+// Active file transfer state (sender side)
+struct ActiveTransfer
+{
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    uint16_t fragment_count = 0;
+    uint16_t fragment_size = 0;
+    uint16_t next_fragment = 0;
+    uint16_t exit_node = 0;
+    char filename[20] = {};
+    bool active = false;
+};
+
+class MeshManager
+{
+  public:
     MeshManager() = default;
 
-    // Called once from app_main() before tasks start
-    void init(BleTransport *ble, LoraTransport *lora,
-              ProtocolSelector *selector, MqttSnClient *mqtt);
+    void init();
+    void run(); // main loop -- called from FreeRTOS task
 
-    // FreeRTOS task entry point — called from mesh_task in main.cpp
-    void run();
+    // Task 1: WiFi status wiring
+    void set_has_internet(bool v);
 
-    // Called by BLE/LoRa transport RX callbacks to feed packets in
-    // Safe to call from any task context (uses xQueueSend, not blocking)
-    void on_packet_received(const uint8_t *data, size_t len,
-                            int8_t rssi, Transport transport);
+    // Task 5: File transfer API
+    void
+    start_file_transfer(const char *filename, const uint8_t *data, size_t size);
 
-private:
-    // Transport + service handles
-    BleTransport     *ble_      = nullptr;
-    LoraTransport    *lora_     = nullptr;
-    ProtocolSelector *selector_ = nullptr;
-    MqttSnClient     *mqtt_     = nullptr;
+    // Task 6: MQTT bridge wiring
+    void set_mqtt_client(MqttSnClient *client)
+    {
+        mqtt_client_ = client;
+    }
 
-    // This node's 16-bit address (derived from MAC in init())
-    uint16_t node_addr_ = 0;
+    void set_lora_rx_priority(uint8_t p)
+    {
+        lora_rx_priority_ = p;
+    }
 
-    // NFR-MESH2: incoming packets arrive here from ISR/transport callbacks
-    QueueHandle_t rx_queue_ = nullptr;
+    QueueHandle_t get_packet_queue() const
+    {
+        return packet_queue_;
+    }
+    uint16_t get_addr() const
+    {
+        return my_addr_;
+    }
+    EventGroupHandle_t get_events() const
+    {
+        return events_;
+    }
 
-    // Neighbour table — updated whenever we hear a packet
-    RouteTable routes_;
+    void send_packet(uint16_t dst,
+                     PacketType type,
+                     const uint8_t *payload,
+                     size_t payload_len);
 
-    // FR-MESH7: track intent broadcast state
-    struct IntentState {
-        bool     active;
-        uint32_t transfer_id;
-        uint8_t  retries;        // how many broadcasts sent so far
-        int64_t  last_sent_us;   // esp_timer_get_time() at last broadcast
-    } intent_ = {};
+  private:
+    void process_packet(const RxPacket &pkt);
+    void handle_discovery(const PacketHeader &hdr,
+                          const uint8_t *payload,
+                          size_t payload_len);
+    void handle_transfer_ad(const PacketHeader &hdr,
+                            const uint8_t *payload,
+                            size_t payload_len);
+    void handle_transfer_ack(const PacketHeader &hdr,
+                             const uint8_t *payload,
+                             size_t payload_len);
+    void handle_data(const PacketHeader &hdr,
+                     const uint8_t *payload,
+                     size_t payload_len);
+    void forward_packet(const RxPacket &pkt, const PacketHeader &hdr);
+    void send_discovery();
+    void send_broadcast_with_retry(PacketType type,
+                                   const uint8_t *payload,
+                                   size_t payload_len,
+                                   uint8_t max_retries = 3);
+    void transfer_tick();
+    void send_raw(Transport transport,
+                  const uint8_t *data,
+                  size_t len,
+                  uint16_t peer_addr);
 
-    // --- FR-MESH4 ---
-    void handle_transfer_ad(const PacketHeader *hdr, const uint8_t *payload);
-    void reply_as_exit_node(const PacketHeader *req_hdr, const uint8_t *payload);
-    bool has_mqtt_access();
+    RouteTable route_table_;
+    BleTransport ble_;
+    LoraTransport lora_;
+    ProtocolSelector protocol_selector_;
+    SelectiveRepeat arq_;
 
-    // --- FR-MESH6 ---
-    // Returns 0 on success
-    int adaptive_send(uint16_t dst_addr, const uint8_t *data,
-                      size_t len, uint8_t priority);
+    QueueHandle_t packet_queue_ = nullptr;
+    EventGroupHandle_t events_ = nullptr;
+    uint16_t my_addr_ = 0;
+    uint32_t discovery_timer_ms_ = 0;
+    bool has_internet_ = false;
+    uint8_t lora_rx_priority_ = 5;
 
-    // --- FR-MESH7 ---
-    void broadcast_intent(uint32_t transfer_id, uint32_t file_size, uint8_t priority);
+    // Task 4: Exit node election state
+    std::array<ExitCandidate, 4> candidates_ = {};
+    uint8_t candidate_count_ = 0;
+    uint32_t election_start_ms_ = 0;
+    bool election_active_ = false;
 
-    // --- FR-MESH8 ---
-    void handle_data_fragment(const PacketHeader *hdr,
-                              const uint8_t *payload, size_t payload_len);
-    void relay_packet(const uint8_t *raw, size_t len);
+    // Task 5: Active file transfer state
+    ActiveTransfer transfer_ = {};
 
-    // Central dispatcher — reads packet type and calls the right handler
-    void dispatch(const RxEnvelope &env);
+    // Task 6: MQTT bridge
+    MqttSnClient *mqtt_client_ = nullptr;
 };
 
 } // namespace flp
