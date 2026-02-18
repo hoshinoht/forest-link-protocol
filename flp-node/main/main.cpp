@@ -1,19 +1,18 @@
 #include <cstdio>
 #include <cstring>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "esp_event.h"
 #include "driver/gpio.h"
-
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
 #include "flp_config.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "mesh_manager.hpp"
 #include "mqtt_sn_client.hpp"
+#include "nvs_flash.h"
 #include "protocol_selector.hpp"
 #include "uart_ingest.hpp"
 
@@ -43,33 +42,45 @@ static void IRAM_ATTR button_isr_handler(void *arg)
 static void button_task(void *arg)
 {
     auto *mgr = static_cast<flp::MeshManager *>(arg);
-    while (true) {
+    while (true)
+    {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         TickType_t now = xTaskGetTickCount();
-        if ((now - s_last_button_press) < pdMS_TO_TICKS(FLP_BUTTON_DEBOUNCE_MS)) {
+        if ((now - s_last_button_press) < pdMS_TO_TICKS(FLP_BUTTON_DEBOUNCE_MS))
+        {
             continue;
         }
         s_last_button_press = now;
 
-        ESP_LOGI(TAG, "Demo transfer: demo.txt (%u bytes)", sizeof(DEMO_PAYLOAD));
-        mgr->start_file_transfer("demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
+        ESP_LOGI(
+            TAG, "Demo transfer: demo.txt (%u bytes)", sizeof(DEMO_PAYLOAD));
+        mgr->start_file_transfer(
+            "demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
     }
 }
 
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+static void wifi_event_handler(void *arg,
+                               esp_event_base_t event_base,
+                               int32_t event_id,
+                               void *event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
         esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    }
+    else if (event_base == WIFI_EVENT &&
+             event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
         ESP_LOGW(TAG, "WiFi disconnected, reconnecting...");
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         // Task 1: Wire WiFi status into MeshManager
         mesh_manager.set_has_internet(false);
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         // Task 1: Wire WiFi status into MeshManager
@@ -115,7 +126,9 @@ extern "C" void app_main()
 
     // Initialize NVS (required for WiFi + BLE)
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -136,9 +149,11 @@ extern "C" void app_main()
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
     wifi_config_t wifi_config = {};
-    strncpy((char *)wifi_config.sta.ssid, CONFIG_FLP_WIFI_SSID,
+    strncpy((char *) wifi_config.sta.ssid,
+            CONFIG_FLP_WIFI_SSID,
             sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, CONFIG_FLP_WIFI_PASSWORD,
+    strncpy((char *) wifi_config.sta.password,
+            CONFIG_FLP_WIFI_PASSWORD,
             sizeof(wifi_config.sta.password));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -159,35 +174,61 @@ extern "C" void app_main()
     protocol_selector.init();
 
     // UART ingest API
-    uart_ingest.init(UART_NUM_2, CONFIG_FLP_UART_TX_PIN, CONFIG_FLP_UART_RX_PIN,
+    uart_ingest.init(UART_NUM_2,
+                     CONFIG_FLP_UART_TX_PIN,
+                     CONFIG_FLP_UART_RX_PIN,
                      &mesh_manager);
 
-    xTaskCreate(mesh_task, "mesh_task", FLP_MESH_TASK_STACK, &mesh_manager,
-                FLP_MESH_TASK_PRIORITY, nullptr);
-    xTaskCreate(mqtt_task, "mqtt_task", FLP_MQTT_TASK_STACK, &mqtt_client,
-                FLP_MQTT_TASK_PRIORITY, nullptr);
-    xTaskCreate(protocol_task, "protocol_task", FLP_PROTOCOL_TASK_STACK, &protocol_selector,
-                FLP_PROTOCOL_TASK_PRIORITY, nullptr);
-    xTaskCreate(uart_ingest_task, "uart_ingest", FLP_UART_TASK_STACK, &uart_ingest,
-                FLP_UART_TASK_PRIORITY, nullptr);
+    xTaskCreate(mesh_task,
+                "mesh_task",
+                FLP_MESH_TASK_STACK,
+                &mesh_manager,
+                FLP_MESH_TASK_PRIORITY,
+                nullptr);
+    xTaskCreate(mqtt_task,
+                "mqtt_task",
+                FLP_MQTT_TASK_STACK,
+                &mqtt_client,
+                FLP_MQTT_TASK_PRIORITY,
+                nullptr);
+    xTaskCreate(protocol_task,
+                "protocol_task",
+                FLP_PROTOCOL_TASK_STACK,
+                &protocol_selector,
+                FLP_PROTOCOL_TASK_PRIORITY,
+                nullptr);
+    xTaskCreate(uart_ingest_task,
+                "uart_ingest",
+                FLP_UART_TASK_STACK,
+                &uart_ingest,
+                FLP_UART_TASK_PRIORITY,
+                nullptr);
 
     // Demo button (GPIO ISR + lightweight handler task)
-    xTaskCreate(button_task, "button_task", FLP_BUTTON_TASK_STACK, &mesh_manager,
-                FLP_BUTTON_TASK_PRIORITY, &s_button_task_handle);
+    xTaskCreate(button_task,
+                "button_task",
+                FLP_BUTTON_TASK_STACK,
+                &mesh_manager,
+                FLP_BUTTON_TASK_PRIORITY,
+                &s_button_task_handle);
 
     gpio_config_t btn_cfg = {};
     btn_cfg.pin_bit_mask = 1ULL << CONFIG_FLP_DEMO_BUTTON_PIN;
-    btn_cfg.mode         = GPIO_MODE_INPUT;
-    btn_cfg.pull_up_en   = GPIO_PULLUP_ENABLE;
+    btn_cfg.mode = GPIO_MODE_INPUT;
+    btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
     btn_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    btn_cfg.intr_type    = GPIO_INTR_NEGEDGE;
+    btn_cfg.intr_type = GPIO_INTR_NEGEDGE;
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(gpio_isr_handler_add(
         static_cast<gpio_num_t>(CONFIG_FLP_DEMO_BUTTON_PIN),
-        button_isr_handler, nullptr));
+        button_isr_handler,
+        nullptr));
 
-    ESP_LOGI(TAG, "All tasks created (UART on GPIO %d/%d, button on GPIO %d)",
-             CONFIG_FLP_UART_TX_PIN, CONFIG_FLP_UART_RX_PIN, CONFIG_FLP_DEMO_BUTTON_PIN);
+    ESP_LOGI(TAG,
+             "All tasks created (UART on GPIO %d/%d, button on GPIO %d)",
+             CONFIG_FLP_UART_TX_PIN,
+             CONFIG_FLP_UART_RX_PIN,
+             CONFIG_FLP_DEMO_BUTTON_PIN);
 }

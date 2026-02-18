@@ -1,17 +1,19 @@
 #include "lora_transport.hpp"
-#include "esp_log.h"
 
 #include <cstring>
 
+#include "esp_log.h"
+
 static const char *TAG = "lora_xport";
 
-namespace flp {
+namespace flp
+{
 
 // ── SPI register helpers ─────────────────────────────────────────────────
 
 uint8_t LoraTransport::read_reg(uint8_t addr)
 {
-    uint8_t tx[2] = { (uint8_t)(addr & 0x7F), 0x00 };
+    uint8_t tx[2] = {(uint8_t) (addr & 0x7F), 0x00};
     uint8_t rx[2] = {};
 
     spi_transaction_t t = {};
@@ -28,7 +30,7 @@ uint8_t LoraTransport::read_reg(uint8_t addr)
 
 void LoraTransport::write_reg(uint8_t addr, uint8_t val)
 {
-    uint8_t tx[2] = { (uint8_t)(addr | 0x80), val };
+    uint8_t tx[2] = {(uint8_t) (addr | 0x80), val};
 
     spi_transaction_t t = {};
     t.length = 16;
@@ -84,18 +86,24 @@ void LoraTransport::reset_chip()
 
 void LoraTransport::set_frequency(uint32_t freq_hz)
 {
-    uint32_t frf = (uint32_t)((double)freq_hz / 61.035);
-    write_reg(sx1276::REG_FRF_MSB, (uint8_t)(frf >> 16));
-    write_reg(sx1276::REG_FRF_MID, (uint8_t)(frf >> 8));
-    write_reg(sx1276::REG_FRF_LSB, (uint8_t)(frf));
+    uint32_t frf = (uint32_t) ((double) freq_hz / 61.035);
+    write_reg(sx1276::REG_FRF_MSB, (uint8_t) (frf >> 16));
+    write_reg(sx1276::REG_FRF_MID, (uint8_t) (frf >> 8));
+    write_reg(sx1276::REG_FRF_LSB, (uint8_t) (frf));
 }
 
 void LoraTransport::set_tx_power(int8_t dbm)
 {
     // PA_BOOST pin, max 17 dBm
-    if (dbm < 2) dbm = 2;
-    if (dbm > 17) dbm = 17;
-    write_reg(sx1276::REG_PA_CONFIG, (uint8_t)(0x80 | (dbm - 2)));
+    if (dbm < 2)
+    {
+        dbm = 2;
+    }
+    if (dbm > 17)
+    {
+        dbm = 17;
+    }
+    write_reg(sx1276::REG_PA_CONFIG, (uint8_t) (0x80 | (dbm - 2)));
 }
 
 void LoraTransport::enter_rx_continuous()
@@ -128,15 +136,18 @@ void LoraTransport::rx_task_func(void *arg)
 {
     auto *self = static_cast<LoraTransport *>(arg);
 
-    while (true) {
+    while (true)
+    {
         // Wait for DIO0 interrupt notification
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         uint8_t irq_flags = self->read_reg(sx1276::REG_IRQ_FLAGS);
 
-        if (irq_flags & sx1276::IRQ_RX_DONE) {
+        if (irq_flags & sx1276::IRQ_RX_DONE)
+        {
             // Check for CRC error (bit 5)
-            if (irq_flags & 0x20) {
+            if (irq_flags & 0x20)
+            {
                 ESP_LOGW(TAG, "CRC error, dropping packet");
                 self->write_reg(sx1276::REG_IRQ_FLAGS, sx1276::IRQ_ALL);
                 continue;
@@ -150,7 +161,8 @@ void LoraTransport::rx_task_func(void *arg)
             self->write_reg(sx1276::REG_FIFO_ADDR_PTR, rx_addr);
 
             // Read payload from FIFO
-            if (item.len > 0 && item.len <= LORA_MAX_PACKET) {
+            if (item.len > 0 && item.len <= LORA_MAX_PACKET)
+            {
                 self->read_fifo(item.data, item.len);
             }
 
@@ -173,7 +185,8 @@ void LoraTransport::rx_task_func(void *arg)
 
 void LoraTransport::init(uint8_t rx_task_priority)
 {
-    if (initialized_) {
+    if (initialized_)
+    {
         return;
     }
 
@@ -181,9 +194,9 @@ void LoraTransport::init(uint8_t rx_task_priority)
     rx_queue_ = xQueueCreate(LORA_RX_QUEUE_DEPTH, sizeof(LoraRxItem));
 
     // Pin config
-    cs_pin_   = (gpio_num_t)CONFIG_FLP_LORA_CS;
-    rst_pin_  = (gpio_num_t)CONFIG_FLP_LORA_RST;
-    dio0_pin_ = (gpio_num_t)CONFIG_FLP_LORA_DIO0;
+    cs_pin_ = (gpio_num_t) CONFIG_FLP_LORA_CS;
+    rst_pin_ = (gpio_num_t) CONFIG_FLP_LORA_RST;
+    dio0_pin_ = (gpio_num_t) CONFIG_FLP_LORA_DIO0;
 
     // Configure RST pin as output
     gpio_config_t rst_cfg = {};
@@ -202,7 +215,8 @@ void LoraTransport::init(uint8_t rx_task_priority)
     bus_cfg.max_transfer_sz = 256;
 
     esp_err_t ret = spi_bus_initialize(SPI3_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
         return;
     }
@@ -215,7 +229,8 @@ void LoraTransport::init(uint8_t rx_task_priority)
     dev_cfg.queue_size = 1;
 
     ret = spi_bus_add_device(SPI3_HOST, &dev_cfg, &spi_);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
         return;
     }
@@ -225,8 +240,11 @@ void LoraTransport::init(uint8_t rx_task_priority)
 
     // Verify chip version
     uint8_t version = read_reg(sx1276::REG_VERSION);
-    if (version != 0x12) {
-        ESP_LOGE(TAG, "SX1276 not detected (version=0x%02X, expected 0x12)", version);
+    if (version != 0x12)
+    {
+        ESP_LOGE(TAG,
+                 "SX1276 not detected (version=0x%02X, expected 0x12)",
+                 version);
         return;
     }
     ESP_LOGI(TAG, "SX1276 detected, version=0x%02X", version);
@@ -251,7 +269,8 @@ void LoraTransport::init(uint8_t rx_task_priority)
     write_reg(sx1276::REG_FIFO_RX_BASE, 0x00);
 
     // Create RX task before enabling interrupts
-    xTaskCreate(rx_task_func, "lora_rx", 4096, this, rx_task_priority, &rx_task_);
+    xTaskCreate(
+        rx_task_func, "lora_rx", 4096, this, rx_task_priority, &rx_task_);
 
     // Configure DIO0 interrupt for RxDone
     gpio_config_t dio0_cfg = {};
@@ -274,7 +293,8 @@ void LoraTransport::init(uint8_t rx_task_priority)
 
 void LoraTransport::deinit()
 {
-    if (!initialized_) {
+    if (!initialized_)
+    {
         return;
     }
 
@@ -283,23 +303,27 @@ void LoraTransport::deinit()
 
     // Remove ISR and delete RX task
     gpio_isr_handler_remove(dio0_pin_);
-    if (rx_task_) {
+    if (rx_task_)
+    {
         vTaskDelete(rx_task_);
         rx_task_ = nullptr;
     }
 
     // Free SPI
-    if (spi_) {
+    if (spi_)
+    {
         spi_bus_remove_device(spi_);
         spi_ = nullptr;
     }
     spi_bus_free(SPI3_HOST);
 
-    if (rx_queue_) {
+    if (rx_queue_)
+    {
         vQueueDelete(rx_queue_);
         rx_queue_ = nullptr;
     }
-    if (spi_mutex_) {
+    if (spi_mutex_)
+    {
         vSemaphoreDelete(spi_mutex_);
         spi_mutex_ = nullptr;
     }
@@ -320,16 +344,46 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
 
     // Map BW in Hz to register value
     uint8_t bw_bits;
-    if      (bw_hz <= 7800)   bw_bits = 0x00;
-    else if (bw_hz <= 10400)  bw_bits = 0x10;
-    else if (bw_hz <= 15600)  bw_bits = 0x20;
-    else if (bw_hz <= 20800)  bw_bits = 0x30;
-    else if (bw_hz <= 31250)  bw_bits = 0x40;
-    else if (bw_hz <= 41700)  bw_bits = 0x50;
-    else if (bw_hz <= 62500)  bw_bits = 0x60;
-    else if (bw_hz <= 125000) bw_bits = 0x70;
-    else if (bw_hz <= 250000) bw_bits = 0x80;
-    else                      bw_bits = 0x90; // 500 kHz
+    if (bw_hz <= 7800)
+    {
+        bw_bits = 0x00;
+    }
+    else if (bw_hz <= 10400)
+    {
+        bw_bits = 0x10;
+    }
+    else if (bw_hz <= 15600)
+    {
+        bw_bits = 0x20;
+    }
+    else if (bw_hz <= 20800)
+    {
+        bw_bits = 0x30;
+    }
+    else if (bw_hz <= 31250)
+    {
+        bw_bits = 0x40;
+    }
+    else if (bw_hz <= 41700)
+    {
+        bw_bits = 0x50;
+    }
+    else if (bw_hz <= 62500)
+    {
+        bw_bits = 0x60;
+    }
+    else if (bw_hz <= 125000)
+    {
+        bw_bits = 0x70;
+    }
+    else if (bw_hz <= 250000)
+    {
+        bw_bits = 0x80;
+    }
+    else
+    {
+        bw_bits = 0x90; // 500 kHz
+    }
 
     // ModemConfig1: BW | CodingRate 4/5 (0x02) | implicit header off
     write_reg(sx1276::REG_MODEM_CONFIG1, bw_bits | 0x02);
@@ -355,7 +409,8 @@ void LoraTransport::on_receive(RxCallback cb)
 
 int LoraTransport::send(const uint8_t *data, size_t len)
 {
-    if (len > LORA_MAX_PACKET) {
+    if (len > LORA_MAX_PACKET)
+    {
         ESP_LOGE(TAG, "Payload too large: %zu > %zu", len, LORA_MAX_PACKET);
         return -1;
     }
@@ -375,7 +430,7 @@ int LoraTransport::send(const uint8_t *data, size_t len)
     write_fifo(data, len);
 
     // Set payload length
-    write_reg(sx1276::REG_PAYLOAD_LENGTH, (uint8_t)len);
+    write_reg(sx1276::REG_PAYLOAD_LENGTH, (uint8_t) len);
 
     // Map DIO0 to TxDone (bits 7:6 = 01)
     write_reg(sx1276::REG_DIO_MAPPING1, 0x40);
@@ -385,16 +440,19 @@ int LoraTransport::send(const uint8_t *data, size_t len)
 
     // Wait for TxDone (poll with timeout)
     int timeout_ms = 5000;
-    while (timeout_ms > 0) {
+    while (timeout_ms > 0)
+    {
         uint8_t flags = read_reg(sx1276::REG_IRQ_FLAGS);
-        if (flags & sx1276::IRQ_TX_DONE) {
+        if (flags & sx1276::IRQ_TX_DONE)
+        {
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
         timeout_ms -= 10;
     }
 
-    if (timeout_ms <= 0) {
+    if (timeout_ms <= 0)
+    {
         ESP_LOGE(TAG, "TX timeout");
         write_reg(sx1276::REG_OP_MODE, sx1276::MODE_STANDBY);
         enter_rx_continuous();

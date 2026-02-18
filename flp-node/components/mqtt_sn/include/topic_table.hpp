@@ -2,19 +2,23 @@
 
 #include <cstdint>
 #include <cstring>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-namespace flp {
+namespace flp
+{
 
-struct TopicEntry {
+struct TopicEntry
+{
     uint16_t topic_id;
-    char     topic_name[64];
-    bool     registered;
+    char topic_name[64];
+    bool registered;
 };
 
-class TopicTable {
-public:
+class TopicTable
+{
+  public:
     TopicTable()
     {
         mutex_ = xSemaphoreCreateMutex();
@@ -26,9 +30,13 @@ public:
         xSemaphoreTake(mutex_, portMAX_DELAY);
 
         // Check if topic already exists
-        for (uint8_t i = 0; i < count_; i++) {
+        for (uint8_t i = 0; i < count_; i++)
+        {
             if (entries_[i].registered &&
-                strncmp(entries_[i].topic_name, name, sizeof(entries_[i].topic_name)) == 0) {
+                strncmp(entries_[i].topic_name,
+                        name,
+                        sizeof(entries_[i].topic_name)) == 0)
+            {
                 uint16_t id = entries_[i].topic_id;
                 xSemaphoreGive(mutex_);
                 return id;
@@ -36,15 +44,19 @@ public:
         }
 
         // Add new entry if space available
-        if (count_ >= MAX_TOPICS) {
+        if (count_ >= MAX_TOPICS)
+        {
             xSemaphoreGive(mutex_);
             return 0; // table full
         }
 
         uint16_t new_id = next_id_++;
         entries_[count_].topic_id = new_id;
-        strncpy(entries_[count_].topic_name, name, sizeof(entries_[count_].topic_name) - 1);
-        entries_[count_].topic_name[sizeof(entries_[count_].topic_name) - 1] = '\0';
+        strncpy(entries_[count_].topic_name,
+                name,
+                sizeof(entries_[count_].topic_name) - 1);
+        entries_[count_].topic_name[sizeof(entries_[count_].topic_name) - 1] =
+            '\0';
         entries_[count_].registered = true;
         count_++;
 
@@ -56,8 +68,10 @@ public:
     {
         xSemaphoreTake(mutex_, portMAX_DELAY);
 
-        for (uint8_t i = 0; i < count_; i++) {
-            if (entries_[i].registered && entries_[i].topic_id == topic_id) {
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (entries_[i].registered && entries_[i].topic_id == topic_id)
+            {
                 const char *name = entries_[i].topic_name;
                 xSemaphoreGive(mutex_);
                 return name;
@@ -68,7 +82,7 @@ public:
         return nullptr;
     }
 
-private:
+  private:
     static constexpr uint8_t MAX_TOPICS = 16;
     TopicEntry entries_[MAX_TOPICS];
     uint8_t count_ = 0;
