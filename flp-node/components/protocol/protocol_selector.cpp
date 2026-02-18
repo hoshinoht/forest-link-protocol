@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <cinttypes>
 
 static const char *TAG = "proto_sel";
 
@@ -30,7 +31,7 @@ void ProtocolSelector::run()
             }
         }
 
-        ESP_LOGD(TAG, "Metrics: BLE(tx=%u ok=%.0f%% lat=%ums) LoRa(tx=%u ok=%.0f%% lat=%ums) bias=%d",
+        ESP_LOGD(TAG, "Metrics: BLE(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32 "ms) LoRa(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32 "ms) bias=%d",
                  ble_metrics_.tx_count, ble_rate * 100.0f, ble_metrics_.avg_latency_ms(),
                  lora_metrics_.tx_count, lora_rate * 100.0f, lora_metrics_.avg_latency_ms(),
                  reliability_bias_);

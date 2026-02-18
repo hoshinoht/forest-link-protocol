@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 
@@ -174,8 +175,8 @@ void MqttSnClient::publish_file(const char *filename, const uint8_t *data,
 
     char meta_json[256];
     int meta_len = snprintf(meta_json, sizeof(meta_json),
-        "{\"session_id\":%u,\"filename\":\"%s\",\"total_size\":%u,"
-        "\"chunk_count\":%u,\"src_node\":\"0x%04X\",\"crc32\":%u}",
+        "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\",\"total_size\":%u,"
+        "\"chunk_count\":%u,\"src_node\":\"0x%04X\",\"crc32\":%" PRIu32 "}",
         session_id, filename, (unsigned)size, chunk_count, src_node, crc);
 
     esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);

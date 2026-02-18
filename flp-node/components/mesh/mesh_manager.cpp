@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <cinttypes>
 #include <cstring>
 
 static const char *TAG = "mesh_mgr";
@@ -289,7 +290,7 @@ void MeshManager::handle_transfer_ad(const PacketHeader &hdr, const uint8_t *pay
     TransferAdPayload ad;
     memcpy(&ad, payload, sizeof(ad));
 
-    ESP_LOGI(TAG, "Transfer ad from 0x%04X: file=%s size=%u frags=%u",
+    ESP_LOGI(TAG, "Transfer ad from 0x%04X: file=%s size=%" PRIu32 " frags=%u",
              hdr.src_addr, ad.filename, ad.file_size, ad.fragment_count);
 
     // If we have internet, respond as exit node candidate
@@ -422,7 +423,7 @@ void MeshManager::send_broadcast_with_retry(PacketType type, const uint8_t *payl
         send_packet(BROADCAST_ADDR, type, payload, payload_len);
 
         if (attempt + 1 < max_retries) {
-            ESP_LOGD(TAG, "Broadcast retry %u/%u, backoff %ums",
+            ESP_LOGD(TAG, "Broadcast retry %u/%u, backoff %" PRIu32 "ms",
                      attempt + 1, max_retries, backoff_ms);
             vTaskDelay(pdMS_TO_TICKS(backoff_ms));
             backoff_ms *= 2;
