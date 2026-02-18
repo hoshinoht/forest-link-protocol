@@ -3,17 +3,15 @@
 #define FLP_VERSION "0.1.0"
 
 // Task stack sizes (bytes)
-#define FLP_MESH_TASK_STACK     8192
-#define FLP_MQTT_TASK_STACK     6144
-#define FLP_PROTOCOL_TASK_STACK 4096
+#define FLP_MESH_TASK_STACK 8192
+#define FLP_MQTT_TASK_STACK 6144
 
 // Task priorities (higher = more urgent)
 #define FLP_LORA_RX_TASK_PRIORITY \
     20 // Timing-critical; must drain FIFO before next RX
 #define FLP_MESH_TASK_PRIORITY \
     15 // Core routing, must not stall during transfer
-#define FLP_MQTT_TASK_PRIORITY     10 // Network I/O, tolerates latency
-#define FLP_PROTOCOL_TASK_PRIORITY 5  // Lightweight tick, lowest
+#define FLP_MQTT_TASK_PRIORITY 10 // Network I/O, tolerates latency
 
 // Mesh parameters
 #define FLP_MAX_HOPS          8

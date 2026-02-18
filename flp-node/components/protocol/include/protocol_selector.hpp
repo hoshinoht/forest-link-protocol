@@ -38,7 +38,7 @@ class ProtocolSelector
     ProtocolSelector() = default;
 
     void init();
-    void run(); // main loop — called from FreeRTOS task
+    void recalculate_bias(); // call periodically from MeshManager::run()
 
     Transport select(int8_t rssi,
                      uint8_t hop_count,

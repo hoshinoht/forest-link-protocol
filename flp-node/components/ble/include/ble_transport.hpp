@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "host/ble_hs.h"
+#include "itransport.hpp"
 
 namespace flp
 {
@@ -70,13 +71,6 @@ static const ble_uuid128_t kFlpRxCharUuid = BLE_UUID128_INIT(0xa2,
                                                              0x7a,
                                                              0x6f);
 
-struct BleRxItem
-{
-    uint16_t src_addr;
-    uint16_t len;
-    uint8_t data[512];
-};
-
 struct PeerConn
 {
     uint16_t conn_handle;
@@ -85,29 +79,25 @@ struct PeerConn
     bool connected;
 };
 
-class BleTransport
+class BleTransport : public ITransport
 {
   public:
     BleTransport() = default;
 
-    void init();
-    void deinit();
+    void set_packet_queue(QueueHandle_t q)
+    {
+        packet_queue_ = q;
+    }
 
-    int send(uint16_t peer_addr, const uint8_t *data, size_t len);
+    void init() override;
+    void deinit() override;
 
-    using RxCallback = void (*)(uint16_t src_addr,
-                                const uint8_t *data,
-                                size_t len);
-    void on_receive(RxCallback cb);
+    int send(uint16_t peer_addr, const uint8_t *data, size_t len) override;
 
     void start_scan();
     void stop_scan();
     void start_advertise();
 
-    QueueHandle_t get_rx_queue() const
-    {
-        return rx_queue_;
-    }
     int8_t get_peer_rssi(uint16_t peer_addr) const;
 
     // NimBLE callback trampolines (must be public for C callbacks)
@@ -127,8 +117,7 @@ class BleTransport
     uint16_t addr_from_ble(const uint8_t *ble_addr) const;
 
     PeerConn peers_[BLE_MAX_CONNECTIONS] = {};
-    QueueHandle_t rx_queue_ = nullptr;
-    RxCallback rx_cb_ = nullptr;
+    QueueHandle_t packet_queue_ = nullptr; // shared MeshManager queue
     uint16_t tx_chr_val_handle_ = 0;
     uint16_t node_addr_ = 0;
     bool initialized_ = false;

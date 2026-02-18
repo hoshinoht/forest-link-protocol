@@ -91,4 +91,19 @@ struct __attribute__((packed)) TransferAckPayload
     uint8_t hops_to_gw;
 };
 
+// Unified inbound packet used across transports and mesh manager
+enum class RxTransport : uint8_t
+{
+    BLE,
+    LORA,
+};
+
+struct RxPacket
+{
+    uint8_t data[MAX_MTU];
+    size_t len;
+    int8_t rssi;
+    RxTransport source;
+};
+
 } // namespace flp

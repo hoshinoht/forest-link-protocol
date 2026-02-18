@@ -163,27 +163,34 @@ void LoraTransport::rx_task_func(void *arg)
                 continue;
             }
 
-            LoraRxItem item = {};
-            item.len = self->read_reg(sx1276::REG_RX_NB_BYTES);
+            uint8_t pkt_len = self->read_reg(sx1276::REG_RX_NB_BYTES);
 
             // Set FIFO address to current RX address
             uint8_t rx_addr = self->read_reg(sx1276::REG_FIFO_RX_CURRENT);
             self->write_reg(sx1276::REG_FIFO_ADDR_PTR, rx_addr);
 
+            RxPacket rpkt = {};
+            rpkt.len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
+            rpkt.source = RxTransport::LORA;
+
             // Read payload from FIFO
-            if (item.len > 0 && item.len <= LORA_MAX_PACKET)
+            if (pkt_len > 0 && pkt_len <= LORA_MAX_PACKET)
             {
-                self->read_fifo(item.data, item.len);
+                self->read_fifo(rpkt.data, rpkt.len);
             }
 
             // Read packet RSSI: -157 + reg value (for HF port, > 862 MHz)
             uint8_t rssi_raw = self->read_reg(sx1276::REG_PKT_RSSI_VALUE);
-            item.rssi = -157 + rssi_raw;
+            rpkt.rssi = static_cast<int8_t>(
+                (-157 + rssi_raw) < -128 ? -128 : (-157 + rssi_raw));
 
-            ESP_LOGD(TAG, "RX %u bytes, RSSI=%d", item.len, item.rssi);
+            ESP_LOGD(TAG, "RX %zu bytes, RSSI=%d", rpkt.len, rpkt.rssi);
 
-            // Post to queue
-            xQueueSend(self->rx_queue_, &item, 0);
+            // Post directly to unified mesh queue
+            if (self->packet_queue_)
+            {
+                xQueueSend(self->packet_queue_, &rpkt, 0);
+            }
         }
 
         // Clear all IRQ flags
@@ -202,7 +209,6 @@ void LoraTransport::init(uint8_t rx_task_priority)
 
     spi_mutex_ = xSemaphoreCreateMutex();
     tx_done_sem_ = xSemaphoreCreateBinary();
-    rx_queue_ = xQueueCreate(LORA_RX_QUEUE_DEPTH, sizeof(LoraRxItem));
 
     // Pin config
     cs_pin_ = (gpio_num_t) CONFIG_FLP_LORA_CS;
@@ -334,11 +340,6 @@ void LoraTransport::deinit()
     }
     spi_bus_free(SPI3_HOST);
 
-    if (rx_queue_)
-    {
-        vQueueDelete(rx_queue_);
-        rx_queue_ = nullptr;
-    }
     if (tx_done_sem_)
     {
         vSemaphoreDelete(tx_done_sem_);
@@ -420,16 +421,9 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
     ESP_LOGI(TAG, "Configured: freq=%luHz SF=%u BW=%luHz", freq_hz, sf, bw_hz);
 }
 
-// ── Receive callback ─────────────────────────────────────────────────────
-
-void LoraTransport::on_receive(RxCallback cb)
-{
-    rx_cb_ = cb;
-}
-
 // ── Send ─────────────────────────────────────────────────────────────────
 
-int LoraTransport::send(const uint8_t *data, size_t len)
+int LoraTransport::send_raw(const uint8_t *data, size_t len)
 {
     if (len > LORA_MAX_PACKET)
     {

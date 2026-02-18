@@ -53,6 +53,10 @@ void MeshManager::init()
     events_ = xEventGroupCreate();
     assert(events_);
 
+    // Pass unified queue to transports before init
+    ble_.set_packet_queue(packet_queue_);
+    lora_.set_packet_queue(packet_queue_);
+
     // Init transports
     ble_.init();
     lora_.init(lora_rx_priority_);
@@ -64,68 +68,24 @@ void MeshManager::init()
     // Init protocol selector
     protocol_selector_.init();
 
-    // Init ARQ
-    arq_.init(ARQ_WINDOW, ARQ_TIMEOUT);
-    arq_.set_send_callback(
+    // Init transfer engine
+    transfer_engine_.init(
+        events_,
+        my_addr_,
         [this](uint16_t dst,
                PacketType type,
-               uint16_t seq,
+               const uint8_t *payload,
+               size_t payload_len)
+        { send_packet(dst, type, payload, payload_len); },
+        [this](Transport t,
                const uint8_t *data,
-               size_t len)
+               size_t len,
+               uint16_t peer_addr)
+        { send_raw(t, data, len, peer_addr); },
+        [this](int8_t rssi, uint8_t hops, size_t payload_size)
         {
-            if (PACKET_HEADER_SIZE + len > MAX_MTU)
-            {
-                ESP_LOGW(TAG,
-                         "ARQ send: payload %zu exceeds MAX_MTU, dropping",
-                         len);
-                return;
-            }
-
-            uint8_t buf[MAX_MTU];
-            PacketHeader hdr = {};
-            hdr.set_ver_type(PROTOCOL_VERSION, type);
-            hdr.src_addr = my_addr_;
-            hdr.dst_addr = dst;
-            hdr.set_ttl_hops(DEFAULT_TTL, 0);
-            hdr.seq_num = seq;
-
-            memcpy(buf, &hdr, PACKET_HEADER_SIZE);
-            if (data && len > 0)
-            {
-                memcpy(buf + PACKET_HEADER_SIZE, data, len);
-            }
-
-            size_t total = PACKET_HEADER_SIZE + len;
-
-            NeighborEntry nb;
-            int8_t nb_rssi = -90;
-            uint8_t nb_hops = 0xFF;
-            if (route_table_.get_neighbor(dst, nb))
-            {
-                nb_rssi = nb.rssi;
-                nb_hops = nb.hop_count;
-            }
-            Transport t =
-                protocol_selector_.select(nb_rssi, nb_hops, total, 100.0f);
-            send_raw(t, buf, total, dst);
-        });
-
-    // BLE callback: items go via BLE rx_queue and are polled in run()
-    ble_.on_receive(
-        [](uint16_t src_addr, const uint8_t *data, size_t len)
-        {
-            (void) src_addr;
-            (void) data;
-            (void) len;
-        });
-
-    // LoRa callback similarly uses its own rx_queue
-    lora_.on_receive(
-        [](const uint8_t *data, size_t len, int rssi)
-        {
-            (void) data;
-            (void) len;
-            (void) rssi;
+            return protocol_selector_.select(
+                rssi, hops, payload_size, 100.0f);
         });
 
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -139,44 +99,9 @@ void MeshManager::run()
 {
     while (true)
     {
-        // Poll BLE rx_queue and forward to unified packet_queue_
-        BleRxItem ble_item;
-        while (xQueueReceive(ble_.get_rx_queue(), &ble_item, 0) == pdTRUE)
-        {
-            RxPacket rpkt = {};
-            size_t copy_len = ble_item.len;
-            if (copy_len > MAX_MTU)
-            {
-                copy_len = MAX_MTU;
-            }
-            memcpy(rpkt.data, ble_item.data, copy_len);
-            rpkt.len = copy_len;
-            rpkt.rssi = ble_.get_peer_rssi(ble_item.src_addr);
-            rpkt.source = RxTransport::BLE;
-            xQueueSend(packet_queue_, &rpkt, 0);
-        }
-
-        // Poll LoRa rx_queue
-        LoraRxItem lora_item;
-        while (xQueueReceive(lora_.get_rx_queue(), &lora_item, 0) == pdTRUE)
-        {
-            RxPacket rpkt = {};
-            size_t copy_len = lora_item.len;
-            if (copy_len > MAX_MTU)
-            {
-                copy_len = MAX_MTU;
-            }
-            memcpy(rpkt.data, lora_item.data, copy_len);
-            rpkt.len = copy_len;
-            rpkt.rssi = static_cast<int8_t>(lora_item.rssi);
-            rpkt.source = RxTransport::LORA;
-            xQueueSend(packet_queue_, &rpkt, 0);
-        }
-
-        // Process unified queue — drain up to 8 packets per iteration to
-        // avoid starving packet processing under burst (NFR-MESH2).
-        // First receive uses a short timeout to keep periodic tasks
-        // responsive; subsequent receives in the batch are non-blocking.
+        // NFR-MESH2: Single blocking receive on unified queue — transports
+        // post RxPacket items directly, no polling indirection.
+        // Timeout drives periodic tasks (discovery, prune, ARQ tick).
         RxPacket pkt;
         for (uint8_t drain = 0; drain < 8; drain++)
         {
@@ -206,85 +131,15 @@ void MeshManager::run()
             prune_timer_ms_ = now;
         }
 
-        // ARQ tick for timeout retransmits
-        arq_.tick();
-
-        // Async broadcast retry tick
-        if (broadcast_retry_.active)
+        // Recalculate protocol bias every 10s
+        if (now - bias_timer_ms_ > 10000)
         {
-            if (now >= broadcast_retry_.next_send_ms)
-            {
-                send_packet(BROADCAST_ADDR,
-                            broadcast_retry_.type,
-                            broadcast_retry_.payload,
-                            broadcast_retry_.payload_len);
-                broadcast_retry_.attempt++;
-
-                if (broadcast_retry_.attempt >= broadcast_retry_.max_retries)
-                {
-                    broadcast_retry_.active = false;
-                }
-                else
-                {
-                    ESP_LOGD(TAG,
-                             "Broadcast retry %u/%u, backoff %" PRIu32 "ms",
-                             broadcast_retry_.attempt,
-                             broadcast_retry_.max_retries,
-                             broadcast_retry_.backoff_ms);
-                    broadcast_retry_.next_send_ms =
-                        now + broadcast_retry_.backoff_ms;
-                    broadcast_retry_.backoff_ms *= 2;
-                }
-            }
+            protocol_selector_.recalculate_bias();
+            bias_timer_ms_ = now;
         }
 
-        // Task 4: Election timeout check
-        if (election_active_ && (now - election_start_ms_ > 3000))
-        {
-            election_active_ = false;
-
-            if (candidate_count_ == 0)
-            {
-                ESP_LOGW(TAG, "Election timeout: no exit node candidates");
-                transfer_.active = false;
-                arq_.reset_sender();
-            }
-            else
-            {
-                // Pick best: lowest hops_to_gw, then best rssi_to_gw as
-                // tiebreaker
-                uint8_t best_idx = 0;
-                for (uint8_t i = 1; i < candidate_count_; i++)
-                {
-                    if (candidates_[i].hops_to_gw <
-                            candidates_[best_idx].hops_to_gw ||
-                        (candidates_[i].hops_to_gw ==
-                             candidates_[best_idx].hops_to_gw &&
-                         candidates_[i].rssi_to_gw >
-                             candidates_[best_idx].rssi_to_gw))
-                    {
-                        best_idx = i;
-                    }
-                }
-
-                transfer_.exit_node = candidates_[best_idx].addr;
-                ESP_LOGI(TAG,
-                         "Elected exit node: 0x%04X (hops=%u rssi=%d)",
-                         transfer_.exit_node,
-                         candidates_[best_idx].hops_to_gw,
-                         candidates_[best_idx].rssi_to_gw);
-
-                xEventGroupSetBits(events_, FLP_EVT_EXIT_NODE_ELECTED);
-
-                // Begin fragment transfer
-                arq_.reset_sender();
-                arq_.set_peer_addr(transfer_.exit_node);
-                transfer_.next_fragment = 0;
-            }
-        }
-
-        // Task 5: Feed fragments into ARQ window
-        transfer_tick();
+        // Transfer engine tick (ARQ, election, broadcast retry, fragment feed)
+        transfer_engine_.tick(now);
     }
 }
 
@@ -337,19 +192,37 @@ void MeshManager::process_packet(const RxPacket &pkt)
                 handle_discovery(hdr, payload, payload_len);
                 break;
             case PacketType::TRANSFER_AD:
-                handle_transfer_ad(hdr, payload, payload_len);
+                transfer_engine_.handle_transfer_ad(
+                    hdr, payload, payload_len, has_internet_);
                 break;
             case PacketType::TRANSFER_ACK:
-                handle_transfer_ack(hdr, payload, payload_len);
+                transfer_engine_.handle_transfer_ack(
+                    hdr, payload, payload_len);
                 break;
             case PacketType::DATA:
-                handle_data(hdr, payload, payload_len);
+                transfer_engine_.handle_data(hdr, payload, payload_len);
+                // Check if receive is complete → hand to MQTT
+                if (transfer_engine_.is_receive_complete())
+                {
+                    ESP_LOGI(TAG,
+                             "File reassembly complete (%zu bytes)",
+                             transfer_engine_.get_file_size());
+                    xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
+                    if (mqtt_client_ && has_internet_)
+                    {
+                        mqtt_client_->publish_file(
+                            transfer_engine_.current_filename(),
+                            transfer_engine_.get_reassembly_buffer(),
+                            transfer_engine_.get_file_size(),
+                            hdr.src_addr);
+                    }
+                }
                 break;
             case PacketType::ACK:
-                arq_.handle_ack(hdr.seq_num);
+                transfer_engine_.handle_ack(hdr.seq_num);
                 break;
             case PacketType::NACK:
-                arq_.handle_nack(hdr.seq_num);
+                transfer_engine_.handle_nack(hdr.seq_num);
                 break;
             default:
                 ESP_LOGD(TAG,
@@ -418,116 +291,6 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
                 PacketType::DISCOVERY,
                 reinterpret_cast<const uint8_t *>(&resp),
                 sizeof(resp));
-}
-
-// ── Task 4: Transfer ad handling ─────────────────────────────────────────────
-
-void MeshManager::handle_transfer_ad(const PacketHeader &hdr,
-                                     const uint8_t *payload,
-                                     size_t payload_len)
-{
-    if (payload_len < sizeof(TransferAdPayload))
-    {
-        return;
-    }
-
-    TransferAdPayload ad;
-    memcpy(&ad, payload, sizeof(ad));
-
-    ESP_LOGI(TAG,
-             "Transfer ad from 0x%04X: file=%s size=%" PRIu32 " frags=%u",
-             hdr.src_addr,
-             ad.filename,
-             ad.file_size,
-             ad.fragment_count);
-
-    // Store the filename so handle_data can publish it via MQTT (Bug 6)
-    strncpy(transfer_.filename, ad.filename, sizeof(transfer_.filename) - 1);
-    transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
-
-    // If we have internet, respond as exit node candidate
-    if (has_internet_)
-    {
-        TransferAckPayload ack = {};
-        ack.exit_node_addr = my_addr_;
-        ack.hops_to_gw = 0; // Direct internet
-        ack.rssi_to_gw = 0;
-
-        send_packet(hdr.src_addr,
-                    PacketType::TRANSFER_ACK,
-                    reinterpret_cast<const uint8_t *>(&ack),
-                    sizeof(ack));
-
-        // TODO: init_receiver is called before election confirmation, so
-        // PSRAM is allocated here even if this node is not ultimately
-        // elected as the exit node. Fixing this properly requires a
-        // protocol-level handshake (e.g. a TRANSFER_START unicast from the
-        // sender after election completes).
-        arq_.init_receiver(ad.fragment_count, ad.fragment_size, ad.file_size);
-        arq_.set_peer_addr(hdr.src_addr);
-
-        ESP_LOGI(
-            TAG, "Responded as exit node candidate to 0x%04X", hdr.src_addr);
-    }
-}
-
-// ── Task 4: Transfer ACK handling (exit node election) ───────────────────────
-
-void MeshManager::handle_transfer_ack(const PacketHeader &hdr,
-                                      const uint8_t *payload,
-                                      size_t payload_len)
-{
-    if (payload_len < sizeof(TransferAckPayload))
-    {
-        return;
-    }
-    if (!election_active_)
-    {
-        return;
-    }
-
-    TransferAckPayload ack;
-    memcpy(&ack, payload, sizeof(ack));
-
-    if (candidate_count_ < candidates_.size())
-    {
-        candidates_[candidate_count_] = {
-            ack.exit_node_addr, ack.rssi_to_gw, ack.hops_to_gw};
-        candidate_count_++;
-        ESP_LOGI(TAG,
-                 "Exit candidate #%u: 0x%04X hops=%u rssi=%d",
-                 candidate_count_,
-                 ack.exit_node_addr,
-                 ack.hops_to_gw,
-                 ack.rssi_to_gw);
-    }
-}
-
-// ── Data handling (receiver side) ────────────────────────────────────────────
-
-void MeshManager::handle_data(const PacketHeader &hdr,
-                              const uint8_t *payload,
-                              size_t payload_len)
-{
-    arq_.set_peer_addr(hdr.src_addr);
-    arq_.receive_fragment(hdr.seq_num, payload, payload_len);
-
-    if (arq_.is_complete())
-    {
-        ESP_LOGI(
-            TAG, "File reassembly complete (%zu bytes)", arq_.get_file_size());
-        xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
-
-        // Task 6: Hand reassembled file to MQTT for cloud upload
-        if (mqtt_client_ && has_internet_)
-        {
-            mqtt_client_->publish_file(
-                transfer_.filename[0] ? transfer_.filename : "unknown",
-                arq_.get_reassembly_buffer(),
-                arq_.get_file_size(),
-                hdr.src_addr);
-        }
-    }
 }
 
 // ── Forwarding ───────────────────────────────────────────────────────────────
@@ -600,121 +363,14 @@ void MeshManager::send_discovery()
              disc.hops_to_internet);
 }
 
-// ── Task 2: Broadcast with retry (async, non-blocking) ──────────────────────
-
-void MeshManager::send_broadcast_with_retry(PacketType type,
-                                            const uint8_t *payload,
-                                            size_t payload_len,
-                                            uint8_t max_retries)
-{
-    if (payload_len > sizeof(broadcast_retry_.payload))
-    {
-        ESP_LOGE(TAG, "Broadcast payload too large: %zu", payload_len);
-        return;
-    }
-
-    memcpy(broadcast_retry_.payload, payload, payload_len);
-    broadcast_retry_.payload_len = payload_len;
-    broadcast_retry_.type = type;
-    broadcast_retry_.max_retries = max_retries;
-    broadcast_retry_.attempt = 0;
-    broadcast_retry_.backoff_ms = 500;
-    broadcast_retry_.next_send_ms = 0; // send immediately on first tick
-    broadcast_retry_.active = true;
-}
-
-// ── Task 5: Start file transfer (sender side) ───────────────────────────────
+// ── Start file transfer (delegates to TransferEngine) ────────────────────────
 
 void MeshManager::start_file_transfer(const char *filename,
                                       const uint8_t *data,
                                       size_t size)
 {
-    if (transfer_.active)
-    {
-        ESP_LOGW(TAG, "Transfer already in progress");
-        return;
-    }
-
-    // Determine fragment size based on preferred transport
     Transport t = protocol_selector_.select(0, 0, size, 100.0f);
-    size_t frag_payload =
-        (t == Transport::BLE) ? BLE_MAX_PAYLOAD : LORA_MAX_PAYLOAD;
-
-    transfer_.data = data;
-    transfer_.size = size;
-    transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
-    transfer_.fragment_count =
-        static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
-    transfer_.next_fragment = 0;
-    transfer_.active = true;
-    strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
-    transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
-
-    ESP_LOGI(TAG,
-             "Starting file transfer: %s (%zu bytes, %u fragments)",
-             filename,
-             size,
-             transfer_.fragment_count);
-
-    // Broadcast TRANSFER_AD with retry to discover exit nodes
-    TransferAdPayload ad = {};
-    ad.file_size = static_cast<uint32_t>(size);
-    ad.fragment_count = transfer_.fragment_count;
-    ad.fragment_size = transfer_.fragment_size;
-    strncpy(ad.filename, filename, sizeof(ad.filename) - 1);
-
-    // Start election
-    candidate_count_ = 0;
-    election_active_ = true;
-    election_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-
-    send_broadcast_with_retry(PacketType::TRANSFER_AD,
-                              reinterpret_cast<const uint8_t *>(&ad),
-                              sizeof(ad));
-}
-
-// ── Task 5: Transfer tick — feed fragments into ARQ window ───────────────────
-
-void MeshManager::transfer_tick()
-{
-    if (!transfer_.active || election_active_)
-    {
-        return;
-    }
-    if (transfer_.exit_node == 0)
-    {
-        return;
-    }
-
-    while (transfer_.next_fragment < transfer_.fragment_count &&
-           !arq_.sender_window_full())
-    {
-        size_t offset = static_cast<size_t>(transfer_.next_fragment) *
-                        transfer_.fragment_size;
-        size_t remain = transfer_.size - offset;
-        size_t frag_len = (remain < transfer_.fragment_size)
-                              ? remain
-                              : transfer_.fragment_size;
-
-        int ret = arq_.send_fragment(
-            transfer_.next_fragment, transfer_.data + offset, frag_len);
-        if (ret < 0)
-        {
-            break;
-        }
-
-        transfer_.next_fragment++;
-    }
-
-    // Check if all fragments sent and acknowledged
-    if (transfer_.next_fragment >= transfer_.fragment_count &&
-        arq_.get_base_seq() >= transfer_.fragment_count)
-    {
-        ESP_LOGI(TAG, "File transfer complete: %s", transfer_.filename);
-        transfer_.active = false;
-        arq_.reset_sender();
-        xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
-    }
+    transfer_engine_.start_file_transfer(filename, data, size, t);
 }
 
 // ── send_packet / send_raw ───────────────────────────────────────────────────
@@ -772,12 +428,18 @@ void MeshManager::send_raw(Transport transport,
                            size_t len,
                            uint16_t peer_addr)
 {
+    uint32_t t0 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    int rc;
+
     if (transport == Transport::BLE)
     {
-        ble_.send(peer_addr, data, len);
+        rc = ble_.send(peer_addr, data, len);
     }
     else
     {
-        lora_.send(data, len);
+        rc = lora_.send(peer_addr, data, len);
     }
+
+    uint32_t latency = static_cast<uint32_t>(esp_timer_get_time() / 1000) - t0;
+    protocol_selector_.report_tx_result(transport, rc == 0, latency);
 }

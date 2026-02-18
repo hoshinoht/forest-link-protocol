@@ -9,11 +9,12 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "itransport.hpp"
+#include "packet.hpp"
 
 namespace flp
 {
 
-static constexpr int LORA_RX_QUEUE_DEPTH = 16;
 static constexpr size_t LORA_MAX_PACKET = 255;
 
 // SX1276 register addresses
@@ -50,32 +51,30 @@ static constexpr uint8_t IRQ_RX_DONE = 0x40;
 static constexpr uint8_t IRQ_ALL = 0xFF;
 } // namespace sx1276
 
-struct LoraRxItem
-{
-    uint16_t len;
-    int rssi;
-    uint8_t data[LORA_MAX_PACKET];
-};
-
-class LoraTransport
+class LoraTransport : public ITransport
 {
   public:
     LoraTransport() = default;
 
-    void init(uint8_t rx_task_priority = 5);
-    void deinit();
+    void set_packet_queue(QueueHandle_t q)
+    {
+        packet_queue_ = q;
+    }
 
-    int send(const uint8_t *data, size_t len);
+    // ITransport interface
+    void init() override { init(5); }
+    void deinit() override;
+    int send(uint16_t peer_addr, const uint8_t *data, size_t len) override
+    {
+        (void) peer_addr;
+        return send_raw(data, len);
+    }
 
-    using RxCallback = void (*)(const uint8_t *data, size_t len, int rssi);
-    void on_receive(RxCallback cb);
+    // LoRa-specific
+    void init(uint8_t rx_task_priority);
+    int send_raw(const uint8_t *data, size_t len);
 
     void configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz);
-
-    QueueHandle_t get_rx_queue() const
-    {
-        return rx_queue_;
-    }
 
   private:
     uint8_t read_reg(uint8_t addr);
@@ -94,11 +93,10 @@ class LoraTransport
     gpio_num_t cs_pin_ = GPIO_NUM_NC;
     gpio_num_t rst_pin_ = GPIO_NUM_NC;
     gpio_num_t dio0_pin_ = GPIO_NUM_NC;
-    QueueHandle_t rx_queue_ = nullptr;
+    QueueHandle_t packet_queue_ = nullptr; // shared MeshManager queue
     SemaphoreHandle_t spi_mutex_ = nullptr;
     TaskHandle_t rx_task_ = nullptr;
     SemaphoreHandle_t tx_done_sem_ = nullptr;
-    RxCallback rx_cb_ = nullptr;
     bool initialized_ = false;
 };
 

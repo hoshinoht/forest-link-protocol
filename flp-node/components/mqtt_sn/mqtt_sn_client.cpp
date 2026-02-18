@@ -20,8 +20,10 @@ namespace flp
 
 void MqttSnClient::init()
 {
-    // Create publish queue
+    // Create publish queues
     publish_queue_ = xQueueCreate(16, sizeof(MqttPublishItem));
+    file_publish_queue_ = xQueueCreate(2, sizeof(FilePublishRequest));
+    nack_queue_ = xQueueCreate(16, sizeof(CloudNackItem));
 
     // Configure and start ESP-IDF MQTT client
     esp_mqtt_client_config_t mqtt_cfg = {};
@@ -108,12 +110,40 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             }
             topic_buf[tlen] = '\0';
 
-            // Task 6: Admin command handler
+            // Admin command handler
             if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data)
             {
                 ESP_LOGI(TAG, "Admin cmd: %.*s", event->data_len, event->data);
-                // Commands are passed to the rx_callback for mesh-level
-                // handling
+            }
+
+            // Cloud NACK handler — parse {"type":"NACK","seq":N}
+            if (strcmp(topic_buf, "flp/admin/ack") == 0 && event->data &&
+                event->data_len > 0)
+            {
+                // Null-terminate data for safe string operations
+                char ack_buf[256];
+                size_t alen = (event->data_len < sizeof(ack_buf) - 1)
+                                  ? static_cast<size_t>(event->data_len)
+                                  : sizeof(ack_buf) - 1;
+                memcpy(ack_buf, event->data, alen);
+                ack_buf[alen] = '\0';
+
+                if (strstr(ack_buf, "\"NACK\""))
+                {
+                    const char *seq_str = strstr(ack_buf, "\"seq\":");
+                    if (seq_str)
+                    {
+                        int seq_val = atoi(seq_str + 6);
+                        CloudNackItem nack = {};
+                        nack.seq = static_cast<uint16_t>(seq_val);
+                        if (xQueueSend(nack_queue_, &nack, 0) == pdTRUE)
+                        {
+                            ESP_LOGI(TAG,
+                                     "Cloud NACK received for seq=%u",
+                                     nack.seq);
+                        }
+                    }
+                }
             }
 
             if (rx_callback_ && event->topic && event->data)
@@ -182,27 +212,40 @@ int MqttSnClient::publish_raw(const char *topic,
         client_, topic, (const char *) data, len, qos, 0);
 }
 
-// ── Task 6: Publish reassembled file to cloud ────────────────────────────────
+// ── Task 6: Enqueue file for async cloud upload ──────────────────────────────
 
 void MqttSnClient::publish_file(const char *filename,
                                 const uint8_t *data,
                                 size_t size,
                                 uint16_t src_node)
 {
+    FilePublishRequest req = {filename, data, size, src_node};
+    if (xQueueSend(file_publish_queue_, &req, 0) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "publish_file: file publish queue full, dropping");
+    }
+    else
+    {
+        ESP_LOGI(TAG,
+                 "Queued file for MQTT upload: %s (%zu bytes)",
+                 filename,
+                 size);
+    }
+}
+
+void MqttSnClient::process_file_publish(const FilePublishRequest &req)
+{
     if (!connected_ || !client_)
     {
-        ESP_LOGW(TAG, "publish_file: not connected to broker");
+        ESP_LOGW(TAG, "process_file_publish: not connected to broker");
         return;
     }
 
     uint16_t chunk_count = static_cast<uint16_t>(
-        (size + MQTT_CHUNK_PAYLOAD - 1) / MQTT_CHUNK_PAYLOAD);
-    uint32_t crc = esp_rom_crc32_le(0, data, size);
-
-    // Generate a simple session ID from tick count
+        (req.size + MQTT_CHUNK_PAYLOAD - 1) / MQTT_CHUNK_PAYLOAD);
+    uint32_t crc = esp_rom_crc32_le(0, req.data, req.size);
     uint32_t session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
-    // Publish metadata JSON to flp/<node_id>/file/meta
     char meta_topic[64];
     snprintf(meta_topic, sizeof(meta_topic), "flp/%04x/file/meta", node_addr_);
 
@@ -213,20 +256,19 @@ void MqttSnClient::publish_file(const char *filename,
         "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\",\"total_size\":%u,"
         "\"chunk_count\":%u,\"src_node\":\"0x%04X\",\"crc32\":%" PRIu32 "}",
         session_id,
-        filename,
-        (unsigned) size,
+        req.filename,
+        (unsigned) req.size,
         chunk_count,
-        src_node,
+        req.src_node,
         crc);
 
     esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
     ESP_LOGI(TAG,
              "Published file meta: %s (%zu bytes, %u chunks)",
-             filename,
-             size,
+             req.filename,
+             req.size,
              chunk_count);
 
-    // Publish data chunks: 2-byte seq_num + up to MQTT_CHUNK_PAYLOAD bytes
     char data_topic[64];
     snprintf(data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
@@ -234,23 +276,65 @@ void MqttSnClient::publish_file(const char *filename,
     for (uint16_t seq = 0; seq < chunk_count; seq++)
     {
         size_t offset = static_cast<size_t>(seq) * MQTT_CHUNK_PAYLOAD;
-        size_t remain = size - offset;
+        size_t remain = req.size - offset;
         size_t chunk_len =
             (remain < MQTT_CHUNK_PAYLOAD) ? remain : MQTT_CHUNK_PAYLOAD;
 
-        // 2-byte little-endian sequence number
         chunk_buf[0] = static_cast<uint8_t>(seq & 0xFF);
         chunk_buf[1] = static_cast<uint8_t>((seq >> 8) & 0xFF);
-        memcpy(chunk_buf + 2, data + offset, chunk_len);
+        memcpy(chunk_buf + 2, req.data + offset, chunk_len);
 
         esp_mqtt_client_publish(
             client_, data_topic, (const char *) chunk_buf, 2 + chunk_len, 1, 0);
 
-        // Pace chunks 50ms apart to avoid broker overload
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    ESP_LOGI(TAG, "Published all %u file chunks for %s", chunk_count, filename);
+    // Retain file data pointer for NACK retransmission
+    last_file_data_ = req.data;
+    last_file_size_ = req.size;
+
+    ESP_LOGI(TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
+}
+
+void MqttSnClient::process_nack_retransmit()
+{
+    if (!connected_ || !client_ || !last_file_data_ || last_file_size_ == 0)
+    {
+        return;
+    }
+
+    CloudNackItem nack;
+    while (xQueueReceive(nack_queue_, &nack, 0) == pdTRUE)
+    {
+        size_t offset = static_cast<size_t>(nack.seq) * MQTT_CHUNK_PAYLOAD;
+        if (offset >= last_file_size_)
+        {
+            ESP_LOGW(TAG,
+                     "NACK seq=%u out of range (size=%zu)",
+                     nack.seq,
+                     last_file_size_);
+            continue;
+        }
+
+        size_t remain = last_file_size_ - offset;
+        size_t chunk_len =
+            (remain < MQTT_CHUNK_PAYLOAD) ? remain : MQTT_CHUNK_PAYLOAD;
+
+        char data_topic[64];
+        snprintf(
+            data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
+
+        uint8_t chunk_buf[2 + MQTT_CHUNK_PAYLOAD];
+        chunk_buf[0] = static_cast<uint8_t>(nack.seq & 0xFF);
+        chunk_buf[1] = static_cast<uint8_t>((nack.seq >> 8) & 0xFF);
+        memcpy(chunk_buf + 2, last_file_data_ + offset, chunk_len);
+
+        esp_mqtt_client_publish(
+            client_, data_topic, (const char *) chunk_buf, 2 + chunk_len, 1, 0);
+
+        ESP_LOGI(TAG, "Retransmitted NACK'd chunk seq=%u", nack.seq);
+    }
 }
 
 void MqttSnClient::run()
@@ -278,6 +362,19 @@ void MqttSnClient::run()
                 }
             }
         }
+
+        // Process file publish requests (one per iteration to stay responsive)
+        if (connected_ && client_)
+        {
+            FilePublishRequest freq;
+            if (xQueueReceive(file_publish_queue_, &freq, 0) == pdTRUE)
+            {
+                process_file_publish(freq);
+            }
+        }
+
+        // Process cloud NACK retransmissions
+        process_nack_retransmit();
 
         // Periodic status publish (every 30s)
         TickType_t now = xTaskGetTickCount();
