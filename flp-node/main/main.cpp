@@ -13,14 +13,12 @@
 #include "mesh_manager.hpp"
 #include "mqtt_sn_client.hpp"
 #include "nvs_flash.h"
-#include "protocol_selector.hpp"
 #include "uart_ingest.hpp"
 
 static const char *TAG = "flp_main";
 
 static flp::MeshManager mesh_manager;
 static flp::MqttSnClient mqtt_client;
-static flp::ProtocolSelector protocol_selector;
 static flp::UartIngest uart_ingest;
 
 static EventGroupHandle_t s_wifi_event_group;
@@ -104,14 +102,6 @@ static void mqtt_task(void *arg)
     vTaskDelete(nullptr);
 }
 
-static void protocol_task(void *arg)
-{
-    ESP_LOGI(TAG, "protocol_task started");
-    auto *selector = static_cast<flp::ProtocolSelector *>(arg);
-    selector->run();
-    vTaskDelete(nullptr);
-}
-
 static void uart_ingest_task(void *arg)
 {
     ESP_LOGI(TAG, "uart_ingest_task started");
@@ -171,8 +161,6 @@ extern "C" void app_main()
     mqtt_client.init();
     mesh_manager.set_mqtt_client(&mqtt_client);
 
-    protocol_selector.init();
-
     // UART ingest API
     uart_ingest.init(UART_NUM_2,
                      CONFIG_FLP_UART_TX_PIN,
@@ -190,12 +178,6 @@ extern "C" void app_main()
                 FLP_MQTT_TASK_STACK,
                 &mqtt_client,
                 FLP_MQTT_TASK_PRIORITY,
-                nullptr);
-    xTaskCreate(protocol_task,
-                "protocol_task",
-                FLP_PROTOCOL_TASK_STACK,
-                &protocol_selector,
-                FLP_PROTOCOL_TASK_PRIORITY,
                 nullptr);
     xTaskCreate(uart_ingest_task,
                 "uart_ingest",
@@ -220,7 +202,12 @@ extern "C" void app_main()
     btn_cfg.intr_type = GPIO_INTR_NEGEDGE;
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    // ISR service already installed by LoraTransport::init()
+    esp_err_t isr_ret = gpio_install_isr_service(0);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE)
+    {
+        ESP_ERROR_CHECK(isr_ret);
+    }
     ESP_ERROR_CHECK(gpio_isr_handler_add(
         static_cast<gpio_num_t>(CONFIG_FLP_DEMO_BUTTON_PIN),
         button_isr_handler,

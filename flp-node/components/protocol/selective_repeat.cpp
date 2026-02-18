@@ -210,6 +210,20 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
+    // Per-seq NACK cooldown timestamps
+    nack_sent_ms_ = static_cast<uint32_t *>(
+        calloc(total_fragments, sizeof(uint32_t)));
+    if (!nack_sent_ms_)
+    {
+        ESP_LOGE(TAG, "Failed to allocate NACK cooldown array");
+        free(recv_bitmap_);
+        recv_bitmap_ = nullptr;
+        free(reassembly_buf_);
+        reassembly_buf_ = nullptr;
+        return false;
+    }
+
+    expected_seq_ = 0;
     receiver_active_ = true;
     ESP_LOGI(TAG,
              "Receiver init: %u fragments, %zu bytes each, %zu total",
@@ -271,16 +285,41 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
              fragments_received_,
              total_fragments_);
 
-    // Check for gaps and send NACKs for missing earlier fragments
-    for (uint16_t i = 0; i < seq; i++)
+    // Advance expected_seq_ past consecutive received fragments
+    while (expected_seq_ < total_fragments_)
     {
-        uint8_t bi = i / 8;
-        uint8_t bm = 1 << (i % 8);
-        if (!(recv_bitmap_[bi] & bm))
+        uint8_t ebi = expected_seq_ / 8;
+        uint8_t ebm = 1 << (expected_seq_ % 8);
+        if (!(recv_bitmap_[ebi] & ebm))
         {
-            if (send_cb_)
+            break;
+        }
+        expected_seq_++;
+    }
+
+    // NACK only the gap at the receive window front (bounded by window size)
+    // with a per-seq cooldown to avoid re-NACKing within timeout_ms_
+    if (seq > expected_seq_)
+    {
+        uint32_t now = now_ms();
+        uint16_t nack_end =
+            (expected_seq_ + window_size_ < seq)
+                ? static_cast<uint16_t>(expected_seq_ + window_size_)
+                : seq;
+        for (uint16_t i = expected_seq_; i < nack_end; i++)
+        {
+            uint8_t ni = i / 8;
+            uint8_t nm = 1 << (i % 8);
+            if (!(recv_bitmap_[ni] & nm))
             {
-                send_cb_(peer_addr_, PacketType::NACK, i, nullptr, 0);
+                if ((now - nack_sent_ms_[i]) >= timeout_ms_)
+                {
+                    if (send_cb_)
+                    {
+                        send_cb_(peer_addr_, PacketType::NACK, i, nullptr, 0);
+                    }
+                    nack_sent_ms_[i] = now;
+                }
             }
         }
     }
@@ -306,8 +345,14 @@ void SelectiveRepeat::cleanup_receiver()
         free(recv_bitmap_);
         recv_bitmap_ = nullptr;
     }
+    if (nack_sent_ms_)
+    {
+        free(nack_sent_ms_);
+        nack_sent_ms_ = nullptr;
+    }
     total_fragments_ = 0;
     fragments_received_ = 0;
+    expected_seq_ = 0;
     receiver_active_ = false;
 }
 

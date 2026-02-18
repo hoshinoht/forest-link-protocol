@@ -24,29 +24,30 @@ namespace flp
 
 // ── GATT service definition ──────────────────────────────────────────────
 
-static const struct ble_gatt_svc_def kGattServices[] = {
+static struct ble_gatt_chr_def kFlpCharacteristics[] = {
+    {
+        // TX characteristic — server notifies peers
+        .uuid = &kFlpTxCharUuid.u,
+        .access_cb = nullptr,
+        .arg = nullptr,
+        .flags = BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = nullptr, // patched in register_gatt_services
+    },
+    {
+        // RX characteristic — peers write packets to us
+        .uuid = &kFlpRxCharUuid.u,
+        .access_cb = BleTransport::on_gatt_rx_write,
+        .arg = nullptr,
+        .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
+    },
+    {0} // sentinel
+};
+
+static struct ble_gatt_svc_def kGattServices[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &kFlpServiceUuid.u,
-        .characteristics =
-            (struct ble_gatt_chr_def[]) {
-                {
-                    // TX characteristic — server notifies peers
-                    .uuid = &kFlpTxCharUuid.u,
-                    .access_cb = nullptr,
-                    .arg = nullptr,
-                    .flags = BLE_GATT_CHR_F_NOTIFY,
-                    .val_handle = nullptr, // patched in register_gatt_services
-                },
-                {
-                    // RX characteristic — peers write packets to us
-                    .uuid = &kFlpRxCharUuid.u,
-                    .access_cb = BleTransport::on_gatt_rx_write,
-                    .arg = nullptr,
-                    .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
-                },
-                {0} // sentinel
-            },
+        .characteristics = kFlpCharacteristics,
     },
     {0} // sentinel
 };
@@ -69,7 +70,6 @@ void BleTransport::init()
     }
 
     s_instance = this;
-    rx_queue_ = xQueueCreate(BLE_RX_QUEUE_DEPTH, sizeof(BleRxItem));
 
     // Derive node address from base MAC
     uint8_t mac[6];
@@ -122,12 +122,6 @@ void BleTransport::deinit()
         nimble_port_deinit();
     }
 
-    if (rx_queue_)
-    {
-        vQueueDelete(rx_queue_);
-        rx_queue_ = nullptr;
-    }
-
     s_instance = nullptr;
     initialized_ = false;
     ESP_LOGI(TAG, "BLE transport deinitialized");
@@ -140,14 +134,8 @@ void BleTransport::register_gatt_services()
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    // We need to patch the val_handle pointer for the TX characteristic
-    // Unfortunately the static array approach doesn't let us easily do this,
-    // so we use a mutable copy technique: declare as non-const above then
-    // patch here. Since kGattServices is file-static and mutable for the
-    // characteristic array, we can cast:
-    auto *tx_chr = const_cast<struct ble_gatt_chr_def *>(
-        &kGattServices[0].characteristics[0]);
-    tx_chr->val_handle = &tx_chr_val_handle_;
+    // Patch the val_handle pointer for the TX characteristic
+    kFlpCharacteristics[0].val_handle = &tx_chr_val_handle_;
 
     int rc = ble_gatts_count_cfg(kGattServices);
     if (rc != 0)
@@ -166,41 +154,35 @@ void BleTransport::register_gatt_services()
 
 // ── Callbacks ────────────────────────────────────────────────────────────
 
-void BleTransport::on_receive(RxCallback cb)
-{
-    rx_cb_ = cb;
-}
-
 int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
                                    uint16_t attr_handle,
                                    struct ble_gatt_access_ctxt *ctxt,
                                    void *arg)
 {
-    if (!s_instance || !s_instance->rx_queue_)
+    if (!s_instance || !s_instance->packet_queue_)
     {
         return BLE_ATT_ERR_UNLIKELY;
     }
 
     struct os_mbuf *om = ctxt->om;
-    BleRxItem item = {};
-    item.len = (uint16_t) OS_MBUF_PKTLEN(om);
-    if (item.len > sizeof(item.data))
-    {
-        item.len = sizeof(item.data);
-    }
-    os_mbuf_copydata(om, 0, item.len, item.data);
+    uint16_t pkt_len = (uint16_t) OS_MBUF_PKTLEN(om);
 
-    // Determine source address from connection
+    RxPacket rpkt = {};
+    rpkt.len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
+    os_mbuf_copydata(om, 0, rpkt.len, rpkt.data);
+    rpkt.source = RxTransport::BLE;
+
+    // Determine source address and RSSI from connection
     struct ble_gap_conn_desc desc;
     if (ble_gap_conn_find(conn_handle, &desc) == 0)
     {
-        item.src_addr = s_instance->addr_from_ble(desc.peer_id_addr.val);
+        uint16_t peer_addr =
+            s_instance->addr_from_ble(desc.peer_id_addr.val);
+        rpkt.rssi = s_instance->get_peer_rssi(peer_addr);
     }
 
-    // ISR-safe queue send (this callback runs in NimBLE context)
-    BaseType_t woken = pdFALSE;
-    xQueueSendFromISR(s_instance->rx_queue_, &item, &woken);
-    portYIELD_FROM_ISR(woken);
+    // NimBLE GATT callback runs in NimBLE host task context (not ISR)
+    xQueueSend(s_instance->packet_queue_, &rpkt, 0);
 
     return 0;
 }

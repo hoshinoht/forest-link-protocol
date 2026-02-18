@@ -3,8 +3,6 @@
 #include <cinttypes>
 
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "packet.hpp"
 
 static const char *TAG = "proto_sel";
@@ -17,44 +15,37 @@ void ProtocolSelector::init()
     ESP_LOGI(TAG, "ProtocolSelector initialized");
 }
 
-void ProtocolSelector::run()
+void ProtocolSelector::recalculate_bias()
 {
-    while (true)
+    float ble_rate = ble_metrics_.success_rate();
+    float lora_rate = lora_metrics_.success_rate();
+
+    if (ble_metrics_.tx_count > 5 && lora_metrics_.tx_count > 5)
     {
-        // Task 7: Recalculate reliability bias every 10s based on recent
-        // success rates
-        float ble_rate = ble_metrics_.success_rate();
-        float lora_rate = lora_metrics_.success_rate();
-
-        if (ble_metrics_.tx_count > 5 && lora_metrics_.tx_count > 5)
+        if (ble_rate > lora_rate + 0.1f)
         {
-            if (ble_rate > lora_rate + 0.1f)
-            {
-                reliability_bias_ = 2;
-            }
-            else if (lora_rate > ble_rate + 0.1f)
-            {
-                reliability_bias_ = -2;
-            }
-            else
-            {
-                reliability_bias_ = 0;
-            }
+            reliability_bias_ = 2;
         }
-
-        ESP_LOGD(TAG,
-                 "Metrics: BLE(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32
-                 "ms) LoRa(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32 "ms) bias=%d",
-                 ble_metrics_.tx_count,
-                 ble_rate * 100.0f,
-                 ble_metrics_.avg_latency_ms(),
-                 lora_metrics_.tx_count,
-                 lora_rate * 100.0f,
-                 lora_metrics_.avg_latency_ms(),
-                 reliability_bias_);
-
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        else if (lora_rate > ble_rate + 0.1f)
+        {
+            reliability_bias_ = -2;
+        }
+        else
+        {
+            reliability_bias_ = 0;
+        }
     }
+
+    ESP_LOGD(TAG,
+             "Metrics: BLE(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32
+             "ms) LoRa(tx=%" PRIu32 " ok=%.0f%% lat=%" PRIu32 "ms) bias=%d",
+             ble_metrics_.tx_count,
+             ble_rate * 100.0f,
+             ble_metrics_.avg_latency_ms(),
+             lora_metrics_.tx_count,
+             lora_rate * 100.0f,
+             lora_metrics_.avg_latency_ms(),
+             reliability_bias_);
 }
 
 void ProtocolSelector::report_tx_result(Transport t,
