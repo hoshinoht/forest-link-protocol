@@ -25,3 +25,15 @@
 // ARQ sliding window
 #define FLP_ARQ_WINDOW_SIZE    8
 #define FLP_ARQ_TIMEOUT_MS     2000
+
+// UART ingest API
+#define FLP_UART_TASK_STACK    6144
+#define FLP_UART_TASK_PRIORITY 8
+
+// Demo button
+#define FLP_BUTTON_TASK_STACK    2048
+#define FLP_BUTTON_TASK_PRIORITY 5
+#define FLP_BUTTON_DEBOUNCE_MS   2000
+
+// Maximum ingest file size (3 MB)
+#define FLP_INGEST_MAX_SIZE    (3 * 1024 * 1024)
