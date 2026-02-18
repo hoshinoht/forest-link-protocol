@@ -111,8 +111,7 @@ void LoraTransport::enter_rx_continuous()
     // Clear all IRQ flags
     write_reg(sx1276::REG_IRQ_FLAGS, sx1276::IRQ_ALL);
 
-    // Set FIFO RX base address
-    write_reg(sx1276::REG_FIFO_RX_BASE, 0x00);
+    // Reset FIFO pointer for RX (half-duplex, shared base at 0x00)
     write_reg(sx1276::REG_FIFO_ADDR_PTR, 0x00);
 
     // Map DIO0 to RxDone (bits 7:6 = 00)
@@ -142,6 +141,17 @@ void LoraTransport::rx_task_func(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
         uint8_t irq_flags = self->read_reg(sx1276::REG_IRQ_FLAGS);
+
+        // Check for TxDone — give semaphore so send() can proceed
+        if (irq_flags & sx1276::IRQ_TX_DONE)
+        {
+            self->write_reg(sx1276::REG_IRQ_FLAGS, sx1276::IRQ_ALL);
+            if (self->tx_done_sem_)
+            {
+                xSemaphoreGive(self->tx_done_sem_);
+            }
+            continue;
+        }
 
         if (irq_flags & sx1276::IRQ_RX_DONE)
         {
@@ -191,6 +201,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     }
 
     spi_mutex_ = xSemaphoreCreateMutex();
+    tx_done_sem_ = xSemaphoreCreateBinary();
     rx_queue_ = xQueueCreate(LORA_RX_QUEUE_DEPTH, sizeof(LoraRxItem));
 
     // Pin config
@@ -264,8 +275,8 @@ void LoraTransport::init(uint8_t rx_task_priority)
     // TX power: 17 dBm
     set_tx_power(17);
 
-    // Set FIFO base addresses
-    write_reg(sx1276::REG_FIFO_TX_BASE, 0x80);
+    // Set FIFO base addresses (both at 0x00 — half-duplex, full 256-byte FIFO)
+    write_reg(sx1276::REG_FIFO_TX_BASE, 0x00);
     write_reg(sx1276::REG_FIFO_RX_BASE, 0x00);
 
     // Create RX task before enabling interrupts
@@ -281,7 +292,13 @@ void LoraTransport::init(uint8_t rx_task_priority)
     dio0_cfg.intr_type = GPIO_INTR_POSEDGE;
     gpio_config(&dio0_cfg);
 
-    gpio_install_isr_service(0);
+    esp_err_t isr_ret = gpio_install_isr_service(0);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGE(TAG, "gpio_install_isr_service failed: %s",
+                 esp_err_to_name(isr_ret));
+        return;
+    }
     gpio_isr_handler_add(dio0_pin_, dio0_isr_handler, this);
 
     // Enter continuous RX mode
@@ -321,6 +338,11 @@ void LoraTransport::deinit()
     {
         vQueueDelete(rx_queue_);
         rx_queue_ = nullptr;
+    }
+    if (tx_done_sem_)
+    {
+        vSemaphoreDelete(tx_done_sem_);
+        tx_done_sem_ = nullptr;
     }
     if (spi_mutex_)
     {
@@ -422,9 +444,8 @@ int LoraTransport::send(const uint8_t *data, size_t len)
     // Clear IRQ flags
     write_reg(sx1276::REG_IRQ_FLAGS, sx1276::IRQ_ALL);
 
-    // Set FIFO TX base and pointer
-    write_reg(sx1276::REG_FIFO_TX_BASE, 0x80);
-    write_reg(sx1276::REG_FIFO_ADDR_PTR, 0x80);
+    // Set FIFO pointer to 0x00 for TX (half-duplex, shared base)
+    write_reg(sx1276::REG_FIFO_ADDR_PTR, 0x00);
 
     // Write payload to FIFO
     write_fifo(data, len);
@@ -435,23 +456,16 @@ int LoraTransport::send(const uint8_t *data, size_t len)
     // Map DIO0 to TxDone (bits 7:6 = 01)
     write_reg(sx1276::REG_DIO_MAPPING1, 0x40);
 
+    // Drain any stale semaphore give
+    xSemaphoreTake(tx_done_sem_, 0);
+
     // Enter TX mode
     write_reg(sx1276::REG_OP_MODE, sx1276::MODE_TX);
 
-    // Wait for TxDone (poll with timeout)
-    int timeout_ms = 5000;
-    while (timeout_ms > 0)
-    {
-        uint8_t flags = read_reg(sx1276::REG_IRQ_FLAGS);
-        if (flags & sx1276::IRQ_TX_DONE)
-        {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-        timeout_ms -= 10;
-    }
+    // Wait for TxDone via semaphore (set by rx_task when IRQ_TX_DONE fires)
+    BaseType_t got = xSemaphoreTake(tx_done_sem_, pdMS_TO_TICKS(5000));
 
-    if (timeout_ms <= 0)
+    if (got != pdTRUE)
     {
         ESP_LOGE(TAG, "TX timeout");
         write_reg(sx1276::REG_OP_MODE, sx1276::MODE_STANDBY);

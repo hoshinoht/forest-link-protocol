@@ -97,8 +97,10 @@ class SelectiveRepeat
     // Receiver state
     uint8_t *reassembly_buf_ = nullptr;
     uint8_t *recv_bitmap_ = nullptr;
+    uint32_t *nack_sent_ms_ = nullptr; // Per-seq NACK cooldown timestamps
     uint16_t total_fragments_ = 0;
     uint16_t fragments_received_ = 0;
+    uint16_t expected_seq_ = 0; // Next expected in-order fragment
     size_t fragment_size_ = 0;
     size_t file_size_ = 0;
     bool receiver_active_ = false;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "mqtt_client.h"
@@ -65,7 +67,7 @@ class MqttSnClient
     esp_mqtt_client_handle_t client_ = nullptr;
     QueueHandle_t publish_queue_ = nullptr;
     MqttRxCallback rx_callback_ = nullptr;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
     uint16_t node_addr_ = 0;
 
     static void mqtt_event_handler(void *handler_args,

@@ -220,7 +220,12 @@ extern "C" void app_main()
     btn_cfg.intr_type = GPIO_INTR_NEGEDGE;
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    // ISR service already installed by LoraTransport::init()
+    esp_err_t isr_ret = gpio_install_isr_service(0);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE)
+    {
+        ESP_ERROR_CHECK(isr_ret);
+    }
     ESP_ERROR_CHECK(gpio_isr_handler_add(
         static_cast<gpio_num_t>(CONFIG_FLP_DEMO_BUTTON_PIN),
         button_isr_handler,

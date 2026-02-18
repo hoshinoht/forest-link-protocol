@@ -96,7 +96,17 @@ void MeshManager::init()
             }
 
             size_t total = PACKET_HEADER_SIZE + len;
-            Transport t = protocol_selector_.select(0, 0, total, 100.0f);
+
+            NeighborEntry nb;
+            int8_t nb_rssi = -90;
+            uint8_t nb_hops = 0xFF;
+            if (route_table_.get_neighbor(dst, nb))
+            {
+                nb_rssi = nb.rssi;
+                nb_hops = nb.hop_count;
+            }
+            Transport t =
+                protocol_selector_.select(nb_rssi, nb_hops, total, 100.0f);
             send_raw(t, buf, total, dst);
         });
 
@@ -199,6 +209,35 @@ void MeshManager::run()
         // ARQ tick for timeout retransmits
         arq_.tick();
 
+        // Async broadcast retry tick
+        if (broadcast_retry_.active)
+        {
+            if (now >= broadcast_retry_.next_send_ms)
+            {
+                send_packet(BROADCAST_ADDR,
+                            broadcast_retry_.type,
+                            broadcast_retry_.payload,
+                            broadcast_retry_.payload_len);
+                broadcast_retry_.attempt++;
+
+                if (broadcast_retry_.attempt >= broadcast_retry_.max_retries)
+                {
+                    broadcast_retry_.active = false;
+                }
+                else
+                {
+                    ESP_LOGD(TAG,
+                             "Broadcast retry %u/%u, backoff %" PRIu32 "ms",
+                             broadcast_retry_.attempt,
+                             broadcast_retry_.max_retries,
+                             broadcast_retry_.backoff_ms);
+                    broadcast_retry_.next_send_ms =
+                        now + broadcast_retry_.backoff_ms;
+                    broadcast_retry_.backoff_ms *= 2;
+                }
+            }
+        }
+
         // Task 4: Election timeout check
         if (election_active_ && (now - election_start_ms_ > 3000))
         {
@@ -208,6 +247,7 @@ void MeshManager::run()
             {
                 ESP_LOGW(TAG, "Election timeout: no exit node candidates");
                 transfer_.active = false;
+                arq_.reset_sender();
             }
             else
             {
@@ -560,30 +600,27 @@ void MeshManager::send_discovery()
              disc.hops_to_internet);
 }
 
-// ── Task 2: Broadcast with retry (exponential backoff) ───────────────────────
+// ── Task 2: Broadcast with retry (async, non-blocking) ──────────────────────
 
 void MeshManager::send_broadcast_with_retry(PacketType type,
                                             const uint8_t *payload,
                                             size_t payload_len,
                                             uint8_t max_retries)
 {
-    uint32_t backoff_ms = 500;
-
-    for (uint8_t attempt = 0; attempt < max_retries; attempt++)
+    if (payload_len > sizeof(broadcast_retry_.payload))
     {
-        send_packet(BROADCAST_ADDR, type, payload, payload_len);
-
-        if (attempt + 1 < max_retries)
-        {
-            ESP_LOGD(TAG,
-                     "Broadcast retry %u/%u, backoff %" PRIu32 "ms",
-                     attempt + 1,
-                     max_retries,
-                     backoff_ms);
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms *= 2;
-        }
+        ESP_LOGE(TAG, "Broadcast payload too large: %zu", payload_len);
+        return;
     }
+
+    memcpy(broadcast_retry_.payload, payload, payload_len);
+    broadcast_retry_.payload_len = payload_len;
+    broadcast_retry_.type = type;
+    broadcast_retry_.max_retries = max_retries;
+    broadcast_retry_.attempt = 0;
+    broadcast_retry_.backoff_ms = 500;
+    broadcast_retry_.next_send_ms = 0; // send immediately on first tick
+    broadcast_retry_.active = true;
 }
 
 // ── Task 5: Start file transfer (sender side) ───────────────────────────────
@@ -676,6 +713,7 @@ void MeshManager::transfer_tick()
         ESP_LOGI(TAG, "File transfer complete: %s", transfer_.filename);
         transfer_.active = false;
         arq_.reset_sender();
+        xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
     }
 }
 

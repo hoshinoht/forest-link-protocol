@@ -97,6 +97,7 @@ class LoraTransport
     QueueHandle_t rx_queue_ = nullptr;
     SemaphoreHandle_t spi_mutex_ = nullptr;
     TaskHandle_t rx_task_ = nullptr;
+    SemaphoreHandle_t tx_done_sem_ = nullptr;
     RxCallback rx_cb_ = nullptr;
     bool initialized_ = false;
 };

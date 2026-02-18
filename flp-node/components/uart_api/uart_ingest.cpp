@@ -233,14 +233,20 @@ void UartIngest::handle_file_end()
              received_size_,
              ingest_size_);
 
-    // Hand off to mesh manager — it takes ownership of the data lifetime
-    // during transfer. We keep the buffer alive until transfer completes.
+    // Hand off to mesh manager — it reads from this buffer throughout the
+    // multi-minute transfer. Do NOT free it here.
     mgr_->start_file_transfer(filename_, ingest_buf_, received_size_);
     send_ack(UART_CMD_FILE_END);
 
-    // Note: buffer is freed after mesh transfer completes.
-    // For simplicity, free it here since MeshManager copies what it needs
-    // into its own fragment state.
+    // Wait for the mesh transfer to complete before freeing the buffer.
+    // MeshManager sets FLP_EVT_TRANSFER_COMPLETE when all fragments are ACKed.
+    EventGroupHandle_t events = mgr_->get_events();
+    if (events)
+    {
+        xEventGroupWaitBits(
+            events, FLP_EVT_TRANSFER_COMPLETE, pdTRUE, pdTRUE, portMAX_DELAY);
+    }
+
     heap_caps_free(ingest_buf_);
     ingest_buf_ = nullptr;
     ingest_active_ = false;

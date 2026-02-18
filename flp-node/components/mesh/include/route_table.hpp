@@ -103,14 +103,21 @@ class RouteTable
             }
         }
 
-        // Find neighbor with lowest hop count as relay
+        // For unknown destinations, prefer the neighbor closest to the
+        // internet gateway (lowest hops_to_internet), since most traffic
+        // flows toward the cloud. Use best RSSI as tiebreaker.
         uint16_t best_addr = BROADCAST_ADDR;
-        uint8_t best_hops = 0xFF;
+        uint8_t best_hops_inet = 0xFF;
+        int8_t best_rssi = -127;
         for (uint8_t i = 0; i < count_; i++)
         {
-            if (neighbors_[i].hop_count < best_hops)
+            uint8_t h = neighbors_[i].hops_to_internet;
+            int8_t r = neighbors_[i].rssi;
+            if (h < best_hops_inet ||
+                (h == best_hops_inet && r > best_rssi))
             {
-                best_hops = neighbors_[i].hop_count;
+                best_hops_inet = h;
+                best_rssi = r;
                 best_addr = neighbors_[i].addr;
             }
         }
@@ -188,6 +195,10 @@ class RouteTable
             if (neighbors_[i].addr == addr)
             {
                 neighbors_[i].has_internet = val;
+                if (val)
+                {
+                    neighbors_[i].hops_to_internet = 0;
+                }
                 break;
             }
         }

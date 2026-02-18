@@ -18,6 +18,7 @@
 // =============================================================================
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -156,7 +157,7 @@ class MeshManager
     uint16_t my_addr_ = 0;
     uint32_t discovery_timer_ms_ = 0;
     uint32_t prune_timer_ms_ = 0;
-    bool has_internet_ = false;
+    std::atomic<bool> has_internet_{false};
     uint8_t lora_rx_priority_ = 5;
 
     // Task 4: Exit node election state
@@ -164,6 +165,19 @@ class MeshManager
     uint8_t candidate_count_ = 0;
     uint32_t election_start_ms_ = 0;
     bool election_active_ = false;
+
+    // Async broadcast retry state
+    struct BroadcastRetry
+    {
+        uint8_t payload[MAX_MTU];
+        size_t payload_len = 0;
+        PacketType type = PacketType::DISCOVERY;
+        uint8_t max_retries = 3;
+        uint8_t attempt = 0;
+        uint32_t next_send_ms = 0;
+        uint32_t backoff_ms = 500;
+        bool active = false;
+    } broadcast_retry_;
 
     // Task 5: Active file transfer state
     ActiveTransfer transfer_ = {};

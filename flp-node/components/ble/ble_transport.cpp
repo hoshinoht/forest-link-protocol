@@ -24,29 +24,30 @@ namespace flp
 
 // ── GATT service definition ──────────────────────────────────────────────
 
-static const struct ble_gatt_svc_def kGattServices[] = {
+static struct ble_gatt_chr_def kFlpCharacteristics[] = {
+    {
+        // TX characteristic — server notifies peers
+        .uuid = &kFlpTxCharUuid.u,
+        .access_cb = nullptr,
+        .arg = nullptr,
+        .flags = BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = nullptr, // patched in register_gatt_services
+    },
+    {
+        // RX characteristic — peers write packets to us
+        .uuid = &kFlpRxCharUuid.u,
+        .access_cb = BleTransport::on_gatt_rx_write,
+        .arg = nullptr,
+        .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
+    },
+    {0} // sentinel
+};
+
+static struct ble_gatt_svc_def kGattServices[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &kFlpServiceUuid.u,
-        .characteristics =
-            (struct ble_gatt_chr_def[]) {
-                {
-                    // TX characteristic — server notifies peers
-                    .uuid = &kFlpTxCharUuid.u,
-                    .access_cb = nullptr,
-                    .arg = nullptr,
-                    .flags = BLE_GATT_CHR_F_NOTIFY,
-                    .val_handle = nullptr, // patched in register_gatt_services
-                },
-                {
-                    // RX characteristic — peers write packets to us
-                    .uuid = &kFlpRxCharUuid.u,
-                    .access_cb = BleTransport::on_gatt_rx_write,
-                    .arg = nullptr,
-                    .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
-                },
-                {0} // sentinel
-            },
+        .characteristics = kFlpCharacteristics,
     },
     {0} // sentinel
 };
@@ -140,14 +141,8 @@ void BleTransport::register_gatt_services()
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    // We need to patch the val_handle pointer for the TX characteristic
-    // Unfortunately the static array approach doesn't let us easily do this,
-    // so we use a mutable copy technique: declare as non-const above then
-    // patch here. Since kGattServices is file-static and mutable for the
-    // characteristic array, we can cast:
-    auto *tx_chr = const_cast<struct ble_gatt_chr_def *>(
-        &kGattServices[0].characteristics[0]);
-    tx_chr->val_handle = &tx_chr_val_handle_;
+    // Patch the val_handle pointer for the TX characteristic
+    kFlpCharacteristics[0].val_handle = &tx_chr_val_handle_;
 
     int rc = ble_gatts_count_cfg(kGattServices);
     if (rc != 0)
@@ -197,10 +192,8 @@ int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
         item.src_addr = s_instance->addr_from_ble(desc.peer_id_addr.val);
     }
 
-    // ISR-safe queue send (this callback runs in NimBLE context)
-    BaseType_t woken = pdFALSE;
-    xQueueSendFromISR(s_instance->rx_queue_, &item, &woken);
-    portYIELD_FROM_ISR(woken);
+    // NimBLE GATT callback runs in NimBLE host task context (not ISR)
+    xQueueSend(s_instance->rx_queue_, &item, 0);
 
     return 0;
 }
