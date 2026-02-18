@@ -1,0 +1,48 @@
+{
+  // ── Editor Basics (Barr-C: 4-space indent, no tabs) ──
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+  "editor.trimAutoWhitespace": true,
+
+  // ── Whitespace & Line Endings ──
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "files.eol": "\n",
+
+  // ── Ruler at 80 columns (Barr-C line length limit) ──
+  "editor.rulers": [80],
+  "editor.wordWrapColumn": 80,
+
+  // ── Format on Save (enforces .clang-format) ──
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+
+  // ── C/C++ specific settings ──
+  "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.formatOnSave": true
+  },
+
+  // ── clangd configuration ──
+  "clangd.fallbackFlags": [
+    "-std=c++17"
+  ],
+
+  // ── Bracket & brace guidance ──
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": "active",
+
+  // ── File associations ──
+  "files.associations": {
+    "*.h": "c",
+    "*.hpp": "cpp",
+    "*.cpp": "cpp"
+  }
+}

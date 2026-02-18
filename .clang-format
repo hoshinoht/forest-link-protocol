@@ -1,0 +1,91 @@
+# Barr-C:2018 Embedded C Coding Standard
+# https://barrgroup.com/embedded-systems/books/embedded-c-coding-standard
+
+Language: Cpp
+Standard: c++17
+
+# ── Indentation ──
+# Barr-C Rule 1.3: Use 4 spaces per indent level, no tabs.
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+IndentCaseLabels: true
+IndentCaseBlocks: false
+IndentGotoLabels: false
+IndentPPDirectives: None
+NamespaceIndentation: None
+
+# ── Line Length ──
+# Barr-C Rule 1.4: Lines shall not exceed 80 characters.
+ColumnLimit: 80
+
+# ── Braces ──
+# Barr-C Rule 2.1: Braces shall always surround the bodies of if, else,
+# switch, while, do, and for statements.
+# Barr-C Rule 2.2: Allman (BSD) brace style — opening brace on its own line.
+BreakBeforeBraces: Allman
+InsertBraces: true
+
+# ── Spaces ──
+# Barr-C Rule 1.5: Keywords followed by parenthesis shall have a space before
+# the opening parenthesis. Function calls shall not.
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceInEmptyBlock: false
+
+# ── Pointer & Reference Alignment ──
+# Barr-C Rule 6.3: Pointer operator attached to variable name, not type.
+PointerAlignment: Right
+ReferenceAlignment: Right
+
+# ── Switch/Case ──
+# Barr-C Rule 2.3: Case fall-through requires explicit comment.
+AllowShortCaseLabelsOnASingleLine: false
+
+# ── One statement per line ──
+# Barr-C Rule 1.6: No multiple statements on a single line.
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+
+# ── Include Sorting ──
+# Group includes: system headers first, then project headers.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2
+
+# ── Alignment ──
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: true
+AlignEscapedNewlines: Left
+AlignOperands: true
+AlignTrailingComments: true
+
+# ── Line Breaks ──
+AllowAllParametersOfDeclarationOnNextLine: true
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+
+# ── Miscellaneous ──
+ReflowComments: true
+SortUsingDeclarations: true
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+FixNamespaceComments: true

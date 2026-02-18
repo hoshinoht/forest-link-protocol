@@ -11,5 +11,4 @@ idf_component_register(
         lora
         mqtt_sn
         protocol
-        crypto
 )

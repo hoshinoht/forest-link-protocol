@@ -1,0 +1,171 @@
+======================================================================
+  Forest Link Protocol — Raspberry Pi Gateway Deployment
+======================================================================
+
+  Deploys three services on a Raspberry Pi to bridge ESP32 mesh
+  nodes to the cloud:
+
+    1. Mosquitto        MQTT broker              TCP 1883
+    2. MQTT-SN Gateway  UDP-to-MQTT translator   UDP 1885 -> TCP 1883
+    3. FLP MQTT Admin   File transfer manager    connects to localhost:1883
+
+  ESP32 nodes speak MQTT-SN over UDP. The gateway translates that
+  into standard MQTT for the broker. The admin subscribes to the
+  broker and handles file reassembly with Selective Repeat ARQ.
+
+
+REQUIREMENTS
+----------------------------------------------------------------------
+
+  - Raspberry Pi 3B+ or newer (tested on Pi 4, Pi 5)
+  - Raspberry Pi OS (Bookworm) or Ubuntu 22.04+
+  - Internet access (for initial package install)
+  - Same WiFi network as the ESP32 gateway nodes
+
+
+QUICK START
+----------------------------------------------------------------------
+
+  1. Copy this directory to the Pi (scp, USB, git clone, etc.)
+
+  2. Run the installer:
+
+       sudo bash deploy.sh --install
+
+     This will:
+       - Install and configure Mosquitto
+       - Clone and build the Eclipse Paho MQTT-SN gateway
+       - Create a Python venv and install pip dependencies
+       - Register all three as systemd services (auto-start on boot)
+
+  3. Verify everything is running:
+
+       bash deploy.sh --status
+
+
+COMMANDS
+----------------------------------------------------------------------
+
+  sudo bash deploy.sh --install      Full install (packages + services)
+  sudo bash deploy.sh --start        Start all services
+  sudo bash deploy.sh --stop         Stop all services
+       bash deploy.sh --status       Show service status
+  sudo bash deploy.sh --uninstall    Remove all services and configs
+
+
+MANAGING SERVICES INDIVIDUALLY
+----------------------------------------------------------------------
+
+  sudo systemctl start   mosquitto
+  sudo systemctl stop    mosquitto
+  sudo systemctl restart mosquitto
+  sudo systemctl status  mosquitto
+
+  sudo systemctl start   mqtt-sn-gateway
+  sudo systemctl stop    mqtt-sn-gateway
+  sudo systemctl restart mqtt-sn-gateway
+  sudo systemctl status  mqtt-sn-gateway
+
+  sudo systemctl start   flp-mqtt-admin
+  sudo systemctl stop    flp-mqtt-admin
+  sudo systemctl restart flp-mqtt-admin
+  sudo systemctl status  flp-mqtt-admin
+
+
+VIEWING LOGS
+----------------------------------------------------------------------
+
+  Follow logs in real time (Ctrl+C to stop):
+
+    journalctl -u mosquitto -f
+    journalctl -u mqtt-sn-gateway -f
+    journalctl -u flp-mqtt-admin -f
+
+  Last 50 lines of a service:
+
+    journalctl -u flp-mqtt-admin -n 50
+
+
+RUNNING THE ADMIN MANUALLY (without systemd)
+----------------------------------------------------------------------
+
+  If you prefer to run the MQTT admin in the foreground for
+  debugging, stop the service first and run it directly:
+
+    sudo systemctl stop flp-mqtt-admin
+    cd cloud-admin
+    .venv/bin/python3 mqtt_admin.py --broker localhost --port 1883
+
+  Options:
+
+    -b, --broker HOST    MQTT broker hostname  (default: localhost)
+    -p, --port   PORT    MQTT broker port      (default: 1883)
+
+  Press Ctrl+C to stop. A session summary is printed on exit.
+
+
+OUTPUT FILES
+----------------------------------------------------------------------
+
+  Received files are saved to:
+
+    cloud-admin/received_files/<filename>
+
+  The directory is created automatically on first transfer.
+
+
+NETWORK TOPOLOGY
+----------------------------------------------------------------------
+
+    ESP32 nodes                  Raspberry Pi
+  +-----------+               +-----------------------------+
+  | MQTT-SN   |  UDP :1885    | MQTT-SN   |    | Mosquitto |
+  | Client    | ------------> | Gateway   | -> | Broker    |
+  +-----------+               +-----------+    | TCP :1883 |
+                                               +-----+-----+
+                                                     |
+                                               +-----+-----+
+                                               | FLP MQTT  |
+                                               | Admin     |
+                                               +-----------+
+                                                     |
+                                               received_files/
+
+
+PORTS
+----------------------------------------------------------------------
+
+  Port    Proto   Service             Direction
+  ----    -----   -------             ---------
+  1883    TCP     Mosquitto           Inbound (LAN)
+  1885    UDP     MQTT-SN Gateway     Inbound (LAN)
+
+  Make sure your firewall allows these ports if enabled:
+
+    sudo ufw allow 1883/tcp
+    sudo ufw allow 1885/udp
+
+
+TROUBLESHOOTING
+----------------------------------------------------------------------
+
+  Service won't start
+    Check logs:  journalctl -u <service-name> -n 30
+    Verify Mosquitto is running first — the gateway depends on it.
+
+  Nodes can't connect
+    Confirm the Pi and ESP32 nodes are on the same network.
+    Test with:  mosquitto_sub -t "flp/#" -v
+    (Should show messages when nodes publish.)
+
+  Build fails for MQTT-SN gateway
+    Ensure cmake, g++, and libssl-dev are installed:
+      sudo apt-get install cmake g++ libssl-dev
+
+  Python import errors
+    Re-create the venv:
+      rm -rf .venv
+      python3 -m venv .venv
+      .venv/bin/pip install -r requirements.txt
+
+======================================================================
