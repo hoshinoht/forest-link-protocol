@@ -30,26 +30,34 @@ static struct ble_gatt_chr_def kFlpCharacteristics[] = {
         .uuid = &kFlpTxCharUuid.u,
         .access_cb = nullptr,
         .arg = nullptr,
+        .descriptors = nullptr,
         .flags = BLE_GATT_CHR_F_NOTIFY,
+        .min_key_size = 0,
         .val_handle = nullptr, // patched in register_gatt_services
+        .cpfd = nullptr,
     },
     {
         // RX characteristic — peers write packets to us
         .uuid = &kFlpRxCharUuid.u,
         .access_cb = BleTransport::on_gatt_rx_write,
         .arg = nullptr,
+        .descriptors = nullptr,
         .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
+        .min_key_size = 0,
+        .val_handle = nullptr,
+        .cpfd = nullptr,
     },
-    {0} // sentinel
+    {} // sentinel
 };
 
 static struct ble_gatt_svc_def kGattServices[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &kFlpServiceUuid.u,
+        .includes = nullptr,
         .characteristics = kFlpCharacteristics,
     },
-    {0} // sentinel
+    {} // sentinel
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
