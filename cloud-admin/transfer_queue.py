@@ -20,6 +20,7 @@ class TransferSession:
     crc32: int
     started_at: float = 0.0
     completed_at: float = 0.0
+    exit_nodes: set = dataclasses.field(default_factory=set)
 
 
 class TransferQueue:
@@ -30,11 +31,33 @@ class TransferQueue:
         self.cmd_callback = None  # set by mqtt_admin to publish commands
 
     def enqueue(self, session_id, node_id, filename, total_size, chunk_count, crc32):
-        """Add a transfer to the queue. Starts immediately if no active transfer."""
+        """Add a transfer to the queue. Starts immediately if no active transfer.
+
+        If a session with the same session_id already exists (active or queued),
+        merges node_id into that session's exit_nodes and returns it without
+        creating a duplicate entry (multi-exit node support).
+        """
+        # Check if this session_id is already active
+        if self.active_transfer and self.active_transfer.session_id == session_id:
+            self.active_transfer.exit_nodes.add(node_id)
+            print(
+                f"[Queue] Merged exit node {node_id} into active session {session_id}")
+            return self.active_transfer
+
+        # Check if this session_id is already queued
+        for session in self.queue:
+            if session.session_id == session_id:
+                session.exit_nodes.add(node_id)
+                print(
+                    f"[Queue] Merged exit node {node_id} into queued session {session_id}")
+                return session
+
+        # New session — create and enqueue
         session = TransferSession(
             session_id=session_id, node_id=node_id, filename=filename,
             total_size=total_size, chunk_count=chunk_count, crc32=crc32
         )
+        session.exit_nodes.add(node_id)
         self.queue.append(session)
         print(
             f"[Queue] Enqueued transfer: {filename} from node {node_id} ({total_size} bytes, {chunk_count} chunks)")

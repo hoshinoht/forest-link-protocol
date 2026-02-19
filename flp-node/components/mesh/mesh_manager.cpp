@@ -24,7 +24,7 @@ using namespace flp;
 
 static const char *TAG = "mesh_mgr";
 
-// ── Task 1: WiFi status setter ──────────────────────────────────────────────
+// -- Task 1: WiFi status setter -----------------------------------------------
 
 void MeshManager::set_has_internet(bool v)
 {
@@ -35,7 +35,7 @@ void MeshManager::set_has_internet(bool v)
     }
 }
 
-// ── Init ─────────────────────────────────────────────────────────────────────
+// -- Init ---------------------------------------------------------------------
 
 void MeshManager::init()
 {
@@ -45,17 +45,22 @@ void MeshManager::init()
     my_addr_ = static_cast<uint16_t>((mac[4] << 8) | mac[5]);
     ESP_LOGI(TAG, "Node addr: 0x%04X", my_addr_);
 
-    // Create unified inbound packet queue (16 slots)
-    packet_queue_ = xQueueCreate(16, sizeof(RxPacket));
+    // Init buffer pool
+    buffer_pool_.init();
+
+    // Create unified inbound packet queue (16 slots, pointer-based)
+    packet_queue_ = xQueueCreate(16, sizeof(BufferSlab *));
     assert(packet_queue_);
 
     // Create event group
     events_ = xEventGroupCreate();
     assert(events_);
 
-    // Pass unified queue to transports before init
+    // Pass unified queue and buffer pool to transports before init
     ble_.set_packet_queue(packet_queue_);
+    ble_.set_buffer_pool(&buffer_pool_);
     lora_.set_packet_queue(packet_queue_);
+    lora_.set_buffer_pool(&buffer_pool_);
 
     // Init transports
     ble_.init();
@@ -88,29 +93,39 @@ void MeshManager::init()
                 rssi, hops, payload_size, 100.0f);
         });
 
+    // Wire up fragment forwarding to MQTT
+    transfer_engine_.set_forward_to_mqtt(
+        [this](uint32_t session_id, uint16_t seq, uint16_t src_node,
+               const uint8_t *data, size_t len, const char *filename) {
+            if (mqtt_client_)
+                mqtt_client_->publish_fragment(session_id, seq, src_node,
+                                               data, len, filename);
+        });
+
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
     ESP_LOGI(TAG, "MeshManager initialized");
 }
 
-// ── Main loop ────────────────────────────────────────────────────────────────
+// -- Main loop ----------------------------------------------------------------
 
 void MeshManager::run()
 {
     while (true)
     {
         // NFR-MESH2: Single blocking receive on unified queue — transports
-        // post RxPacket items directly, no polling indirection.
+        // post BufferSlab* items directly, no polling indirection.
         // Timeout drives periodic tasks (discovery, prune, ARQ tick).
-        RxPacket pkt;
+        BufferSlab *slab = nullptr;
         for (uint8_t drain = 0; drain < 8; drain++)
         {
             TickType_t wait = (drain == 0) ? pdMS_TO_TICKS(100) : 0;
-            if (xQueueReceive(packet_queue_, &pkt, wait) != pdTRUE)
+            if (xQueueReceive(packet_queue_, &slab, wait) != pdTRUE)
             {
                 break;
             }
-            process_packet(pkt);
+            process_slab(slab);
+            buffer_pool_.release(slab);
         }
 
         // Periodic tasks
@@ -143,18 +158,18 @@ void MeshManager::run()
     }
 }
 
-// ── Packet dispatch ──────────────────────────────────────────────────────────
+// -- Packet dispatch ----------------------------------------------------------
 
-void MeshManager::process_packet(const RxPacket &pkt)
+void MeshManager::process_slab(BufferSlab *slab)
 {
-    if (pkt.len < PACKET_HEADER_SIZE)
+    if (slab->len < PACKET_HEADER_SIZE)
     {
-        ESP_LOGW(TAG, "Packet too short: %zu bytes", pkt.len);
+        ESP_LOGW(TAG, "Packet too short: %zu bytes", slab->len);
         return;
     }
 
     PacketHeader hdr;
-    memcpy(&hdr, pkt.data, PACKET_HEADER_SIZE);
+    memcpy(&hdr, slab->data, PACKET_HEADER_SIZE);
 
     // Drop our own packets (e.g. LoRa broadcast echoes back to sender)
     if (hdr.src_addr == my_addr_)
@@ -175,13 +190,13 @@ void MeshManager::process_packet(const RxPacket &pkt)
     }
 
     // Update route table with source info
-    bool via_ble = (pkt.source == RxTransport::BLE);
-    bool via_lora = (pkt.source == RxTransport::LORA);
+    bool via_ble = (slab->source == RxTransport::BLE);
+    bool via_lora = (slab->source == RxTransport::LORA);
     route_table_.update_neighbor(
-        hdr.src_addr, pkt.rssi, hdr.hop_count(), via_ble, via_lora);
+        hdr.src_addr, slab->rssi, hdr.hop_count(), via_ble, via_lora);
 
-    const uint8_t *payload = pkt.data + PACKET_HEADER_SIZE;
-    size_t payload_len = pkt.len - PACKET_HEADER_SIZE;
+    const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
+    size_t payload_len = slab->len - PACKET_HEADER_SIZE;
 
     // Is this packet for us or broadcast?
     if (hdr.dst_addr == my_addr_ || hdr.dst_addr == BROADCAST_ADDR)
@@ -201,28 +216,14 @@ void MeshManager::process_packet(const RxPacket &pkt)
                 break;
             case PacketType::DATA:
                 transfer_engine_.handle_data(hdr, payload, payload_len);
-                // Check if receive is complete → hand to MQTT
-                if (transfer_engine_.is_receive_complete())
-                {
-                    ESP_LOGI(TAG,
-                             "File reassembly complete (%zu bytes)",
-                             transfer_engine_.get_file_size());
-                    xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
-                    if (mqtt_client_ && has_internet_)
-                    {
-                        mqtt_client_->publish_file(
-                            transfer_engine_.current_filename(),
-                            transfer_engine_.get_reassembly_buffer(),
-                            transfer_engine_.get_file_size(),
-                            hdr.src_addr);
-                    }
-                }
+                // Exit nodes forward fragments individually via forward_to_mqtt callback
+                // No reassembly check needed here
                 break;
             case PacketType::ACK:
-                transfer_engine_.handle_ack(hdr.seq_num);
+                transfer_engine_.handle_ack(hdr.seq_num, hdr.src_addr);
                 break;
             case PacketType::NACK:
-                transfer_engine_.handle_nack(hdr.seq_num);
+                transfer_engine_.handle_nack(hdr.seq_num, hdr.src_addr);
                 break;
             default:
                 ESP_LOGD(TAG,
@@ -235,11 +236,11 @@ void MeshManager::process_packet(const RxPacket &pkt)
     // Forward if not for us (and not broadcast)
     if (hdr.dst_addr != my_addr_ && hdr.dst_addr != BROADCAST_ADDR)
     {
-        forward_packet(pkt, hdr);
+        forward_packet(slab, hdr);
     }
 }
 
-// ── Task 3: Discovery with hops_to_internet tracking ─────────────────────────
+// -- Task 3: Discovery with hops_to_internet tracking -------------------------
 
 void MeshManager::handle_discovery(const PacketHeader &hdr,
                                    const uint8_t *payload,
@@ -266,8 +267,8 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
     }
 
     // Store hops_to_internet from the discovery payload.
-    // process_packet already called update_neighbor with the correct
-    // transport/RSSI/hops from the RxPacket, so we must not call
+    // process_slab already called update_neighbor with the correct
+    // transport/RSSI/hops from the BufferSlab, so we must not call
     // update_neighbor again with hardcoded values that would overwrite them.
     route_table_.set_hops_to_internet(hdr.src_addr, disc.hops_to_internet);
 
@@ -293,9 +294,9 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
                 sizeof(resp));
 }
 
-// ── Forwarding ───────────────────────────────────────────────────────────────
+// -- Forwarding ---------------------------------------------------------------
 
-void MeshManager::forward_packet(const RxPacket &pkt, const PacketHeader &hdr)
+void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 {
     uint16_t next = route_table_.next_hop(hdr.dst_addr);
     if (next == BROADCAST_ADDR)
@@ -304,10 +305,8 @@ void MeshManager::forward_packet(const RxPacket &pkt, const PacketHeader &hdr)
         return;
     }
 
-    uint8_t buf[MAX_MTU];
-    memcpy(buf, pkt.data, pkt.len);
-
-    PacketHeader *fwd_hdr = reinterpret_cast<PacketHeader *>(buf);
+    // Mutate in-place
+    PacketHeader *fwd_hdr = reinterpret_cast<PacketHeader *>(slab->data);
     fwd_hdr->set_ttl_hops(fwd_hdr->ttl() - 1, fwd_hdr->hop_count() + 1);
 
     NeighborEntry neighbor;
@@ -318,7 +317,7 @@ void MeshManager::forward_packet(const RxPacket &pkt, const PacketHeader &hdr)
     }
 
     Transport t =
-        protocol_selector_.select(rssi, fwd_hdr->hop_count(), pkt.len, 100.0f);
+        protocol_selector_.select(rssi, fwd_hdr->hop_count(), slab->len, 100.0f);
 
     ESP_LOGD(TAG,
              "Forwarding to 0x%04X via 0x%04X (%s), ttl=%u",
@@ -327,10 +326,10 @@ void MeshManager::forward_packet(const RxPacket &pkt, const PacketHeader &hdr)
              (t == Transport::BLE) ? "BLE" : "LoRa",
              fwd_hdr->ttl());
 
-    send_raw(t, buf, pkt.len, next);
+    send_raw(t, slab->data, slab->len, next);
 }
 
-// ── Task 3: Discovery broadcast with computed hops_to_internet ───────────────
+// -- Task 3: Discovery broadcast with computed hops_to_internet ---------------
 
 void MeshManager::send_discovery()
 {
@@ -363,7 +362,7 @@ void MeshManager::send_discovery()
              disc.hops_to_internet);
 }
 
-// ── Start file transfer (delegates to TransferEngine) ────────────────────────
+// -- Start file transfer (delegates to TransferEngine) ------------------------
 
 void MeshManager::start_file_transfer(const char *filename,
                                       const uint8_t *data,
@@ -373,7 +372,7 @@ void MeshManager::start_file_transfer(const char *filename,
     transfer_engine_.start_file_transfer(filename, data, size, t);
 }
 
-// ── send_packet / send_raw ───────────────────────────────────────────────────
+// -- send_packet / send_raw ---------------------------------------------------
 
 void MeshManager::send_packet(uint16_t dst,
                               PacketType type,

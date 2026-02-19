@@ -14,6 +14,7 @@ static constexpr uint8_t ARQ_WINDOW = 8;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
 static constexpr uint8_t MAX_RETRIES = 3;
 static constexpr uint8_t MAX_NEIGHBORS = 16;
+static constexpr uint8_t MAX_EXIT_NODES = 4;
 
 enum class PacketType : uint8_t
 {
@@ -78,6 +79,7 @@ struct __attribute__((packed)) DiscoveryPayload
 
 struct __attribute__((packed)) TransferAdPayload
 {
+    uint32_t session_id;
     uint32_t file_size;
     uint16_t fragment_count;
     uint16_t fragment_size;
@@ -86,6 +88,7 @@ struct __attribute__((packed)) TransferAdPayload
 
 struct __attribute__((packed)) TransferAckPayload
 {
+    uint32_t session_id;
     uint16_t exit_node_addr;
     int8_t rssi_to_gw;
     uint8_t hops_to_gw;

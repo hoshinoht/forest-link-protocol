@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "buffer_pool.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "host/ble_hs.h"
@@ -89,6 +90,8 @@ class BleTransport : public ITransport
         packet_queue_ = q;
     }
 
+    void set_buffer_pool(BufferPool *p) { buffer_pool_ = p; }
+
     void init() override;
     void deinit() override;
 
@@ -118,6 +121,7 @@ class BleTransport : public ITransport
 
     PeerConn peers_[BLE_MAX_CONNECTIONS] = {};
     QueueHandle_t packet_queue_ = nullptr; // shared MeshManager queue
+    BufferPool *buffer_pool_ = nullptr;
     uint16_t tx_chr_val_handle_ = 0;
     uint16_t node_addr_ = 0;
     bool initialized_ = false;
