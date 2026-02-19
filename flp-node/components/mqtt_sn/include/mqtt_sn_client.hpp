@@ -32,6 +32,17 @@ struct FilePublishRequest
     uint16_t src_node;
 };
 
+// Request to publish a single fragment (exit node -> MQTT)
+struct FragmentPublishRequest
+{
+    uint32_t session_id;
+    uint16_t seq;
+    uint16_t src_node;
+    uint8_t data[512];
+    size_t len;
+    char filename[20];
+};
+
 // Cloud NACK for retransmitting a file chunk
 struct CloudNackItem
 {
@@ -58,6 +69,10 @@ class MqttSnClient
                       const uint8_t *data,
                       size_t size,
                       uint16_t src_node);
+
+    // Fragment-level publish for exit nodes (no reassembly needed)
+    void publish_fragment(uint32_t session_id, uint16_t seq, uint16_t src_node,
+                          const uint8_t *data, size_t len, const char *filename);
 
     void set_rx_callback(MqttRxCallback cb)
     {
@@ -94,11 +109,17 @@ class MqttSnClient
     void handle_mqtt_event(esp_mqtt_event_handle_t event);
     void register_default_topics();
     void process_file_publish(const FilePublishRequest &req);
+    void process_fragment_publish();
     void process_nack_retransmit();
 
     // Last published file data (retained for NACK retransmission)
     const uint8_t *last_file_data_ = nullptr;
     size_t last_file_size_ = 0;
+
+    // Fragment publish queue (exit node mode)
+    QueueHandle_t fragment_publish_queue_ = nullptr;
+    bool meta_published_ = false;
+    uint32_t last_meta_session_id_ = 0;
 };
 
 } // namespace flp

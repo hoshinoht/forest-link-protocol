@@ -110,11 +110,22 @@ class FlpMqttAdmin:
                 f"[Meta] File transfer from {node_id}: {filename} ({total_size} bytes, {chunk_count} chunks)")
 
             with self._lock:
+                already_active = (
+                    self.transfer_queue.active_transfer is not None
+                    and self.transfer_queue.active_transfer.session_id == session_id
+                )
                 session = self.transfer_queue.enqueue(
                     session_id, node_id, filename, total_size, chunk_count, crc32)
 
-                # If this is now the active transfer, set up reassembler and SR
-                if self.transfer_queue.active_transfer and self.transfer_queue.active_transfer.session_id == session_id:
+                # Set up reassembler and SR only when this session first becomes
+                # active. If it was already active before enqueue() returned,
+                # another exit node is just joining an in-progress transfer —
+                # skip re-initialisation to avoid resetting receiver state.
+                if (
+                    not already_active
+                    and self.transfer_queue.active_transfer is not None
+                    and self.transfer_queue.active_transfer.session_id == session_id
+                ):
                     self._setup_active_transfer(session)
         except (json.JSONDecodeError, KeyError) as e:
             print(f"[Meta] Error parsing metadata from {node_id}: {e}")

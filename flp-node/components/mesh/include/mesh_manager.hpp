@@ -22,6 +22,7 @@
 #include <cstdint>
 
 #include "ble_transport.hpp"
+#include "buffer_pool.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -85,11 +86,11 @@ class MeshManager
                      size_t payload_len);
 
   private:
-    void process_packet(const RxPacket &pkt);
+    void process_slab(BufferSlab *slab);
     void handle_discovery(const PacketHeader &hdr,
                           const uint8_t *payload,
                           size_t payload_len);
-    void forward_packet(const RxPacket &pkt, const PacketHeader &hdr);
+    void forward_packet(BufferSlab *slab, const PacketHeader &hdr);
     void send_discovery();
     void send_raw(Transport transport,
                   const uint8_t *data,
@@ -101,6 +102,7 @@ class MeshManager
     LoraTransport lora_;
     ProtocolSelector protocol_selector_;
     TransferEngine transfer_engine_;
+    BufferPool buffer_pool_;
 
     QueueHandle_t packet_queue_ = nullptr;
     EventGroupHandle_t events_ = nullptr;

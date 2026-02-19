@@ -169,27 +169,40 @@ void LoraTransport::rx_task_func(void *arg)
             uint8_t rx_addr = self->read_reg(sx1276::REG_FIFO_RX_CURRENT);
             self->write_reg(sx1276::REG_FIFO_ADDR_PTR, rx_addr);
 
-            RxPacket rpkt = {};
-            rpkt.len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
-            rpkt.source = RxTransport::LORA;
+            BufferSlab *slab = self->buffer_pool_
+                                   ? self->buffer_pool_->acquire()
+                                   : nullptr;
+            if (!slab)
+            {
+                ESP_LOGW(TAG, "Buffer pool exhausted, dropping LoRa RX");
+                self->write_reg(sx1276::REG_IRQ_FLAGS, sx1276::IRQ_ALL);
+                continue;
+            }
+
+            slab->len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
+            slab->source = RxTransport::LORA;
 
             // Read payload from FIFO
             if (pkt_len > 0 && pkt_len <= LORA_MAX_PACKET)
             {
-                self->read_fifo(rpkt.data, rpkt.len);
+                self->read_fifo(slab->data, slab->len);
             }
 
             // Read packet RSSI: -157 + reg value (for HF port, > 862 MHz)
             uint8_t rssi_raw = self->read_reg(sx1276::REG_PKT_RSSI_VALUE);
-            rpkt.rssi = static_cast<int8_t>(
+            slab->rssi = static_cast<int8_t>(
                 (-157 + rssi_raw) < -128 ? -128 : (-157 + rssi_raw));
 
-            ESP_LOGD(TAG, "RX %zu bytes, RSSI=%d", rpkt.len, rpkt.rssi);
+            ESP_LOGD(TAG, "RX %zu bytes, RSSI=%d", slab->len, slab->rssi);
 
             // Post directly to unified mesh queue
             if (self->packet_queue_)
             {
-                xQueueSend(self->packet_queue_, &rpkt, 0);
+                xQueueSend(self->packet_queue_, &slab, 0);
+            }
+            else
+            {
+                self->buffer_pool_->release(slab);
             }
         }
 

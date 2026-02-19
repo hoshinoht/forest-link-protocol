@@ -37,9 +37,13 @@ struct ActiveTransfer
     uint16_t fragment_count = 0;
     uint16_t fragment_size = 0;
     uint16_t next_fragment = 0;
-    uint16_t exit_node = 0;
+    uint16_t exit_nodes[MAX_EXIT_NODES] = {};
+    uint8_t exit_node_count = 0;
+    uint32_t session_id = 0;
     char filename[20] = {};
     bool active = false;
+    bool exit_node_alive[MAX_EXIT_NODES] = {true, true, true, true};
+    uint32_t last_ack_ms[MAX_EXIT_NODES] = {};
 };
 
 // Async broadcast retry state
@@ -72,6 +76,14 @@ using SelectTransportFn = std::function<Transport(int8_t rssi,
                                                   uint8_t hops,
                                                   size_t payload_size)>;
 
+// Callback for forwarding fragments to MQTT
+using ForwardToMqttFn = std::function<void(uint32_t session_id,
+                                            uint16_t seq,
+                                            uint16_t src_node,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            const char *filename)>;
+
 class TransferEngine
 {
   public:
@@ -94,8 +106,8 @@ class TransferEngine
     void handle_data(const PacketHeader &hdr,
                      const uint8_t *payload,
                      size_t payload_len);
-    void handle_ack(uint16_t seq);
-    void handle_nack(uint16_t seq);
+    void handle_ack(uint16_t seq, uint16_t from_addr);
+    void handle_nack(uint16_t seq, uint16_t from_addr);
 
     // Start a file transfer (sender side)
     void start_file_transfer(const char *filename,
@@ -110,25 +122,27 @@ class TransferEngine
     const char *current_filename() const { return transfer_.filename; }
     bool is_transfer_active() const { return transfer_.active; }
 
-    // ARQ passthrough for receiver buffer access
-    const uint8_t *get_reassembly_buffer() const
-    {
-        return arq_.get_reassembly_buffer();
-    }
-    size_t get_file_size() const { return arq_.get_file_size(); }
-    bool is_receive_complete() const { return arq_.is_complete(); }
-    void cleanup_receiver() { arq_.cleanup_receiver(); }
+    // Exit node status
+    bool is_exit_node() const { return is_exit_node_; }
+
+    // Set callback for forwarding fragments to MQTT
+    void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 
   private:
     void transfer_tick();
     void broadcast_retry_tick(uint32_t now_ms);
     void election_timeout_tick(uint32_t now_ms);
+    void exit_node_health_tick(uint32_t now_ms);
+    void redistribute_dead_exit(uint8_t dead_idx);
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
                                    size_t payload_len,
                                    uint8_t max_retries = 3);
+    int8_t arq_index_for_peer(uint16_t addr) const;
 
-    SelectiveRepeat arq_;
+    static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 10000;
+
+    SelectiveRepeat arq_[MAX_EXIT_NODES];
     ActiveTransfer transfer_ = {};
     BroadcastRetry broadcast_retry_ = {};
 
@@ -137,15 +151,20 @@ class TransferEngine
     uint32_t election_start_ms_ = 0;
     bool election_active_ = false;
 
-    // Receiver-side PSRAM cleanup timeout
-    uint32_t receiver_init_ms_ = 0;
-    bool receiver_waiting_ = false;
-
     EventGroupHandle_t events_ = nullptr;
     uint16_t my_addr_ = 0;
     SendPacketFn send_fn_;
     SendRawFn send_raw_fn_;
     SelectTransportFn select_fn_;
+
+    ForwardToMqttFn forward_to_mqtt_fn_;
+    bool is_exit_node_ = false;
+    uint32_t active_session_id_ = 0;
+    uint16_t source_addr_ = 0;
+
+    // Pending redistribution queue (fragments from dead exit nodes)
+    uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
+    uint8_t redist_count_ = 0;
 };
 
 } // namespace flp

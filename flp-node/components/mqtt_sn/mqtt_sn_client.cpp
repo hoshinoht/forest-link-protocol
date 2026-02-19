@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
+#include "packet.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -23,6 +24,7 @@ void MqttSnClient::init()
     // Create publish queues
     publish_queue_ = xQueueCreate(16, sizeof(MqttPublishItem));
     file_publish_queue_ = xQueueCreate(2, sizeof(FilePublishRequest));
+    fragment_publish_queue_ = xQueueCreate(8, sizeof(FragmentPublishRequest));
     nack_queue_ = xQueueCreate(16, sizeof(CloudNackItem));
 
     // Configure and start ESP-IDF MQTT client
@@ -297,6 +299,68 @@ void MqttSnClient::process_file_publish(const FilePublishRequest &req)
     ESP_LOGI(TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
 }
 
+void MqttSnClient::publish_fragment(uint32_t session_id, uint16_t seq,
+                                     uint16_t src_node, const uint8_t *data,
+                                     size_t len, const char *filename)
+{
+    FragmentPublishRequest req = {};
+    req.session_id = session_id;
+    req.seq = seq;
+    req.src_node = src_node;
+    if (len > MAX_MTU) len = MAX_MTU;
+    memcpy(req.data, data, len);
+    req.len = len;
+    strncpy(req.filename, filename, sizeof(req.filename) - 1);
+
+    if (xQueueSend(fragment_publish_queue_, &req, 0) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Fragment publish queue full, dropping seq=%u", seq);
+    }
+}
+
+void MqttSnClient::process_fragment_publish()
+{
+    if (!connected_ || !client_)
+        return;
+
+    FragmentPublishRequest req;
+    while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
+    {
+        // Publish meta on first fragment of a new session
+        if (!meta_published_ || last_meta_session_id_ != req.session_id)
+        {
+            char meta_topic[64];
+            snprintf(meta_topic, sizeof(meta_topic), "flp/%04x/file/meta", node_addr_);
+
+            char meta_json[256];
+            int meta_len = snprintf(meta_json, sizeof(meta_json),
+                "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\","
+                "\"src_node\":\"0x%04X\",\"exit_node\":\"0x%04X\"}",
+                req.session_id, req.filename, req.src_node, node_addr_);
+
+            esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
+            meta_published_ = true;
+            last_meta_session_id_ = req.session_id;
+            ESP_LOGI(TAG, "Published fragment meta: session=%" PRIu32 " file=%s",
+                     req.session_id, req.filename);
+        }
+
+        // Publish chunk: [2-byte seq_le][data]
+        char data_topic[64];
+        snprintf(data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
+
+        uint8_t chunk_buf[2 + MAX_MTU];
+        chunk_buf[0] = static_cast<uint8_t>(req.seq & 0xFF);
+        chunk_buf[1] = static_cast<uint8_t>((req.seq >> 8) & 0xFF);
+        memcpy(chunk_buf + 2, req.data, req.len);
+
+        esp_mqtt_client_publish(client_, data_topic,
+                                (const char *)chunk_buf, 2 + req.len, 1, 0);
+
+        ESP_LOGD(TAG, "Published fragment seq=%u len=%zu", req.seq, req.len);
+    }
+}
+
 void MqttSnClient::process_nack_retransmit()
 {
     if (!connected_ || !client_ || !last_file_data_ || last_file_size_ == 0)
@@ -372,6 +436,9 @@ void MqttSnClient::run()
                 process_file_publish(freq);
             }
         }
+
+        // Process fragment publish requests (exit node mode)
+        process_fragment_publish();
 
         // Process cloud NACK retransmissions
         process_nack_retransmit();

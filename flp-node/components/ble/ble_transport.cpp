@@ -30,26 +30,34 @@ static struct ble_gatt_chr_def kFlpCharacteristics[] = {
         .uuid = &kFlpTxCharUuid.u,
         .access_cb = nullptr,
         .arg = nullptr,
+        .descriptors = nullptr,
         .flags = BLE_GATT_CHR_F_NOTIFY,
+        .min_key_size = 0,
         .val_handle = nullptr, // patched in register_gatt_services
+        .cpfd = nullptr,
     },
     {
         // RX characteristic — peers write packets to us
         .uuid = &kFlpRxCharUuid.u,
         .access_cb = BleTransport::on_gatt_rx_write,
         .arg = nullptr,
+        .descriptors = nullptr,
         .flags = BLE_GATT_CHR_F_WRITE_NO_RSP,
+        .min_key_size = 0,
+        .val_handle = nullptr,
+        .cpfd = nullptr,
     },
-    {0} // sentinel
+    {} // sentinel
 };
 
 static struct ble_gatt_svc_def kGattServices[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &kFlpServiceUuid.u,
+        .includes = nullptr,
         .characteristics = kFlpCharacteristics,
     },
-    {0} // sentinel
+    {} // sentinel
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -159,7 +167,7 @@ int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
                                    struct ble_gatt_access_ctxt *ctxt,
                                    void *arg)
 {
-    if (!s_instance || !s_instance->packet_queue_)
+    if (!s_instance || !s_instance->packet_queue_ || !s_instance->buffer_pool_)
     {
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -167,10 +175,16 @@ int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
     struct os_mbuf *om = ctxt->om;
     uint16_t pkt_len = (uint16_t) OS_MBUF_PKTLEN(om);
 
-    RxPacket rpkt = {};
-    rpkt.len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
-    os_mbuf_copydata(om, 0, rpkt.len, rpkt.data);
-    rpkt.source = RxTransport::BLE;
+    BufferSlab *slab = s_instance->buffer_pool_->acquire();
+    if (!slab)
+    {
+        ESP_LOGW(TAG, "Buffer pool exhausted, dropping BLE RX packet");
+        return 0;
+    }
+
+    slab->len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
+    os_mbuf_copydata(om, 0, slab->len, slab->data);
+    slab->source = RxTransport::BLE;
 
     // Determine source address and RSSI from connection
     struct ble_gap_conn_desc desc;
@@ -178,11 +192,11 @@ int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
     {
         uint16_t peer_addr =
             s_instance->addr_from_ble(desc.peer_id_addr.val);
-        rpkt.rssi = s_instance->get_peer_rssi(peer_addr);
+        slab->rssi = s_instance->get_peer_rssi(peer_addr);
     }
 
     // NimBLE GATT callback runs in NimBLE host task context (not ISR)
-    xQueueSend(s_instance->packet_queue_, &rpkt, 0);
+    xQueueSend(s_instance->packet_queue_, &slab, 0);
 
     return 0;
 }

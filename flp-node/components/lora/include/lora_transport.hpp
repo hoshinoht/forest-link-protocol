@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "buffer_pool.hpp"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "freertos/FreeRTOS.h"
@@ -61,6 +62,8 @@ class LoraTransport : public ITransport
         packet_queue_ = q;
     }
 
+    void set_buffer_pool(BufferPool *p) { buffer_pool_ = p; }
+
     // ITransport interface
     void init() override { init(5); }
     void deinit() override;
@@ -94,6 +97,7 @@ class LoraTransport : public ITransport
     gpio_num_t rst_pin_ = GPIO_NUM_NC;
     gpio_num_t dio0_pin_ = GPIO_NUM_NC;
     QueueHandle_t packet_queue_ = nullptr; // shared MeshManager queue
+    BufferPool *buffer_pool_ = nullptr;
     SemaphoreHandle_t spi_mutex_ = nullptr;
     TaskHandle_t rx_task_ = nullptr;
     SemaphoreHandle_t tx_done_sem_ = nullptr;
