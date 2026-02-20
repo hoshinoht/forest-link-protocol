@@ -186,6 +186,33 @@ class RouteTable
         }
     }
 
+    size_t serialize(uint8_t *buf, size_t max_len) const
+    {
+        // Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1, flags:1}*N]
+        // flags: bit0=ble_reachable, bit1=lora_reachable, bit2=has_internet
+        size_t needed = 1 + count_ * 6;
+        if (needed > max_len)
+            return 0;
+        buf[0] = count_;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            size_t off = 1 + i * 6;
+            memcpy(buf + off, &neighbors_[i].addr, 2); // little-endian on ESP32
+            buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
+            buf[off + 3] = neighbors_[i].hop_count;
+            buf[off + 4] = neighbors_[i].hops_to_internet;
+            uint8_t flags = 0;
+            if (neighbors_[i].ble_reachable)
+                flags |= 0x01;
+            if (neighbors_[i].lora_reachable)
+                flags |= 0x02;
+            if (neighbors_[i].has_internet)
+                flags |= 0x04;
+            buf[off + 5] = flags;
+        }
+        return needed;
+    }
+
     uint8_t min_hops_to_internet() const
     {
         uint8_t best = 0xFF;

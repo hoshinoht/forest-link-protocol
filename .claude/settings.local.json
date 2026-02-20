@@ -33,7 +33,14 @@
       "Bash(bash -c 'source \"\"$HOME/esp/esp-idf/export.sh\"\" >/dev/null 2>&1 && idf.py build 2>&1 | tail -80')",
       "Bash(bash -c 'ls /Users/cantabile/projects/sit/csc2106/forest-link-protocol/flp-node/components/')",
       "Bash(bash -c 'source \"\"$HOME/esp/esp-idf/export.sh\"\" >/dev/null 2>&1 && idf.py build 2>&1 | tail -15')",
-      "Bash(bash idf.sh:*)"
+      "Bash(bash idf.sh:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:www.microcontrollertips.com)",
+      "WebFetch(domain:pages.silabs.com)",
+      "Bash(python:*)"
     ]
-  }
+  },
+  "outputStyle": "default"
 }

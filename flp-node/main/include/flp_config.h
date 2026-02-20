@@ -35,5 +35,7 @@
 #define FLP_BUTTON_TASK_PRIORITY 5
 #define FLP_BUTTON_DEBOUNCE_MS   2000
 
-// Maximum ingest file size (3 MB)
-#define FLP_INGEST_MAX_SIZE (3 * 1024 * 1024)
+// Maximum ingest file size (10 MB) — pre-allocation guard in uart_ingest
+// checks available PSRAM before allocating, so this only succeeds if memory
+// is actually available.
+#define FLP_INGEST_MAX_SIZE (10 * 1024 * 1024)

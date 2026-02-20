@@ -15,6 +15,7 @@
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -104,6 +105,9 @@ void MeshManager::init()
 
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
+    // Init heap monitor
+    heap_monitor_.init();
+
     ESP_LOGI(TAG, "MeshManager initialized");
 }
 
@@ -150,8 +154,21 @@ void MeshManager::run()
         if (now - bias_timer_ms_ > 10000)
         {
             protocol_selector_.recalculate_bias();
+            heap_monitor_.periodic_check();
             bias_timer_ms_ = now;
         }
+
+        // Publish topology + metrics + heap every 30s via relay.
+        // relay_publish() handles both exit nodes (direct MQTT) and
+        // deep-field nodes (MESH_PUB routed through mesh to exit).
+        if (now - topo_metrics_timer_ms_ > 30000)
+        {
+            publish_all_telemetry();
+            topo_metrics_timer_ms_ = now;
+        }
+
+        // Drain inbound mesh commands from cloud (exit nodes only)
+        drain_cmd_queue();
 
         // Transfer engine tick (ARQ, election, broadcast retry, fragment feed)
         transfer_engine_.tick(now);
@@ -198,8 +215,13 @@ void MeshManager::process_slab(BufferSlab *slab)
     const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
     size_t payload_len = slab->len - PACKET_HEADER_SIZE;
 
-    // Is this packet for us or broadcast?
-    if (hdr.dst_addr == my_addr_ || hdr.dst_addr == BROADCAST_ADDR)
+    // EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others.
+    bool is_exit = has_internet_ && mqtt_client_;
+    bool for_us = (hdr.dst_addr == my_addr_) ||
+                  (hdr.dst_addr == BROADCAST_ADDR) ||
+                  (hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
+
+    if (for_us)
     {
         switch (hdr.type())
         {
@@ -215,15 +237,20 @@ void MeshManager::process_slab(BufferSlab *slab)
                     hdr, payload, payload_len);
                 break;
             case PacketType::DATA:
+            case PacketType::PARITY:
                 transfer_engine_.handle_data(hdr, payload, payload_len);
-                // Exit nodes forward fragments individually via forward_to_mqtt callback
-                // No reassembly check needed here
                 break;
             case PacketType::ACK:
                 transfer_engine_.handle_ack(hdr.seq_num, hdr.src_addr);
                 break;
             case PacketType::NACK:
                 transfer_engine_.handle_nack(hdr.seq_num, hdr.src_addr);
+                break;
+            case PacketType::MESH_PUB:
+                handle_mesh_pub(hdr, payload, payload_len);
+                break;
+            case PacketType::MESH_CMD:
+                handle_mesh_cmd(hdr, payload, payload_len);
                 break;
             default:
                 ESP_LOGD(TAG,
@@ -233,8 +260,14 @@ void MeshManager::process_slab(BufferSlab *slab)
         }
     }
 
-    // Forward if not for us (and not broadcast)
-    if (hdr.dst_addr != my_addr_ && hdr.dst_addr != BROADCAST_ADDR)
+    // Forward if not for us (not unicast-to-us, not broadcast).
+    // EXIT_ANY_ADDR packets are forwarded by non-exit nodes — next_hop()
+    // won't find 0xFFFE in neighbors so it falls back to routing toward
+    // the lowest hops_to_internet, which is exactly what we want.
+    bool should_forward = (hdr.dst_addr != my_addr_) &&
+                          (hdr.dst_addr != BROADCAST_ADDR) &&
+                          !(hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
+    if (should_forward)
     {
         forward_packet(slab, hdr);
     }
@@ -360,6 +393,158 @@ void MeshManager::send_discovery()
     ESP_LOGD(TAG,
              "Sent discovery broadcast (hops_to_inet=%u)",
              disc.hops_to_internet);
+}
+
+// -- Mesh relay layer ---------------------------------------------------------
+
+static const char *relay_topic_suffix(uint8_t topic_id)
+{
+    switch (topic_id)
+    {
+        case RelayTopic::HEAP:     return "heap";
+        case RelayTopic::METRICS:  return "metrics";
+        case RelayTopic::TOPOLOGY: return "topology";
+        case RelayTopic::STATUS:   return "status";
+        default:                   return "unknown";
+    }
+}
+
+void MeshManager::relay_publish(uint8_t relay_topic,
+                                const uint8_t *data,
+                                size_t len)
+{
+    if (has_internet_ && mqtt_client_)
+    {
+        // Exit node: publish directly to MQTT (may queue if temporarily
+        // disconnected — matches is_exit predicate in process_slab)
+        char topic[40];
+        snprintf(topic, sizeof(topic), "flp/%04X/%s",
+                 my_addr_, relay_topic_suffix(relay_topic));
+        mqtt_client_->publish_raw(topic, data, len);
+    }
+    else
+    {
+        // Deep-field node: wrap in MESH_PUB and route to nearest exit.
+        // Payload: [relay_topic:1][data:N]
+        uint8_t payload[MAX_MTU - PACKET_HEADER_SIZE];
+        payload[0] = relay_topic;
+        size_t copy_len = len;
+        if (copy_len > sizeof(payload) - 1)
+            copy_len = sizeof(payload) - 1;
+        memcpy(payload + 1, data, copy_len);
+        send_packet(EXIT_ANY_ADDR, PacketType::MESH_PUB,
+                    payload, 1 + copy_len);
+    }
+}
+
+void MeshManager::handle_mesh_pub(const PacketHeader &hdr,
+                                  const uint8_t *payload,
+                                  size_t payload_len)
+{
+    // Exit node received a relayed publish from a deep-field node.
+    // Forward to MQTT on behalf of the originator (hdr.src_addr).
+    if (payload_len < 2 || !mqtt_client_)
+        return;
+
+    uint8_t relay_topic = payload[0];
+    const uint8_t *data = payload + 1;
+    size_t data_len = payload_len - 1;
+
+    char topic[40];
+    snprintf(topic, sizeof(topic), "flp/%04X/%s",
+             hdr.src_addr, relay_topic_suffix(relay_topic));
+    mqtt_client_->publish_raw(topic, data, data_len);
+
+    ESP_LOGD(TAG, "Relayed MESH_PUB from 0x%04X topic=%s len=%zu",
+             hdr.src_addr, relay_topic_suffix(relay_topic), data_len);
+}
+
+void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
+                                  const uint8_t *payload,
+                                  size_t payload_len)
+{
+    if (payload_len < 1)
+        return;
+
+    uint8_t cmd_id = payload[0];
+    ESP_LOGI(TAG, "MESH_CMD from 0x%04X: cmd=%u len=%zu",
+             hdr.src_addr, cmd_id, payload_len - 1);
+
+    switch (cmd_id)
+    {
+        case MeshCmd::REQUEST_TELEMETRY:
+            publish_all_telemetry();
+            break;
+        case MeshCmd::REBOOT:
+            ESP_LOGW(TAG, "Remote reboot requested by 0x%04X", hdr.src_addr);
+            esp_restart();
+            break;
+        default:
+            ESP_LOGD(TAG, "Unknown MESH_CMD %u", cmd_id);
+            break;
+    }
+}
+
+void MeshManager::publish_all_telemetry()
+{
+    // Topology
+    uint8_t topo_buf[128];
+    size_t topo_len = route_table_.serialize(topo_buf, sizeof(topo_buf));
+    if (topo_len > 0)
+        relay_publish(RelayTopic::TOPOLOGY, topo_buf, topo_len);
+
+    // Protocol metrics
+    uint8_t metrics_buf[48];
+    size_t metrics_len = protocol_selector_.serialize_metrics(
+        metrics_buf, sizeof(metrics_buf));
+    if (metrics_len > 0)
+        relay_publish(RelayTopic::METRICS, metrics_buf, metrics_len);
+
+    // Heap stats
+    uint8_t heap_buf[20];
+    size_t heap_len = heap_monitor_.serialize(heap_buf, sizeof(heap_buf));
+    if (heap_len > 0)
+        relay_publish(RelayTopic::HEAP, heap_buf, heap_len);
+}
+
+void MeshManager::drain_cmd_queue()
+{
+    if (!mqtt_client_)
+        return;
+
+    // Exit nodes drain commands from MQTT and inject into mesh
+    MeshCmdItem cmd;
+    while (mqtt_client_->receive_cmd(cmd))
+    {
+        if (cmd.target_addr == my_addr_)
+        {
+            // Command is for this exit node itself
+            uint8_t buf[65];
+            buf[0] = cmd.cmd_id;
+            if (cmd.data_len > 0)
+                memcpy(buf + 1, cmd.data, cmd.data_len);
+
+            PacketHeader fake_hdr = {};
+            fake_hdr.src_addr = 0; // from cloud
+            handle_mesh_cmd(fake_hdr, buf, 1 + cmd.data_len);
+        }
+        else
+        {
+            // Route command into mesh toward target node
+            uint8_t payload[65];
+            payload[0] = cmd.cmd_id;
+            size_t plen = 1;
+            if (cmd.data_len > 0 && cmd.data_len <= 64)
+            {
+                memcpy(payload + 1, cmd.data, cmd.data_len);
+                plen += cmd.data_len;
+            }
+            send_packet(cmd.target_addr, PacketType::MESH_CMD,
+                        payload, plen);
+            ESP_LOGI(TAG, "Routed MESH_CMD to 0x%04X cmd=%u",
+                     cmd.target_addr, cmd.cmd_id);
+        }
+    }
 }
 
 // -- Start file transfer (delegates to TransferEngine) ------------------------

@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "esp_timer.h"
+#include "fec_codec.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "packet.hpp"
@@ -104,6 +105,8 @@ class SelectiveRepeat
     size_t fragment_size_ = 0;
     size_t file_size_ = 0;
     bool receiver_active_ = false;
+
+    FecDecoder fec_decoder_;
 
     SendCallback send_cb_ = nullptr;
     uint16_t peer_addr_ = BROADCAST_ADDR;

@@ -16,6 +16,7 @@
 #include "freertos/event_groups.h"
 #include "packet.hpp"
 #include "protocol_selector.hpp"
+#include "fec_codec.hpp"
 #include "selective_repeat.hpp"
 
 namespace flp
@@ -156,6 +157,8 @@ class TransferEngine
     SendPacketFn send_fn_;
     SendRawFn send_raw_fn_;
     SelectTransportFn select_fn_;
+
+    FecEncoder fec_encoder_;
 
     ForwardToMqttFn forward_to_mqtt_fn_;
     bool is_exit_node_ = false;

@@ -1,0 +1,1 @@
+{"name": "Meshtastic", "pdr": 0.95, "throughput_bps": 1200, "latency_ms": 2000, "range_m": 3000, "notes": "LoRa mesh, 868/915 MHz"}

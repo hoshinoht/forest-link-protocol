@@ -231,6 +231,8 @@ void TransferEngine::start_file_transfer(const char *filename,
         return;
     }
 
+    fec_encoder_.reset();
+
     size_t frag_payload =
         (preferred_transport == Transport::BLE) ? BLE_MAX_PAYLOAD
                                                 : LORA_MAX_PAYLOAD;
@@ -238,8 +240,12 @@ void TransferEngine::start_file_transfer(const char *filename,
     transfer_.data = data;
     transfer_.size = size;
     transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
-    transfer_.fragment_count =
+    uint16_t data_frags =
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
+    uint16_t parity_frags =
+        static_cast<uint16_t>((data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
+    transfer_.fragment_count =
+        static_cast<uint16_t>(data_frags + parity_frags);
     transfer_.next_fragment = 0;
     transfer_.active = true;
     transfer_.session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -400,6 +406,7 @@ void TransferEngine::transfer_tick()
     }
 
     // Round-robin fragment assignment across alive exit nodes
+    // Sequence layout: every (FEC_GROUP_SIZE+1)th seq is a parity slot
     while (transfer_.next_fragment < transfer_.fragment_count)
     {
         // Find next alive exit node for this fragment
@@ -425,18 +432,50 @@ void TransferEngine::transfer_tick()
         if (arq_[arq_idx].sender_window_full())
             break;
 
-        size_t offset = static_cast<size_t>(transfer_.next_fragment) *
-                        transfer_.fragment_size;
-        size_t remain = transfer_.size - offset;
-        size_t frag_len = (remain < transfer_.fragment_size)
-                              ? remain
-                              : transfer_.fragment_size;
+        uint16_t seq = transfer_.next_fragment;
+        bool is_parity_slot =
+            (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
 
-        int ret = arq_[arq_idx].send_fragment(
-            transfer_.next_fragment, transfer_.data + offset, frag_len);
-        if (ret < 0)
+        if (is_parity_slot)
         {
-            break;
+            // Send parity fragment
+            int ret = arq_[arq_idx].send_fragment(
+                seq, fec_encoder_.parity_data(), fec_encoder_.parity_len());
+            if (ret < 0)
+                break;
+            fec_encoder_.reset();
+        }
+        else
+        {
+            // Map seq to data index (skip parity slots)
+            uint16_t group = seq / (FEC_GROUP_SIZE + 1);
+            uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
+            uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
+
+            size_t offset =
+                static_cast<size_t>(data_idx) * transfer_.fragment_size;
+            if (offset >= transfer_.size)
+            {
+                // Past end of file data — skip (tail parity will follow)
+                transfer_.next_fragment++;
+                continue;
+            }
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+
+            int ret = arq_[arq_idx].send_fragment(
+                seq, transfer_.data + offset, frag_len);
+            if (ret < 0)
+                break;
+
+            // Ingest into FEC encoder
+            fec_encoder_.ingest(transfer_.data + offset, frag_len);
+
+            // If this was the last data fragment and the group is not
+            // complete, the next seq should be a parity slot emitted by
+            // the tail-flush logic below
         }
 
         transfer_.next_fragment++;

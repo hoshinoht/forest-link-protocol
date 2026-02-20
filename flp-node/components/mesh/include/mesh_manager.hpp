@@ -30,6 +30,7 @@
 #include "packet.hpp"
 #include "protocol_selector.hpp"
 #include "route_table.hpp"
+#include "heap_monitor.hpp"
 #include "transfer_engine.hpp"
 
 #define FLP_EVT_WIFI_CONNECTED    BIT0
@@ -90,12 +91,26 @@ class MeshManager
     void handle_discovery(const PacketHeader &hdr,
                           const uint8_t *payload,
                           size_t payload_len);
+    void handle_mesh_pub(const PacketHeader &hdr,
+                         const uint8_t *payload,
+                         size_t payload_len);
+    void handle_mesh_cmd(const PacketHeader &hdr,
+                         const uint8_t *payload,
+                         size_t payload_len);
     void forward_packet(BufferSlab *slab, const PacketHeader &hdr);
     void send_discovery();
     void send_raw(Transport transport,
                   const uint8_t *data,
                   size_t len,
                   uint16_t peer_addr);
+
+    // Generic relay: publishes via MQTT if exit node, else routes
+    // through mesh to nearest exit node.
+    void relay_publish(uint8_t relay_topic,
+                       const uint8_t *data,
+                       size_t len);
+    void publish_all_telemetry();
+    void drain_cmd_queue();
 
     RouteTable route_table_;
     BleTransport ble_;
@@ -110,8 +125,13 @@ class MeshManager
     uint32_t discovery_timer_ms_ = 0;
     uint32_t prune_timer_ms_ = 0;
     uint32_t bias_timer_ms_ = 0;
+    uint32_t topo_metrics_timer_ms_ = 0;
     std::atomic<bool> has_internet_{false};
     uint8_t lora_rx_priority_ = 5;
+
+    // Heap monitor
+    HeapMonitor heap_monitor_;
+    uint32_t heap_timer_ms_ = 0;
 
     // MQTT bridge
     MqttSnClient *mqtt_client_ = nullptr;

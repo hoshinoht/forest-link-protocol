@@ -26,6 +26,7 @@ void MqttSnClient::init()
     file_publish_queue_ = xQueueCreate(2, sizeof(FilePublishRequest));
     fragment_publish_queue_ = xQueueCreate(8, sizeof(FragmentPublishRequest));
     nack_queue_ = xQueueCreate(16, sizeof(CloudNackItem));
+    cmd_queue_ = xQueueCreate(8, sizeof(MeshCmdItem));
 
     // Configure and start ESP-IDF MQTT client
     esp_mqtt_client_config_t mqtt_cfg = {};
@@ -112,10 +113,30 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             }
             topic_buf[tlen] = '\0';
 
-            // Admin command handler
-            if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data)
+            // Admin command handler — binary format: [target:2LE][cmd_id:1][data:N]
+            if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data &&
+                event->data_len >= 3)
             {
-                ESP_LOGI(TAG, "Admin cmd: %.*s", event->data_len, event->data);
+                MeshCmdItem cmd = {};
+                memcpy(&cmd.target_addr, event->data, 2); // little-endian
+                cmd.cmd_id = static_cast<uint8_t>(event->data[2]);
+                cmd.data_len = static_cast<size_t>(event->data_len) - 3;
+                if (cmd.data_len > sizeof(cmd.data))
+                    cmd.data_len = sizeof(cmd.data);
+                if (cmd.data_len > 0)
+                    memcpy(cmd.data, event->data + 3, cmd.data_len);
+
+                ESP_LOGI(TAG,
+                         "Admin cmd: target=0x%04X cmd=%u len=%zu",
+                         cmd.target_addr,
+                         cmd.cmd_id,
+                         cmd.data_len);
+
+                if (cmd_queue_ &&
+                    xQueueSend(cmd_queue_, &cmd, 0) != pdTRUE)
+                {
+                    ESP_LOGW(TAG, "Cmd queue full, dropping");
+                }
             }
 
             // Cloud NACK handler — parse {"type":"NACK","seq":N}
@@ -461,6 +482,13 @@ void MqttSnClient::run()
 
         vTaskDelay(pdMS_TO_TICKS(500));
     }
+}
+
+bool MqttSnClient::receive_cmd(MeshCmdItem &out)
+{
+    if (!cmd_queue_)
+        return false;
+    return xQueueReceive(cmd_queue_, &out, 0) == pdTRUE;
 }
 
 } // namespace flp
