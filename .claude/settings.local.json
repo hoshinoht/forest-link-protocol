@@ -39,7 +39,9 @@
       "WebFetch(domain:en.wikipedia.org)",
       "WebFetch(domain:www.microcontrollertips.com)",
       "WebFetch(domain:pages.silabs.com)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(grep:*)",
+      "Bash(git push:*)"
     ]
   },
   "outputStyle": "default"
