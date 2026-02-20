@@ -238,6 +238,9 @@ int BleTransport::on_gap_event(struct ble_gap_event *event, void *arg)
 
                 // Exchange MTU
                 ble_gattc_exchange_mtu(ch, nullptr, nullptr);
+
+                // Enable Data Length Extension (251B PDU instead of 27B default)
+                ble_gap_set_data_len(ch, 251, 2120);
             }
             else
             {
@@ -293,8 +296,8 @@ int BleTransport::on_gap_event(struct ble_gap_event *event, void *arg)
                         struct ble_gap_conn_params params = {};
                         params.scan_itvl = 0x0010;
                         params.scan_window = 0x0010;
-                        params.itvl_min = 24; // 30ms
-                        params.itvl_max = 40; // 50ms
+                        params.itvl_min = 6;  // 7.5ms
+                        params.itvl_max = 12; // 15ms
                         params.latency = 0;
                         params.supervision_timeout = 256; // ~2.56s
 

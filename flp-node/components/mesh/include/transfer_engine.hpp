@@ -15,7 +15,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "packet.hpp"
-#include "protocol_selector.hpp"
 #include "fec_codec.hpp"
 #include "selective_repeat.hpp"
 
@@ -53,6 +52,7 @@ struct BroadcastRetry
     uint8_t payload[MAX_MTU];
     size_t payload_len = 0;
     PacketType type = PacketType::DISCOVERY;
+    uint16_t dst_addr = BROADCAST_ADDR;
     uint8_t max_retries = 3;
     uint8_t attempt = 0;
     uint32_t next_send_ms = 0;
@@ -64,18 +64,8 @@ struct BroadcastRetry
 using SendPacketFn = std::function<void(uint16_t dst,
                                         PacketType type,
                                         const uint8_t *payload,
-                                        size_t payload_len)>;
-
-// Callback for sending raw bytes with transport selection
-using SendRawFn = std::function<void(Transport transport,
-                                     const uint8_t *data,
-                                     size_t len,
-                                     uint16_t peer_addr)>;
-
-// Callback for protocol selection
-using SelectTransportFn = std::function<Transport(int8_t rssi,
-                                                  uint8_t hops,
-                                                  size_t payload_size)>;
+                                        size_t payload_len,
+                                        uint16_t seq_num)>;
 
 // Callback for forwarding fragments to MQTT
 using ForwardToMqttFn = std::function<void(uint32_t session_id,
@@ -85,6 +75,15 @@ using ForwardToMqttFn = std::function<void(uint32_t session_id,
                                             size_t len,
                                             const char *filename)>;
 
+// Callback for publishing transfer meta to MQTT (exit node receives TRANSFER_AD)
+using ForwardMetaFn = std::function<void(uint32_t session_id,
+                                          const char *filename,
+                                          uint16_t src_node,
+                                          uint32_t total_size,
+                                          uint16_t chunk_count,
+                                          uint16_t fragment_size,
+                                          uint32_t crc32)>;
+
 class TransferEngine
 {
   public:
@@ -92,9 +91,7 @@ class TransferEngine
 
     void init(EventGroupHandle_t events,
               uint16_t my_addr,
-              SendPacketFn send_fn,
-              SendRawFn send_raw_fn,
-              SelectTransportFn select_fn);
+              SendPacketFn send_fn);
 
     // Packet handlers (called by MeshManager dispatch)
     void handle_transfer_ad(const PacketHeader &hdr,
@@ -113,8 +110,7 @@ class TransferEngine
     // Start a file transfer (sender side)
     void start_file_transfer(const char *filename,
                              const uint8_t *data,
-                             size_t size,
-                             Transport preferred_transport);
+                             size_t size);
 
     // Periodic tick — call from MeshManager::run()
     void tick(uint32_t now_ms);
@@ -129,6 +125,9 @@ class TransferEngine
     // Set callback for forwarding fragments to MQTT
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 
+    // Set callback for publishing transfer meta to MQTT (exit node)
+    void set_forward_meta(ForwardMetaFn fn) { forward_meta_fn_ = fn; }
+
   private:
     void transfer_tick();
     void broadcast_retry_tick(uint32_t now_ms);
@@ -138,6 +137,7 @@ class TransferEngine
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
                                    size_t payload_len,
+                                   uint16_t dst_addr = BROADCAST_ADDR,
                                    uint8_t max_retries = 3);
     int8_t arq_index_for_peer(uint16_t addr) const;
 
@@ -155,12 +155,11 @@ class TransferEngine
     EventGroupHandle_t events_ = nullptr;
     uint16_t my_addr_ = 0;
     SendPacketFn send_fn_;
-    SendRawFn send_raw_fn_;
-    SelectTransportFn select_fn_;
 
     FecEncoder fec_encoder_;
 
     ForwardToMqttFn forward_to_mqtt_fn_;
+    ForwardMetaFn forward_meta_fn_;
     bool is_exit_node_ = false;
     uint32_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;

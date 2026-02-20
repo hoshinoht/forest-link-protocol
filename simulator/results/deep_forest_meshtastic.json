@@ -1,0 +1,17 @@
+{
+  "name": "MESHTASTIC",
+  "notes": "simulated",
+  "pdr": 0.1711,
+  "throughput_bps": 388.53,
+  "latency_ms": 3585000.0,
+  "energy_j": 14695.546,
+  "hops_avg": 0,
+  "fragments_sent": 4425,
+  "fragments_delivered": 757,
+  "retransmits": 0,
+  "drops": {},
+  "memory_watermarks": {
+    "psram_min_free": 8388608,
+    "sram_min_free": 451000
+  }
+}

@@ -83,6 +83,12 @@ class MqttSnClient
     void publish_fragment(uint32_t session_id, uint16_t seq, uint16_t src_node,
                           const uint8_t *data, size_t len, const char *filename);
 
+    // Publish complete transfer meta (called when exit node receives TRANSFER_AD)
+    void publish_transfer_meta(uint32_t session_id, const char *filename,
+                               uint16_t src_node, uint16_t exit_node,
+                               uint32_t total_size, uint16_t chunk_count,
+                               uint16_t fragment_size, uint32_t crc32);
+
     void set_rx_callback(MqttRxCallback cb)
     {
         rx_callback_ = cb;

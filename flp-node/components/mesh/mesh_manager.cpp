@@ -81,18 +81,9 @@ void MeshManager::init()
         [this](uint16_t dst,
                PacketType type,
                const uint8_t *payload,
-               size_t payload_len)
-        { send_packet(dst, type, payload, payload_len); },
-        [this](Transport t,
-               const uint8_t *data,
-               size_t len,
-               uint16_t peer_addr)
-        { send_raw(t, data, len, peer_addr); },
-        [this](int8_t rssi, uint8_t hops, size_t payload_size)
-        {
-            return protocol_selector_.select(
-                rssi, hops, payload_size, 100.0f);
-        });
+               size_t payload_len,
+               uint16_t seq_num)
+        { send_packet(dst, type, payload, payload_len, seq_num); });
 
     // Wire up fragment forwarding to MQTT
     transfer_engine_.set_forward_to_mqtt(
@@ -101,6 +92,17 @@ void MeshManager::init()
             if (mqtt_client_)
                 mqtt_client_->publish_fragment(session_id, seq, src_node,
                                                data, len, filename);
+        });
+
+    // Wire up transfer meta forwarding (exit node publishes complete meta)
+    transfer_engine_.set_forward_meta(
+        [this](uint32_t session_id, const char *filename, uint16_t src_node,
+               uint32_t total_size, uint16_t chunk_count,
+               uint16_t fragment_size, uint32_t crc32) {
+            if (mqtt_client_)
+                mqtt_client_->publish_transfer_meta(
+                    session_id, filename, src_node, my_addr_,
+                    total_size, chunk_count, fragment_size, crc32);
         });
 
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -269,6 +271,15 @@ void MeshManager::process_slab(BufferSlab *slab)
                           !(hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
     if (should_forward)
     {
+        // Fix 4: Dedup — drop packets we've already forwarded to prevent
+        // broadcast storm (O(TTL × relays) amplification per packet).
+        if (already_seen(hdr.src_addr, hdr.dst_addr,
+                         static_cast<uint8_t>(hdr.type()), hdr.seq_num))
+        {
+            ESP_LOGD(TAG, "Dedup: dropping already-seen packet from 0x%04X seq=%u",
+                     hdr.src_addr, hdr.seq_num);
+            return;
+        }
         forward_packet(slab, hdr);
     }
 }
@@ -553,8 +564,7 @@ void MeshManager::start_file_transfer(const char *filename,
                                       const uint8_t *data,
                                       size_t size)
 {
-    Transport t = protocol_selector_.select(0, 0, size, 100.0f);
-    transfer_engine_.start_file_transfer(filename, data, size, t);
+    transfer_engine_.start_file_transfer(filename, data, size);
 }
 
 // -- send_packet / send_raw ---------------------------------------------------
@@ -562,7 +572,8 @@ void MeshManager::start_file_transfer(const char *filename,
 void MeshManager::send_packet(uint16_t dst,
                               PacketType type,
                               const uint8_t *payload,
-                              size_t payload_len)
+                              size_t payload_len,
+                              uint16_t seq_num)
 {
     if (PACKET_HEADER_SIZE + payload_len > MAX_MTU)
     {
@@ -578,7 +589,7 @@ void MeshManager::send_packet(uint16_t dst,
     hdr.src_addr = my_addr_;
     hdr.dst_addr = dst;
     hdr.set_ttl_hops(DEFAULT_TTL, 0);
-    hdr.seq_num = 0;
+    hdr.seq_num = seq_num;
 
     memcpy(buf, &hdr, PACKET_HEADER_SIZE);
     if (payload && payload_len > 0)

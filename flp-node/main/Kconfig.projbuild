@@ -33,21 +33,33 @@ menu "Forest Link Protocol"
             default 26
     endmenu
 
+    config FLP_WIFI_DISABLED
+        bool "Disable WiFi (relay-only node)"
+        default n
+        help
+            When enabled, this node skips WiFi and MQTT initialisation
+            entirely. It participates in the BLE/LoRa mesh as a relay
+            but never becomes an exit node. Useful for demo setups that
+            need interior nodes with no internet access.
+
     config FLP_WIFI_SSID
         string "WiFi SSID"
         default "ForestLink_AP"
+        depends on !FLP_WIFI_DISABLED
         help
             SSID of the WiFi access point for MQTT cloud connectivity.
 
     config FLP_WIFI_PASSWORD
         string "WiFi Password"
         default "forestlink"
+        depends on !FLP_WIFI_DISABLED
         help
             Password for the WiFi access point.
 
     config FLP_MQTT_BROKER_URI
         string "MQTT Broker URI"
         default "mqtt://broker.local"
+        depends on !FLP_WIFI_DISABLED
         help
             URI of the MQTT broker for cloud gateway connectivity.
 

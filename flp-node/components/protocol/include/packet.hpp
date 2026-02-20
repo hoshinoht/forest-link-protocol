@@ -11,7 +11,7 @@ static constexpr uint16_t EXIT_ANY_ADDR = 0xFFFE; // route toward nearest exit
 static constexpr uint8_t PROTOCOL_VERSION = 1;
 static constexpr uint8_t DEFAULT_TTL = 8;
 static constexpr size_t MAX_MTU = 512;
-static constexpr uint8_t ARQ_WINDOW = 8;
+static constexpr uint8_t ARQ_WINDOW = 32;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
 static constexpr uint8_t MAX_RETRIES = 3;
 static constexpr uint8_t MAX_NEIGHBORS = 16;
@@ -106,6 +106,7 @@ struct __attribute__((packed)) TransferAdPayload
     uint32_t file_size;
     uint16_t fragment_count;
     uint16_t fragment_size;
+    uint32_t crc32;
     char filename[20];
 };
 

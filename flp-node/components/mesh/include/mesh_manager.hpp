@@ -84,7 +84,8 @@ class MeshManager
     void send_packet(uint16_t dst,
                      PacketType type,
                      const uint8_t *payload,
-                     size_t payload_len);
+                     size_t payload_len,
+                     uint16_t seq_num = 0);
 
   private:
     void process_slab(BufferSlab *slab);
@@ -135,6 +136,33 @@ class MeshManager
 
     // MQTT bridge
     MqttSnClient *mqtt_client_ = nullptr;
+
+    // Fix 4: Forwarding dedup cache — prevents broadcast storm by dropping
+    // packets we've already forwarded. Ring buffer of recently-seen
+    // (src, dst, type, seq) tuples.
+    struct SeenEntry
+    {
+        uint16_t src;
+        uint16_t dst;
+        uint8_t type;
+        uint16_t seq;
+    };
+    static constexpr uint8_t SEEN_CACHE_SIZE = 32;
+    SeenEntry seen_cache_[SEEN_CACHE_SIZE] = {};
+    uint8_t seen_idx_ = 0;
+
+    bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq)
+    {
+        for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++)
+        {
+            if (seen_cache_[i].src == src && seen_cache_[i].dst == dst &&
+                seen_cache_[i].type == type && seen_cache_[i].seq == seq)
+                return true;
+        }
+        seen_cache_[seen_idx_] = {src, dst, type, seq};
+        seen_idx_ = (seen_idx_ + 1) % SEEN_CACHE_SIZE;
+        return false;
+    }
 };
 
 } // namespace flp
