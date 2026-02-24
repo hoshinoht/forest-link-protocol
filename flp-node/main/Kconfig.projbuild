@@ -73,7 +73,7 @@ menu "Forest Link Protocol"
 
     config FLP_MQTT_BROKER_URI
         string "MQTT Broker URI"
-        default "mqtt://broker.local"
+        default "mqtt://miyuki.local"
         depends on !FLP_WIFI_DISABLED
         help
             URI of the MQTT broker for cloud gateway connectivity.

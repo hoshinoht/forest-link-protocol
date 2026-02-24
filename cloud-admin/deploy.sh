@@ -185,7 +185,7 @@ Requires=mosquitto.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mqtt-sn-gateway ${MQTTSN_GW_CONF}
+ExecStart=/usr/local/bin/mqtt-sn-gateway -f ${MQTTSN_GW_CONF}
 Restart=on-failure
 RestartSec=5
 
