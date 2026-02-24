@@ -4,6 +4,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "topic_table.hpp"
 
@@ -117,6 +118,7 @@ class MqttSnClient
     QueueHandle_t file_publish_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
     QueueHandle_t cmd_queue_ = nullptr; // inbound mesh commands from cloud
+    TaskHandle_t task_ = nullptr;       // MQTT task handle for notifications
     MqttRxCallback rx_callback_ = nullptr;
     std::atomic<bool> connected_{false};
     uint16_t node_addr_ = 0;
@@ -130,6 +132,7 @@ class MqttSnClient
     void process_file_publish(const FilePublishRequest &req);
     void process_fragment_publish();
     void process_nack_retransmit();
+    void notify();
 
     // Last published file data (retained for NACK retransmission)
     const uint8_t *last_file_data_ = nullptr;

@@ -7,7 +7,7 @@
 #   2. MQTT-SN Gateway (paho.mqtt-sn.embedded-c, UDP 1885 → MQTT 1883)
 #   3. FLP MQTT Admin (Python cloud-side file transfer manager)
 #
-# Tested on: Raspberry Pi OS (Bookworm), Ubuntu 22.04+
+# Tested on: Raspberry Pi OS (Bookworm), Ubuntu 22.04+, Ultramarine (Fedora)
 # Usage:    bash deploy.sh [--install | --start | --stop | --status]
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -39,28 +39,61 @@ require_root() {
     fi
 }
 
-check_os() {
+DISTRO_FAMILY=""  # "debian" or "fedora"
+
+detect_distro() {
     if [[ ! -f /etc/os-release ]]; then
-        error "Unsupported OS. This script targets Debian/Ubuntu-based systems."
+        error "Unsupported OS — /etc/os-release not found."
         exit 1
     fi
     . /etc/os-release
-    if [[ "$ID" != "raspbian" && "$ID" != "debian" && "$ID" != "ubuntu" ]]; then
-        warn "Detected OS: $PRETTY_NAME — this script is tested on Raspberry Pi OS / Ubuntu."
-    fi
+
+    case "$ID" in
+        raspbian|debian|ubuntu)
+            DISTRO_FAMILY="debian" ;;
+        fedora|ultramarine)
+            DISTRO_FAMILY="fedora" ;;
+        *)
+            # Check ID_LIKE for derivatives
+            if [[ "${ID_LIKE:-}" == *"debian"* || "${ID_LIKE:-}" == *"ubuntu"* ]]; then
+                DISTRO_FAMILY="debian"
+            elif [[ "${ID_LIKE:-}" == *"fedora"* ]]; then
+                DISTRO_FAMILY="fedora"
+            else
+                error "Unsupported OS: $PRETTY_NAME"
+                error "This script supports Debian/Ubuntu and Fedora/Ultramarine-based systems."
+                exit 1
+            fi
+            ;;
+    esac
+    info "Detected OS: $PRETTY_NAME (${DISTRO_FAMILY} family)"
+}
+
+pkg_update() {
+    case "$DISTRO_FAMILY" in
+        debian) apt-get update -qq ;;
+        fedora) dnf check-update -q || true ;;  # returns 100 when updates available
+    esac
+}
+
+pkg_install() {
+    case "$DISTRO_FAMILY" in
+        debian) apt-get install -y -qq "$@" ;;
+        fedora) dnf install -y -q "$@" ;;
+    esac
 }
 
 # ── Install ─────────────────────────────────────────────────────────
 cmd_install() {
     require_root
-    check_os
+    detect_distro
 
     info "Updating package lists..."
-    apt-get update -qq
+    pkg_update
 
     # ── 1. Mosquitto ────────────────────────────────────────────────
     info "Installing Mosquitto MQTT broker..."
-    apt-get install -y -qq mosquitto mosquitto-clients
+    pkg_install mosquitto mosquitto-clients
 
     info "Writing FLP Mosquitto config to ${MOSQUITTO_CONF}..."
     cat > "${MOSQUITTO_CONF}" <<'EOF'
@@ -76,7 +109,10 @@ EOF
 
     # ── 2. MQTT-SN Gateway (Eclipse Paho) ──────────────────────────
     info "Installing build dependencies for MQTT-SN gateway..."
-    apt-get install -y -qq git cmake g++ libssl-dev
+    case "$DISTRO_FAMILY" in
+        debian) pkg_install git cmake g++ libssl-dev ;;
+        fedora) pkg_install git cmake gcc-c++ openssl-devel ;;
+    esac
 
     if [[ -d "${MQTTSN_GW_DIR}" ]]; then
         info "MQTT-SN gateway source already exists at ${MQTTSN_GW_DIR}, pulling latest..."
@@ -144,7 +180,10 @@ EOF
 
     # ── 3. Python dependencies for MQTT Admin ──────────────────────
     info "Installing Python 3 and pip..."
-    apt-get install -y -qq python3 python3-pip python3-venv
+    case "$DISTRO_FAMILY" in
+        debian) pkg_install python3 python3-pip python3-venv ;;
+        fedora) pkg_install python3 python3-pip ;;  # venv included in python3
+    esac
 
     info "Setting up Python virtual environment..."
     if [[ ! -d "${SCRIPT_DIR}/.venv" ]]; then

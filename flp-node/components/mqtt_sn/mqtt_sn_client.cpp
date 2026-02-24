@@ -9,7 +9,6 @@
 #include "esp_timer.h"
 #include "packet.hpp"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "mqtt_sn";
 
@@ -18,6 +17,14 @@ static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 
 namespace flp
 {
+
+void MqttSnClient::notify()
+{
+    if (task_)
+    {
+        xTaskNotifyGive(task_);
+    }
+}
 
 void MqttSnClient::init()
 {
@@ -87,6 +94,7 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             // Subscribe to admin topics
             esp_mqtt_client_subscribe(client_, "flp/admin/cmd", 1);
             esp_mqtt_client_subscribe(client_, "flp/admin/ack", 1);
+            notify(); // wake run() to drain queued items
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -164,6 +172,7 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                             ESP_LOGI(TAG,
                                      "Cloud NACK received for seq=%u",
                                      nack.seq);
+                            notify();
                         }
                     }
                 }
@@ -217,6 +226,7 @@ int MqttSnClient::publish(uint16_t topic_id,
             ESP_LOGW(TAG, "publish queue full, dropping message");
             return -1;
         }
+        notify();
     }
     return 0;
 }
@@ -253,6 +263,7 @@ void MqttSnClient::publish_file(const char *filename,
                  "Queued file for MQTT upload: %s (%zu bytes)",
                  filename,
                  size);
+        notify();
     }
 }
 
@@ -374,6 +385,10 @@ void MqttSnClient::publish_fragment(uint32_t session_id, uint16_t seq,
     {
         ESP_LOGW(TAG, "Fragment publish queue full, dropping seq=%u", seq);
     }
+    else
+    {
+        notify();
+    }
 }
 
 void MqttSnClient::process_fragment_publish()
@@ -461,11 +476,21 @@ void MqttSnClient::process_nack_retransmit()
 
 void MqttSnClient::run()
 {
+    task_ = xTaskGetCurrentTaskHandle();
+
     TickType_t last_status_tick = xTaskGetTickCount();
     const TickType_t status_interval = pdMS_TO_TICKS(30000);
 
     while (true)
     {
+        // Block until a producer notifies us or the heartbeat interval elapses.
+        // Compute remaining time until next heartbeat so we never oversleep it.
+        TickType_t now = xTaskGetTickCount();
+        TickType_t elapsed = now - last_status_tick;
+        TickType_t wait =
+            (elapsed >= status_interval) ? 0 : (status_interval - elapsed);
+        ulTaskNotifyTake(pdTRUE, wait);
+
         // Drain publish queue when connected
         if (connected_ && client_)
         {
@@ -501,8 +526,8 @@ void MqttSnClient::run()
         // Process cloud NACK retransmissions
         process_nack_retransmit();
 
-        // Periodic status publish (every 30s)
-        TickType_t now = xTaskGetTickCount();
+        // Periodic status heartbeat
+        now = xTaskGetTickCount();
         if (connected_ && (now - last_status_tick) >= status_interval)
         {
             last_status_tick = now;
@@ -516,8 +541,6 @@ void MqttSnClient::run()
                 ESP_LOGD(TAG, "Published status heartbeat");
             }
         }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 

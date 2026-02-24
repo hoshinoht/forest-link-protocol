@@ -41,7 +41,14 @@
       "WebFetch(domain:pages.silabs.com)",
       "Bash(python:*)",
       "Bash(grep:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:docs.espressif.com)",
+      "WebFetch(domain:components.espressif.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git submodule:*)",
+      "Bash(tail:*)",
+      "Bash(/usr/bin/grep:*)"
     ]
   },
   "outputStyle": "default"
