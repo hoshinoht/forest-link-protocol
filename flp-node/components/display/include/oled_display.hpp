@@ -28,16 +28,28 @@ class OledDisplay
 
     void init(int sda_pin, int scl_pin, int rst_pin = -1);
     void clear();
-    void draw_string(int x, int page, const char *str);
-    void draw_hline(int x, int y, int width);
-    void flush();
     void update(const NodeStatus &status);
 
     bool is_initialized() const { return initialized_; }
 
   private:
+    enum class State : uint8_t { SPLASH, STATUS, TRANSFER };
+
+    void render_splash(const NodeStatus &s);
+    void render_status(const NodeStatus &s);
+    void render_transfer(const NodeStatus &s);
+    void draw_title_bar(const char *text);
+    void draw_progress_bar(int page, uint8_t pct);
+
     SSD1306_t dev_ = {};
     bool initialized_ = false;
+
+    State state_ = State::SPLASH;
+    int64_t splash_start_us_ = 0;
+    bool dimmed_ = false;
+    int scroll_offset_ = 0;
+    bool transfer_was_active_ = false;
+    int64_t transfer_done_us_ = 0;
 };
 
 } // namespace flp
