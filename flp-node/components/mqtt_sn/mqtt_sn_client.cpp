@@ -528,17 +528,20 @@ void MqttSnClient::run()
 
         // Periodic status heartbeat
         now = xTaskGetTickCount();
-        if (connected_ && (now - last_status_tick) >= status_interval)
+        if ((now - last_status_tick) >= status_interval)
         {
             last_status_tick = now;
-            const char *status_topic =
-                topic_table_.lookup(1); // topic ID 1 = status
-            if (status_topic)
+            if (connected_)
             {
-                const char *msg = "online";
-                esp_mqtt_client_publish(
-                    client_, status_topic, msg, strlen(msg), 0, 0);
-                ESP_LOGD(TAG, "Published status heartbeat");
+                const char *status_topic =
+                    topic_table_.lookup(1); // topic ID 1 = status
+                if (status_topic)
+                {
+                    const char *msg = "online";
+                    esp_mqtt_client_publish(
+                        client_, status_topic, msg, strlen(msg), 0, 0);
+                    ESP_LOGD(TAG, "Published status heartbeat");
+                }
             }
         }
     }
