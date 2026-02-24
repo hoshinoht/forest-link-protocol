@@ -133,14 +133,14 @@ EOF
 
     # Build MQTTSNPacket library first (gateway links against it)
     info "Building MQTTSNPacket library..."
-    make -C "${MQTTSN_GW_DIR}/MQTTSNPacket/src" -j"$(nproc)"
+    cd "${MQTTSN_GW_DIR}/MQTTSNPacket"
+    rm -rf build && mkdir build && cd build
+    cmake ..
+    make -j"$(nproc)"
 
     info "Building MQTT-SN gateway..."
     cd "${MQTTSN_GW_DIR}/MQTTSNGateway"
-    if [[ -d build ]]; then
-        rm -rf build
-    fi
-    mkdir build && cd build
+    rm -rf build && mkdir build && cd build
     cmake .. -DUDP=ON -DDTLS=OFF
     make -j"$(nproc)"
     info "MQTT-SN gateway built successfully."
@@ -252,7 +252,7 @@ cmd_start() {
     require_root
     info "Starting all FLP services..."
     systemctl start mosquitto
-    systemctl start mqtt-sn-gateway
+    systemctl start mqtt-sn-gateway 2>/dev/null || warn "mqtt-sn-gateway not installed, skipping"
     systemctl start flp-mqtt-admin
     info "All services started."
 }
