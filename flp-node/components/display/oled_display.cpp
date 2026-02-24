@@ -6,13 +6,26 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "oled";
 
+// ── Icon bitmaps (8x8, column-major, LSB = top) ────────────────────────
+static const uint8_t ICON_WIFI_ON[8]  = {0x00, 0x7E, 0x42, 0x3C, 0x24, 0x18, 0x10, 0x10};
+static const uint8_t ICON_WIFI_OFF[8] = {0x00, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x00};
+static const uint8_t ICON_LORA[8]     = {0x00, 0x08, 0x08, 0x08, 0x1C, 0x2A, 0x49, 0x08};
+
+static constexpr int64_t SPLASH_DURATION_US   = 2000000;  // 2 seconds
+static constexpr int64_t TRANSFER_HOLD_US     = 3000000;  // 3 seconds
+static constexpr int     CONTRAST_DIM         = 0x10;
+static constexpr int     CONTRAST_BRIGHT      = 0xCF;
+
 namespace flp
 {
+
+// ── Init / Clear (unchanged except splash timestamp) ────────────────────
 
 void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
 {
@@ -77,6 +90,10 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     ssd1306_init(&dev_, 128, 64);
     ssd1306_clear_screen(&dev_, false);
 
+    splash_start_us_ = esp_timer_get_time();
+    state_ = State::SPLASH;
+    dimmed_ = false;
+
     initialized_ = true;
     ESP_LOGI(TAG, "SSD1306 128x64 OLED initialized (SDA=%d SCL=%d RST=%d)",
              sda_pin, scl_pin, rst_pin);
@@ -87,31 +104,168 @@ void OledDisplay::clear()
     ssd1306_clear_screen(&dev_, false);
 }
 
-void OledDisplay::draw_string(int x, int page, const char *str)
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+void OledDisplay::draw_title_bar(const char *text)
 {
-    // x is ignored — library always starts at segment 0.
-    // All current callers pass x=0.
-    (void)x;
-    if (page < 0 || page >= 8)
+    char padded[17];
+    snprintf(padded, sizeof(padded), "%-16s", text);
+    ssd1306_display_text(&dev_, 0, padded, 16, true);
+}
+
+void OledDisplay::draw_progress_bar(int page, uint8_t pct)
+{
+    if (pct > 100) pct = 100;
+    int fill = (pct * 124) / 100;
+
+    uint8_t bar[128];
+    bar[0] = 0xFF;
+    bar[127] = 0xFF;
+    for (int i = 1; i <= 126; i++)
     {
-        return;
+        bar[i] = (i - 1 < fill) ? 0xFF : 0x81;
     }
-    int len = strlen(str);
-    if (len > 16) len = 16;
-    ssd1306_display_text(&dev_, page, str, len, false);
+    ssd1306_display_image(&dev_, page, 0, bar, 128);
 }
 
-void OledDisplay::draw_hline(int x, int y, int width)
+// ── Screen renderers ────────────────────────────────────────────────────
+
+void OledDisplay::render_splash(const NodeStatus &s)
 {
-    _ssd1306_line(&dev_, x, y, x + width - 1, y, false);
+    ssd1306_clear_screen(&dev_, false);
+
+    // Large node address on pages 2-4 (x3 font)
+    char addr[6];
+    snprintf(addr, sizeof(addr), "%04X", s.node_addr);
+    ssd1306_display_text_x3(&dev_, 2, addr, strlen(addr), false);
+
+    // Label text on pages 6-7
+    ssd1306_display_text(&dev_, 6, "  Forest Link", 13, false);
+    ssd1306_display_text(&dev_, 7, "  Protocol v0.1", 15, false);
 }
 
-void OledDisplay::flush()
+void OledDisplay::render_status(const NodeStatus &s)
 {
+    ssd1306_clear_screen(&dev_, false);
+    char line[17];
+
+    // Page 0: inverted title bar
+    snprintf(line, sizeof(line), "FLP-%04X  v0.1.0", s.node_addr);
+    draw_title_bar(line);
+
+    // Page 1: icons + peer count
+    const uint8_t *wifi_icon = s.wifi_connected ? ICON_WIFI_ON : ICON_WIFI_OFF;
+    ssd1306_display_image(&dev_, 1, 0, wifi_icon, 8);
+    ssd1306_display_image(&dev_, 1, 16, ICON_LORA, 8);
+
+    snprintf(line, sizeof(line), "P:%02u", s.espnow_peers);
+    // Peer count text starting at character position 5 (seg 40)
+    // Display on page 1 — use display_image trick: render text separately
+    // We'll use a small text rendered at page offset
+    // Actually, ssd1306_display_text always starts at seg 0, so we write padded text
+    char peer_line[17];
+    snprintf(peer_line, sizeof(peer_line), "     P:%02u", s.espnow_peers);
+    ssd1306_display_text(&dev_, 1, peer_line, strlen(peer_line), false);
+    // Re-draw icons over the first chars (display_image overwrites at specific seg)
+    ssd1306_display_image(&dev_, 1, 0, wifi_icon, 8);
+    ssd1306_display_image(&dev_, 1, 16, ICON_LORA, 8);
+
+    // Page 2: mesh info
+    if (s.hops_to_internet == 0xFF)
+    {
+        snprintf(line, sizeof(line), "Nbrs:%-3u GW:--", s.neighbor_count);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "Nbrs:%-3u GW:%uh",
+                 s.neighbor_count, s.hops_to_internet);
+    }
+    ssd1306_display_text(&dev_, 2, line, strlen(line), false);
+
+    // Page 3: horizontal separator
+    _ssd1306_line(&dev_, 0, 28, 127, 28, false);
+
+    // Page 4: transfer summary
+    if (s.transfer_active && s.filename)
+    {
+        snprintf(line, sizeof(line), "%.10s %3u%%", s.filename, s.transfer_pct);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "No transfer");
+    }
+    ssd1306_display_text(&dev_, 4, line, strlen(line), false);
+
+    // Page 6: heap
+    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long)s.free_heap_kb);
+    ssd1306_display_text(&dev_, 6, line, strlen(line), false);
+
+    // Page 7: uptime
+    uint32_t h = s.uptime_s / 3600;
+    uint32_t m = (s.uptime_s % 3600) / 60;
+    uint32_t sec = s.uptime_s % 60;
+    snprintf(line, sizeof(line), "Up %02lu:%02lu:%02lu",
+             (unsigned long)h, (unsigned long)m, (unsigned long)sec);
+    ssd1306_display_text(&dev_, 7, line, strlen(line), false);
+
+    // Flush line-drawing buffer (separator)
     ssd1306_show_buffer(&dev_);
 }
 
-// ── Status rendering ────────────────────────────────────────────────────
+void OledDisplay::render_transfer(const NodeStatus &s)
+{
+    ssd1306_clear_screen(&dev_, false);
+    char line[17];
+
+    // Page 0: inverted title bar
+    snprintf(line, sizeof(line), "FLP-%04X    XFER", s.node_addr);
+    draw_title_bar(line);
+
+    // Page 1: filename (scrolling if > 16 chars)
+    const char *fname = s.filename ? s.filename : "unknown";
+    int flen = strlen(fname);
+    if (flen <= 16)
+    {
+        ssd1306_display_text(&dev_, 1, fname, flen, false);
+    }
+    else
+    {
+        // Circular scroll: "filename   filename", show 16-char window
+        char scroll_buf[64];
+        snprintf(scroll_buf, sizeof(scroll_buf), "%s   %s", fname, fname);
+        int total_len = flen + 3; // length of one cycle
+        int offset = scroll_offset_ % total_len;
+        char window[17];
+        memcpy(window, scroll_buf + offset, 16);
+        window[16] = '\0';
+        ssd1306_display_text(&dev_, 1, window, 16, false);
+    }
+
+    // Page 3: percentage text (centered)
+    snprintf(line, sizeof(line), "      %3u%%", s.transfer_pct);
+    ssd1306_display_text(&dev_, 3, line, strlen(line), false);
+
+    // Page 4: graphical progress bar
+    draw_progress_bar(4, s.transfer_pct);
+
+    // Page 6: condensed mesh info
+    if (s.hops_to_internet == 0xFF)
+    {
+        snprintf(line, sizeof(line), "Nbrs:%-3u GW:--", s.neighbor_count);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "Nbrs:%-3u GW:%uh",
+                 s.neighbor_count, s.hops_to_internet);
+    }
+    ssd1306_display_text(&dev_, 6, line, strlen(line), false);
+
+    // Page 7: heap
+    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long)s.free_heap_kb);
+    ssd1306_display_text(&dev_, 7, line, strlen(line), false);
+}
+
+// ── State machine ───────────────────────────────────────────────────────
 
 void OledDisplay::update(const NodeStatus &s)
 {
@@ -120,61 +274,96 @@ void OledDisplay::update(const NodeStatus &s)
         return;
     }
 
-    ssd1306_clear_screen(&dev_, false);
-    char line[17]; // 16 chars + null (8x8 font, 128px / 8 = 16 chars)
+    int64_t now = esp_timer_get_time();
 
-    // Line 0: node ID + version
-    snprintf(line, sizeof(line), "FLP-%04X v%s", s.node_addr, "0.1.0");
-    ssd1306_display_text(&dev_, 0, line, strlen(line), false);
-
-    // Line 1: separator
-    _ssd1306_line(&dev_, 0, 9, 127, 9, false);
-
-    // Line 2: connectivity
-    snprintf(line, sizeof(line), "W:%s N:%u L:OK",
-             s.wifi_connected ? "OK" : "--", s.espnow_peers);
-    ssd1306_display_text(&dev_, 2, line, strlen(line), false);
-
-    // Line 3: mesh status
-    if (s.hops_to_internet == 0xFF)
+    switch (state_)
     {
-        snprintf(line, sizeof(line), "Nbrs:%u GW:--", s.neighbor_count);
+    case State::SPLASH:
+        if (now - splash_start_us_ >= SPLASH_DURATION_US)
+        {
+            state_ = State::STATUS;
+            // Don't dim right away — let status render once first
+        }
+        else
+        {
+            if (dimmed_)
+            {
+                ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
+                dimmed_ = false;
+            }
+            render_splash(s);
+            return;
+        }
+        break; // fall through to STATUS
+
+    case State::STATUS:
+        if (s.transfer_active)
+        {
+            state_ = State::TRANSFER;
+            scroll_offset_ = 0;
+            // Brighten on transfer start
+            if (dimmed_)
+            {
+                ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
+                dimmed_ = false;
+            }
+        }
+        break;
+
+    case State::TRANSFER:
+        if (!s.transfer_active)
+        {
+            if (transfer_was_active_)
+            {
+                // Transfer just completed — start hold timer
+                transfer_done_us_ = now;
+                transfer_was_active_ = false;
+            }
+
+            if (now - transfer_done_us_ >= TRANSFER_HOLD_US)
+            {
+                state_ = State::STATUS;
+            }
+        }
+        else
+        {
+            transfer_was_active_ = true;
+        }
+        break;
     }
-    else
+
+    // Contrast dimming: dim when idle on STATUS screen
+    if (state_ == State::STATUS && !s.transfer_active)
     {
-        snprintf(line, sizeof(line), "Nbrs:%u GW:%uh",
-                 s.neighbor_count, s.hops_to_internet);
+        if (!dimmed_)
+        {
+            ssd1306_contrast(&dev_, CONTRAST_DIM);
+            dimmed_ = true;
+        }
     }
-    ssd1306_display_text(&dev_, 3, line, strlen(line), false);
-
-    // Line 4: separator
-    _ssd1306_line(&dev_, 0, 33, 127, 33, false);
-
-    // Line 5: transfer
-    if (s.transfer_active && s.filename)
+    else if (state_ == State::TRANSFER)
     {
-        snprintf(line, sizeof(line), "%.10s %u%%", s.filename, s.transfer_pct);
+        if (dimmed_)
+        {
+            ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
+            dimmed_ = false;
+        }
     }
-    else
+
+    // Render current screen
+    switch (state_)
     {
-        snprintf(line, sizeof(line), "No transfer");
+    case State::SPLASH:
+        render_splash(s);
+        break;
+    case State::STATUS:
+        render_status(s);
+        break;
+    case State::TRANSFER:
+        scroll_offset_++;
+        render_transfer(s);
+        break;
     }
-    ssd1306_display_text(&dev_, 5, line, strlen(line), false);
-
-    // Line 6: heap
-    snprintf(line, sizeof(line), "Heap:%lukB", (unsigned long)s.free_heap_kb);
-    ssd1306_display_text(&dev_, 6, line, strlen(line), false);
-
-    // Line 7: uptime
-    uint32_t h = s.uptime_s / 3600;
-    uint32_t m = (s.uptime_s % 3600) / 60;
-    uint32_t sec = s.uptime_s % 60;
-    snprintf(line, sizeof(line), "Up %lu:%02lu:%02lu",
-             (unsigned long)h, (unsigned long)m, (unsigned long)sec);
-    ssd1306_display_text(&dev_, 7, line, strlen(line), false);
-
-    // Flush line-drawing buffer (separators on pages 1 and 4)
-    ssd1306_show_buffer(&dev_);
 }
 
 } // namespace flp

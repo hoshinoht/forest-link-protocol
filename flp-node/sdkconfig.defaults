@@ -16,5 +16,15 @@ CONFIG_FLP_OLED_SDA=18
 CONFIG_FLP_OLED_SCL=17
 CONFIG_FLP_OLED_RST=-1
 
-CONFIG_FLP_WIFI_SSID="PO_FAMILY"
+# IMPORTANT NOTE: As this is a prototype we will be hardcoding the Wi-Fi credentials for simplicity.
+# In a production system, you would want to implement a more secure and flexible way of configuring
+# Wi-Fi credentials (e.g., via a web interface, Bluetooth, or a mobile app
+
+# Please change the following Wi-Fi credentials to your own Wi-Fi network before
+# building and flashing the firmware.
+CONFIG_FLP_WIFI_SSID="PO-FAMILY"
 CONFIG_FLP_WIFI_PASSWORD="Hoshi@869978"
+
+
+# Mqtt gateway
+FLP_MQTT_BROKER_URI="mqtt://192.168.0.6"
