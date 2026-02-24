@@ -13,7 +13,7 @@
 // Calls into (does NOT implement):
 //   EspNowTransport::send()    — Role 3
 //   LoraTransport::send()      — Role 4
-//   MqttSnClient::publish()    — Role 1
+//   MqttClient::publish()      — Role 1
 //   ProtocolSelector::select() — shared component
 // =============================================================================
 
@@ -40,7 +40,7 @@
 namespace flp
 {
 
-class MqttSnClient; // forward declaration
+class MqttClient; // forward declaration
 
 class MeshManager
 {
@@ -58,10 +58,12 @@ class MeshManager
     start_file_transfer(const char *filename, const uint8_t *data, size_t size);
 
     // Task 6: MQTT bridge wiring
-    void set_mqtt_client(MqttSnClient *client)
+    void set_mqtt_client(MqttClient *client)
     {
         mqtt_client_ = client;
     }
+
+    void subscribe_topic(const char *topic);
 
     void set_lora_rx_priority(uint8_t p)
     {
@@ -132,6 +134,7 @@ class MeshManager
                        size_t len);
     void publish_all_telemetry();
     void drain_cmd_queue();
+    void handle_topic_msg(const uint8_t *data, size_t len);
 
     RouteTable route_table_;
     EspNowTransport espnow_;
@@ -155,7 +158,11 @@ class MeshManager
     uint32_t heap_timer_ms_ = 0;
 
     // MQTT bridge
-    MqttSnClient *mqtt_client_ = nullptr;
+    MqttClient *mqtt_client_ = nullptr;
+
+    // Topic subscriptions for cloud-to-deep-node messaging
+    char subscribed_topics_[4][32] = {};
+    uint8_t subscribed_topic_count_ = 0;
 
     // Fix 4: Forwarding dedup cache — prevents broadcast storm by dropping
     // packets we've already forwarded. Ring buffer of recently-seen

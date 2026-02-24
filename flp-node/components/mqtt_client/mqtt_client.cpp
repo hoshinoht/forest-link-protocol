@@ -1,4 +1,4 @@
-#include "mqtt_sn_client.hpp"
+#include "mqtt_client.hpp"
 
 #include <cinttypes>
 #include <cstdio>
@@ -10,7 +10,7 @@
 #include "packet.hpp"
 #include "freertos/FreeRTOS.h"
 
-static const char *TAG = "mqtt_sn";
+static const char *TAG = "mqtt";
 
 // Max data bytes per MQTT chunk (2-byte seq header + payload)
 static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
@@ -18,7 +18,7 @@ static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 namespace flp
 {
 
-void MqttSnClient::notify()
+void MqttClient::notify()
 {
     if (task_)
     {
@@ -26,7 +26,7 @@ void MqttSnClient::notify()
     }
 }
 
-void MqttSnClient::init()
+void MqttClient::init()
 {
     // Create publish queues
     publish_queue_ = xQueueCreate(16, sizeof(MqttPublishItem));
@@ -51,7 +51,7 @@ void MqttSnClient::init()
         TAG, "MQTT client initialized, broker=%s", CONFIG_FLP_MQTT_BROKER_URI);
 }
 
-void MqttSnClient::register_default_topics()
+void MqttClient::register_default_topics()
 {
     char topic_buf[64];
 
@@ -74,17 +74,17 @@ void MqttSnClient::register_default_topics()
     topic_table_.register_topic("flp/admin/ack");
 }
 
-void MqttSnClient::mqtt_event_handler(void *handler_args,
+void MqttClient::mqtt_event_handler(void *handler_args,
                                       esp_event_base_t base,
                                       int32_t event_id,
                                       void *event_data)
 {
-    auto *self = static_cast<MqttSnClient *>(handler_args);
+    auto *self = static_cast<MqttClient *>(handler_args);
     auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
     self->handle_mqtt_event(event);
 }
 
-void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
+void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
 {
     switch (event->event_id)
     {
@@ -195,7 +195,7 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
     }
 }
 
-int MqttSnClient::publish(uint16_t topic_id,
+int MqttClient::publish(uint16_t topic_id,
                           const uint8_t *data,
                           size_t len,
                           int qos)
@@ -231,7 +231,7 @@ int MqttSnClient::publish(uint16_t topic_id,
     return 0;
 }
 
-int MqttSnClient::publish_raw(const char *topic,
+int MqttClient::publish_raw(const char *topic,
                               const uint8_t *data,
                               size_t len,
                               int qos)
@@ -247,7 +247,7 @@ int MqttSnClient::publish_raw(const char *topic,
 
 // ── Task 6: Enqueue file for async cloud upload ──────────────────────────────
 
-void MqttSnClient::publish_file(const char *filename,
+void MqttClient::publish_file(const char *filename,
                                 const uint8_t *data,
                                 size_t size,
                                 uint16_t src_node)
@@ -267,7 +267,7 @@ void MqttSnClient::publish_file(const char *filename,
     }
 }
 
-void MqttSnClient::process_file_publish(const FilePublishRequest &req)
+void MqttClient::process_file_publish(const FilePublishRequest &req)
 {
     if (!connected_ || !client_)
     {
@@ -331,7 +331,7 @@ void MqttSnClient::process_file_publish(const FilePublishRequest &req)
     ESP_LOGI(TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
 }
 
-void MqttSnClient::publish_transfer_meta(uint32_t session_id,
+void MqttClient::publish_transfer_meta(uint32_t session_id,
                                           const char *filename,
                                           uint16_t src_node,
                                           uint16_t exit_node,
@@ -368,7 +368,7 @@ void MqttSnClient::publish_transfer_meta(uint32_t session_id,
              session_id, filename, total_size, chunk_count, crc32);
 }
 
-void MqttSnClient::publish_fragment(uint32_t session_id, uint16_t seq,
+void MqttClient::publish_fragment(uint32_t session_id, uint16_t seq,
                                      uint16_t src_node, const uint8_t *data,
                                      size_t len, const char *filename)
 {
@@ -391,7 +391,7 @@ void MqttSnClient::publish_fragment(uint32_t session_id, uint16_t seq,
     }
 }
 
-void MqttSnClient::process_fragment_publish()
+void MqttClient::process_fragment_publish()
 {
     if (!connected_ || !client_)
         return;
@@ -434,7 +434,7 @@ void MqttSnClient::process_fragment_publish()
     }
 }
 
-void MqttSnClient::process_nack_retransmit()
+void MqttClient::process_nack_retransmit()
 {
     if (!connected_ || !client_ || !last_file_data_ || last_file_size_ == 0)
     {
@@ -474,7 +474,7 @@ void MqttSnClient::process_nack_retransmit()
     }
 }
 
-void MqttSnClient::run()
+void MqttClient::run()
 {
     task_ = xTaskGetCurrentTaskHandle();
 
@@ -557,7 +557,7 @@ void MqttSnClient::run()
     }
 }
 
-bool MqttSnClient::receive_cmd(MeshCmdItem &out)
+bool MqttClient::receive_cmd(MeshCmdItem &out)
 {
     if (!cmd_queue_)
         return false;

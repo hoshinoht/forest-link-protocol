@@ -49,6 +49,7 @@ namespace MeshCmd
 static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
 static constexpr uint8_t CONFIG_UPDATE = 0x02;
 static constexpr uint8_t REBOOT = 0x03;
+static constexpr uint8_t TOPIC_MSG = 0x10;
 } // namespace MeshCmd
 
 struct __attribute__((packed)) PacketHeader

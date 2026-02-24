@@ -20,7 +20,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "mqtt_sn_client.hpp"
+#include "mqtt_client.hpp"
 
 using namespace flp;
 
@@ -517,10 +517,61 @@ void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
             ESP_LOGW(TAG, "Remote reboot requested by 0x%04X", hdr.src_addr);
             esp_restart();
             break;
+        case MeshCmd::TOPIC_MSG:
+            handle_topic_msg(payload + 1, payload_len - 1);
+            break;
         default:
             ESP_LOGD(TAG, "Unknown MESH_CMD %u", cmd_id);
             break;
     }
+}
+
+void MeshManager::subscribe_topic(const char *topic)
+{
+    if (subscribed_topic_count_ >= 4)
+    {
+        ESP_LOGW(TAG, "Topic subscription table full, ignoring '%s'", topic);
+        return;
+    }
+    strncpy(subscribed_topics_[subscribed_topic_count_], topic,
+            sizeof(subscribed_topics_[0]) - 1);
+    subscribed_topics_[subscribed_topic_count_]
+                      [sizeof(subscribed_topics_[0]) - 1] = '\0';
+    subscribed_topic_count_++;
+    ESP_LOGI(TAG, "Subscribed to topic '%s' (%u/%u)",
+             topic, subscribed_topic_count_, 4);
+}
+
+void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
+{
+    if (len < 1)
+        return;
+
+    uint8_t topic_len = data[0];
+    if (topic_len == 0 || topic_len > 31 || 1 + topic_len > len)
+    {
+        ESP_LOGW(TAG, "TOPIC_MSG: invalid topic_len=%u", topic_len);
+        return;
+    }
+
+    char topic[32];
+    memcpy(topic, data + 1, topic_len);
+    topic[topic_len] = '\0';
+
+    size_t payload_len = len - 1 - topic_len;
+    (void) payload_len; // available for future use by handlers
+
+    // Check against subscription list
+    for (uint8_t i = 0; i < subscribed_topic_count_; i++)
+    {
+        if (strcmp(subscribed_topics_[i], topic) == 0)
+        {
+            ESP_LOGI(TAG, "TOPIC_MSG matched '%s' payload_len=%zu",
+                     topic, payload_len);
+            return;
+        }
+    }
+    ESP_LOGD(TAG, "TOPIC_MSG topic '%s' not subscribed, ignoring", topic);
 }
 
 void MeshManager::publish_all_telemetry()

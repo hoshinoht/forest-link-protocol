@@ -9,7 +9,7 @@ idf_component_register(
         mesh
         espnow
         lora
-        mqtt_sn
+        mqtt_client
         protocol
         uart_api
         display

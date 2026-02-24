@@ -45,6 +45,7 @@ tr:hover { background: #161b22; }
     <div class="tab" data-tab="metrics">Node Metrics</div>
     <div class="tab" data-tab="transfers">Transfers</div>
     <div class="tab" data-tab="memory">Memory</div>
+    <div class="tab" data-tab="messaging">Messaging</div>
     <div class="tab" data-tab="comparison">Comparison</div>
 </div>
 
@@ -87,6 +88,16 @@ tr:hover { background: #161b22; }
     </div>
     <div class="stat-grid" id="heap-stats"></div>
     <div class="chart-wrap"><canvas id="heap-chart"></canvas></div>
+</div>
+
+<div id="messaging" class="panel">
+    <div class="controls">
+        <select id="msg-node-select"><option value="FFFF">Broadcast (0xFFFF)</option></select>
+        <input id="msg-topic" type="text" placeholder="Topic (e.g. config)" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:6px 12px;border-radius:4px;font-size:13px;width:160px;">
+        <input id="msg-payload" type="text" placeholder="Payload hex (optional)" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:6px 12px;border-radius:4px;font-size:13px;width:200px;">
+        <button onclick="sendTopicMsg()">Send</button>
+    </div>
+    <div id="msg-log" style="margin-top:16px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;font-family:monospace;font-size:13px;max-height:400px;overflow:auto;"></div>
 </div>
 
 <div id="comparison" class="panel">
@@ -192,7 +203,7 @@ async function pollTopology() {
             }
             if (n.status === 'online') online++; else offline++;
             // Populate node selectors
-            ['node-select', 'heap-node-select'].forEach(selId => {
+            ['node-select', 'heap-node-select', 'msg-node-select'].forEach(selId => {
                 const sel = document.getElementById(selId);
                 if (!sel.querySelector('option[value="' + n.id + '"]')) {
                     const opt = document.createElement('option');
@@ -362,6 +373,26 @@ async function loadHeap() {
             }
         }
     });
+}
+
+// --- Topic Messaging ---
+async function sendTopicMsg() {
+    const nodeId = document.getElementById('msg-node-select').value;
+    const topic = document.getElementById('msg-topic').value.trim();
+    if (!topic) { alert('Topic is required'); return; }
+    const payloadHex = document.getElementById('msg-payload').value.trim();
+    const r = await fetch('/api/topic_msg/' + encodeURIComponent(nodeId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic, data: payloadHex })
+    });
+    const data = await r.json();
+    const log = document.getElementById('msg-log');
+    const ts = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.textContent = '[' + ts + '] -> 0x' + nodeId + ' topic="' + topic + '"'
+        + (payloadHex ? ' data=' + payloadHex : '') + (data.ok ? ' OK' : ' ERR');
+    log.insertBefore(entry, log.firstChild);
 }
 
 // --- Node Commands ---
