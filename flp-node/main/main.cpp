@@ -16,7 +16,7 @@
 
 #include "esp_wifi.h"
 #if !CONFIG_FLP_WIFI_DISABLED
-#include "mqtt_sn_client.hpp"
+#include "mqtt_client.hpp"
 #endif
 
 #if CONFIG_FLP_OLED_ENABLED
@@ -29,7 +29,7 @@ static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
 
 #if !CONFIG_FLP_WIFI_DISABLED
-static flp::MqttSnClient mqtt_client;
+static flp::MqttClient mqtt_client;
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 #endif
@@ -114,7 +114,7 @@ static void mesh_task(void *arg)
 static void mqtt_task(void *arg)
 {
     ESP_LOGI(TAG, "mqtt_task started");
-    auto *client = static_cast<flp::MqttSnClient *>(arg);
+    auto *client = static_cast<flp::MqttClient *>(arg);
     client->run();
     vTaskDelete(nullptr);
 }
@@ -226,6 +226,8 @@ extern "C" void app_main()
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
     mesh_manager.init();
+    mesh_manager.subscribe_topic("config");
+    mesh_manager.subscribe_topic("alert");
 
 #if !CONFIG_FLP_WIFI_DISABLED
     // Task 6: Wire MQTT client to mesh manager for file upload bridge

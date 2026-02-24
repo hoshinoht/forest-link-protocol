@@ -68,6 +68,24 @@ def api_send_cmd(node_id):
     return jsonify({"ok": True, "target": node_id, "cmd": cmd_id})
 
 
+@app.route("/api/topic_msg/<node_id>", methods=["POST"])
+def api_send_topic_msg(node_id):
+    """Send a topic-addressed message to a mesh node.
+    JSON body: {"topic": "config", "data": "hex"}
+    """
+    from flask import request
+    if not _admin:
+        return jsonify({"error": "admin not available"}), 503
+    body = request.get_json(silent=True) or {}
+    topic = body.get("topic", "")
+    if not topic:
+        return jsonify({"error": "topic required"}), 400
+    data_hex = body.get("data", "")
+    data = bytes.fromhex(data_hex) if data_hex else b''
+    _admin.send_topic_msg(node_id, topic, data)
+    return jsonify({"ok": True, "target": node_id, "topic": topic})
+
+
 @app.route("/api/comparison")
 def api_comparison():
     import json, os

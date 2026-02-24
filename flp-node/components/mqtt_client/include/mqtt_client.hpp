@@ -59,10 +59,10 @@ struct MeshCmdItem
     size_t data_len;
 };
 
-class MqttSnClient
+class MqttClient
 {
   public:
-    MqttSnClient() = default;
+    MqttClient() = default;
 
     void init();
     void run();

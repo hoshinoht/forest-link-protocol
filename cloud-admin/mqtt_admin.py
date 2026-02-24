@@ -244,6 +244,27 @@ class FlpMqttAdmin:
         self.client.publish("flp/admin/cmd", payload, qos=1)
         print(f"[Cmd] Sent mesh cmd {cmd_id} to node 0x{target_addr:04X}")
 
+    def send_topic_msg(self, target_node_id: str, topic: str, payload: bytes = b''):
+        """Send a topic-addressed message to a mesh node.
+
+        Wire format on flp/admin/cmd:
+            [target_addr:2LE][cmd_id=0x10:1][topic_len:1][topic:N][payload:M]
+
+        The exit node strips the target+cmd_id header and routes
+        [cmd_id:1][topic_len:1][topic:N][payload:M] as a MESH_CMD packet.
+        Deep nodes check their local subscription list for a match.
+        """
+        target_addr = int(target_node_id, 16)
+        topic_bytes = topic.encode('utf-8')
+        if len(topic_bytes) > 31:
+            print(f"[TopicMsg] Topic too long ({len(topic_bytes)} > 31)")
+            return
+        msg = struct.pack("<HBB", target_addr, 0x10, len(topic_bytes))
+        msg += topic_bytes + payload
+        self.client.publish("flp/admin/cmd", msg, qos=1)
+        print(f"[TopicMsg] Sent topic='{topic}' to 0x{target_addr:04X} "
+              f"payload_len={len(payload)}")
+
     def run(self):
         """Main loop."""
         self._running = True
