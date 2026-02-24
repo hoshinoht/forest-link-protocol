@@ -485,10 +485,16 @@ void MqttSnClient::run()
     {
         // Block until a producer notifies us or the heartbeat interval elapses.
         // Compute remaining time until next heartbeat so we never oversleep it.
+        // Floor of 1 tick prevents spin when heartbeat is due or notifications
+        // are pending (ulTaskNotifyTake returns immediately if count > 0).
         TickType_t now = xTaskGetTickCount();
         TickType_t elapsed = now - last_status_tick;
         TickType_t wait =
-            (elapsed >= status_interval) ? 0 : (status_interval - elapsed);
+            (elapsed >= status_interval) ? 1 : (status_interval - elapsed);
+        if (wait == 0)
+        {
+            wait = 1;
+        }
         ulTaskNotifyTake(pdTRUE, wait);
 
         // Drain publish queue when connected
@@ -544,6 +550,10 @@ void MqttSnClient::run()
                 }
             }
         }
+
+        // Yield for 1 tick to guarantee IDLE task runs and feeds the
+        // watchdog, even if notifications arrive every iteration.
+        vTaskDelay(1);
     }
 }
 
