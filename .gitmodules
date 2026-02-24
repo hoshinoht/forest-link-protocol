@@ -1,0 +1,3 @@
+[submodule "flp-node/components/display/lib/esp-idf-ssd1306"]
+	path = flp-node/components/display/lib/esp-idf-ssd1306
+	url = https://github.com/nopnop2002/esp-idf-ssd1306.git

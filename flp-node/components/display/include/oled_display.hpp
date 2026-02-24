@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "driver/i2c_master.h"
+#include "ssd1306.h"
 
 namespace flp
 {
@@ -36,13 +36,7 @@ class OledDisplay
     bool is_initialized() const { return initialized_; }
 
   private:
-    void send_cmd(uint8_t cmd);
-    void reset_hw();
-
-    i2c_master_bus_handle_t bus_ = nullptr;
-    i2c_master_dev_handle_t dev_ = nullptr;
-    int rst_pin_ = -1;
-    uint8_t fb_[1024] = {}; // 128x64 framebuffer (8 pages x 128 cols)
+    SSD1306_t dev_ = {};
     bool initialized_ = false;
 };
 

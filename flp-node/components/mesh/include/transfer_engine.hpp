@@ -118,6 +118,15 @@ class TransferEngine
     // Access to transfer state for MQTT publish
     const char *current_filename() const { return transfer_.filename; }
     bool is_transfer_active() const { return transfer_.active; }
+    uint8_t get_progress_pct() const
+    {
+        if (!transfer_.active || transfer_.fragment_count == 0)
+        {
+            return 0;
+        }
+        return static_cast<uint8_t>(
+            (transfer_.next_fragment * 100) / transfer_.fragment_count);
+    }
 
     // Exit node status
     bool is_exit_node() const { return is_exit_node_; }

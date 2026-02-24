@@ -217,6 +217,13 @@ extern "C" void app_main()
 
     // ESP-NOW init is handled by EspNowTransport::init() called from MeshManager
 
+    // Init OLED early — it's local hardware, no network dependency
+#if CONFIG_FLP_OLED_ENABLED
+    oled_display.init(CONFIG_FLP_OLED_SDA,
+                      CONFIG_FLP_OLED_SCL,
+                      CONFIG_FLP_OLED_RST);
+#endif
+
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
     mesh_manager.init();
 
@@ -225,12 +232,6 @@ extern "C" void app_main()
     mqtt_client.set_node_addr(mesh_manager.get_addr());
     mqtt_client.init();
     mesh_manager.set_mqtt_client(&mqtt_client);
-#endif
-
-#if CONFIG_FLP_OLED_ENABLED
-    oled_display.init(CONFIG_FLP_OLED_SDA,
-                      CONFIG_FLP_OLED_SCL,
-                      CONFIG_FLP_OLED_RST);
 #endif
 
     // UART ingest API
