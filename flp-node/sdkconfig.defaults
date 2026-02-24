@@ -27,4 +27,4 @@ CONFIG_FLP_WIFI_PASSWORD="Hoshi@869978"
 
 
 # Mqtt gateway
-FLP_MQTT_BROKER_URI="mqtt://miyuki.local"
+FLP_MQTT_BROKER_URI="mqtt://192.168.0.6"

@@ -221,7 +221,7 @@ Requires=mosquitto.service
 [Service]
 Type=simple
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${SCRIPT_DIR}/.venv/bin/python3 ${SCRIPT_DIR}/mqtt_admin.py --broker localhost --port ${MQTT_PORT}
+ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/mqtt_admin.py --broker localhost --port ${MQTT_PORT}
 Restart=on-failure
 RestartSec=5
 
