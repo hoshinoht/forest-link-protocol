@@ -5,24 +5,38 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_wifi.h"
+#include "esp_timer.h"
 #include "flp_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "mesh_manager.hpp"
-#include "mqtt_sn_client.hpp"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
+
+#include "esp_wifi.h"
+#if !CONFIG_FLP_WIFI_DISABLED
+#include "mqtt_sn_client.hpp"
+#endif
+
+#if CONFIG_FLP_OLED_ENABLED
+#include "oled_display.hpp"
+#endif
 
 static const char *TAG = "flp_main";
 
 static flp::MeshManager mesh_manager;
-static flp::MqttSnClient mqtt_client;
 static flp::UartIngest uart_ingest;
 
+#if !CONFIG_FLP_WIFI_DISABLED
+static flp::MqttSnClient mqtt_client;
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
+#endif
+
+#if CONFIG_FLP_OLED_ENABLED
+static flp::OledDisplay oled_display;
+#endif
 
 // Demo button
 static TaskHandle_t s_button_task_handle = nullptr;
@@ -58,6 +72,7 @@ static void button_task(void *arg)
     }
 }
 
+#if !CONFIG_FLP_WIFI_DISABLED
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
                                int32_t event_id,
@@ -85,6 +100,7 @@ static void wifi_event_handler(void *arg,
         mesh_manager.set_has_internet(true);
     }
 }
+#endif
 
 static void mesh_task(void *arg)
 {
@@ -94,6 +110,7 @@ static void mesh_task(void *arg)
     vTaskDelete(nullptr);
 }
 
+#if !CONFIG_FLP_WIFI_DISABLED
 static void mqtt_task(void *arg)
 {
     ESP_LOGI(TAG, "mqtt_task started");
@@ -101,6 +118,7 @@ static void mqtt_task(void *arg)
     client->run();
     vTaskDelete(nullptr);
 }
+#endif
 
 static void uart_ingest_task(void *arg)
 {
@@ -110,11 +128,40 @@ static void uart_ingest_task(void *arg)
     vTaskDelete(nullptr);
 }
 
+#if CONFIG_FLP_OLED_ENABLED
+static void display_task(void *arg)
+{
+    ESP_LOGI(TAG, "display_task started");
+    auto *mgr = static_cast<flp::MeshManager *>(arg);
+    TickType_t last_wake = xTaskGetTickCount();
+
+    while (true)
+    {
+        flp::NodeStatus status = {};
+        status.node_addr = mgr->get_addr();
+        status.wifi_connected = mgr->has_internet();
+        status.espnow_peers = mgr->get_espnow_peer_count();
+        status.neighbor_count = mgr->get_neighbor_count();
+        status.hops_to_internet = mgr->get_hops_to_internet();
+        status.transfer_active = mgr->is_transfer_active();
+        status.filename = mgr->get_transfer_filename();
+        status.transfer_pct = mgr->get_transfer_progress();
+        status.free_heap_kb = esp_get_free_heap_size() / 1024;
+        status.uptime_s =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+
+        oled_display.update(status);
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(FLP_DISPLAY_UPDATE_MS));
+    }
+}
+#endif
+
 extern "C" void app_main()
 {
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
 
-    // Initialize NVS (required for WiFi + BLE)
+    // Initialize NVS (required for WiFi + ESP-NOW)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -124,6 +171,22 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(ret);
 
+#if CONFIG_FLP_WIFI_DISABLED
+    // Relay-only node: WiFi started in STA mode (no AP connect) for ESP-NOW
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t relay_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&relay_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Set fixed channel for relay nodes (must match exit node AP channel)
+    ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_FLP_ESPNOW_CHANNEL,
+                                          WIFI_SECOND_CHAN_NONE));
+    ESP_LOGI(TAG, "WiFi STA started (no AP) for ESP-NOW, ch=%d",
+             CONFIG_FLP_ESPNOW_CHANNEL);
+#else
     // Initialize WiFi station
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
@@ -150,16 +213,26 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
+#endif
 
-    // BLE init is handled by BleTransport::init() called from MeshManager
+    // ESP-NOW init is handled by EspNowTransport::init() called from MeshManager
+
+    // Init OLED early — it's local hardware, no network dependency
+#if CONFIG_FLP_OLED_ENABLED
+    oled_display.init(CONFIG_FLP_OLED_SDA,
+                      CONFIG_FLP_OLED_SCL,
+                      CONFIG_FLP_OLED_RST);
+#endif
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
     mesh_manager.init();
 
+#if !CONFIG_FLP_WIFI_DISABLED
     // Task 6: Wire MQTT client to mesh manager for file upload bridge
     mqtt_client.set_node_addr(mesh_manager.get_addr());
     mqtt_client.init();
     mesh_manager.set_mqtt_client(&mqtt_client);
+#endif
 
     // UART ingest API
     uart_ingest.init(UART_NUM_2,
@@ -173,12 +246,14 @@ extern "C" void app_main()
                 &mesh_manager,
                 FLP_MESH_TASK_PRIORITY,
                 nullptr);
+#if !CONFIG_FLP_WIFI_DISABLED
     xTaskCreate(mqtt_task,
                 "mqtt_task",
                 FLP_MQTT_TASK_STACK,
                 &mqtt_client,
                 FLP_MQTT_TASK_PRIORITY,
                 nullptr);
+#endif
     xTaskCreate(uart_ingest_task,
                 "uart_ingest",
                 FLP_UART_TASK_STACK,
@@ -212,6 +287,15 @@ extern "C" void app_main()
         static_cast<gpio_num_t>(CONFIG_FLP_DEMO_BUTTON_PIN),
         button_isr_handler,
         nullptr));
+
+#if CONFIG_FLP_OLED_ENABLED
+    xTaskCreate(display_task,
+                "display",
+                FLP_DISPLAY_TASK_STACK,
+                &mesh_manager,
+                FLP_DISPLAY_TASK_PRIORITY,
+                nullptr);
+#endif
 
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, button on GPIO %d)",

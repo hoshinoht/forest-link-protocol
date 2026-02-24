@@ -19,6 +19,9 @@ import paho.mqtt.client as mqtt
 from selective_repeat import CloudSelectiveRepeat
 from file_reassembler import FileReassembler, CHUNK_SIZE
 from transfer_queue import TransferQueue
+from topology import TopologyAggregator
+from metrics_store import MetricsStore
+import web_server
 
 BROKER_HOST = "localhost"
 BROKER_PORT = 1883
@@ -46,6 +49,10 @@ class FlpMqttAdmin:
 
         self.reassembler = None  # created per transfer
 
+        # Topology and metrics
+        self.topology = TopologyAggregator()
+        self.metrics_store = MetricsStore()
+
         # Node tracking
         self.nodes = {}  # node_id -> last status
 
@@ -60,7 +67,10 @@ class FlpMqttAdmin:
             client.subscribe("flp/+/file/meta", qos=1)
             client.subscribe("flp/+/file/data", qos=1)
             client.subscribe("flp/+/status", qos=0)
-            print("[MQTT] Subscribed to flp/+/file/meta, flp/+/file/data, flp/+/status")
+            client.subscribe("flp/+/topology", qos=0)
+            client.subscribe("flp/+/metrics", qos=0)
+            client.subscribe("flp/+/heap", qos=0)
+            print("[MQTT] Subscribed to flp/+/file/meta, flp/+/file/data, flp/+/status, flp/+/topology, flp/+/metrics, flp/+/heap")
         else:
             print(f"[MQTT] Connection failed with rc={rc}")
 
@@ -85,6 +95,13 @@ class FlpMqttAdmin:
             self._handle_file_meta(node_id, payload)
         elif sub_topic == "file/data":
             self._handle_file_data(node_id, payload)
+        elif sub_topic == "topology":
+            self.topology.update(node_id, payload)
+        elif sub_topic == "metrics":
+            self.metrics_store.record_node(node_id, payload)
+        elif sub_topic == "heap":
+            self.topology.update_heap(node_id, payload)
+            self.metrics_store.record_heap(node_id, payload)
 
     def _handle_status(self, node_id, payload):
         """Handle node heartbeat/status."""
@@ -185,6 +202,8 @@ class FlpMqttAdmin:
                 f"[Transfer] WARNING: {self.reassembler.filename} saved to {path} (CRC MISMATCH)")
 
         self.reassembler = None
+        self.transfer_queue.active_transfer.completed_at = time.time()
+        self.metrics_store.record_transfer(self.transfer_queue.active_transfer)
         self.transfer_queue.complete_active()
 
         # Set up next transfer if queued
@@ -197,12 +216,33 @@ class FlpMqttAdmin:
         self.client.publish("flp/admin/ack", payload, qos=1)
 
     def _send_command(self, node_id, command, session_id):
-        """Publish control command to flp/admin/cmd."""
+        """Publish transfer control command to flp/admin/transfer_cmd.
+
+        Uses a separate topic from flp/admin/cmd (binary mesh commands)
+        to avoid format collision.
+        """
         payload = json.dumps(
             {"command": command, "node_id": node_id, "session_id": session_id})
-        self.client.publish("flp/admin/cmd", payload, qos=1)
+        self.client.publish("flp/admin/transfer_cmd", payload, qos=1)
         print(
             f"[Cmd] Sent {command} to node {node_id} for session {session_id}")
+
+    def send_node_command(self, target_node_id: str, cmd_id: int, data: bytes = b''):
+        """Send a binary command to any mesh node via exit-node relay.
+
+        Binary format: [target_addr:2LE][cmd_id:1][data:N]
+        Exit nodes subscribe to flp/admin/cmd and route MESH_CMD packets
+        through the mesh to the target node.
+
+        Command IDs:
+            0x01 = REQUEST_TELEMETRY — trigger immediate telemetry publish
+            0x02 = CONFIG_UPDATE
+            0x03 = REBOOT
+        """
+        target_addr = int(target_node_id, 16)
+        payload = struct.pack("<HB", target_addr, cmd_id) + data
+        self.client.publish("flp/admin/cmd", payload, qos=1)
+        print(f"[Cmd] Sent mesh cmd {cmd_id} to node 0x{target_addr:04X}")
 
     def run(self):
         """Main loop."""
@@ -212,6 +252,9 @@ class FlpMqttAdmin:
             f"[Admin] Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
+
+        web_server.init(self.topology, self.metrics_store, admin=self)
+        web_server.start()
 
         print("[Admin] FLP MQTT Admin running. Press Ctrl+C to stop.")
 

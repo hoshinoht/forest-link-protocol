@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "esp_timer.h"
 
 using namespace flp;
@@ -19,15 +20,11 @@ static const char *TAG = "xfer_eng";
 
 void TransferEngine::init(EventGroupHandle_t events,
                           uint16_t my_addr,
-                          SendPacketFn send_fn,
-                          SendRawFn send_raw_fn,
-                          SelectTransportFn select_fn)
+                          SendPacketFn send_fn)
 {
     events_ = events;
     my_addr_ = my_addr;
     send_fn_ = send_fn;
-    send_raw_fn_ = send_raw_fn;
-    select_fn_ = select_fn;
 
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
@@ -39,31 +36,9 @@ void TransferEngine::init(EventGroupHandle_t events,
                    const uint8_t *data,
                    size_t len)
             {
-                if (PACKET_HEADER_SIZE + len > MAX_MTU)
-                {
-                    ESP_LOGW(TAG,
-                             "ARQ send: payload %zu exceeds MAX_MTU, dropping",
-                             len);
-                    return;
-                }
-
-                uint8_t buf[MAX_MTU];
-                PacketHeader hdr = {};
-                hdr.set_ver_type(PROTOCOL_VERSION, type);
-                hdr.src_addr = my_addr_;
-                hdr.dst_addr = dst;
-                hdr.set_ttl_hops(DEFAULT_TTL, 0);
-                hdr.seq_num = seq;
-
-                memcpy(buf, &hdr, PACKET_HEADER_SIZE);
-                if (data && len > 0)
-                {
-                    memcpy(buf + PACKET_HEADER_SIZE, data, len);
-                }
-
-                size_t total = PACKET_HEADER_SIZE + len;
-                Transport t = select_fn_(-90, 0xFF, total);
-                send_raw_fn_(t, buf, total, dst);
+                // Route through mesh — send_fn_ handles header construction,
+                // route table lookup, transport selection, and next-hop relay.
+                send_fn_(dst, type, data, len, seq);
             });
     }
 
@@ -110,7 +85,8 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         send_fn_(hdr.src_addr,
                  PacketType::TRANSFER_ACK,
                  reinterpret_cast<const uint8_t *>(&ack),
-                 sizeof(ack));
+                 sizeof(ack),
+                 0);
 
         // Set up as exit node -- NO PSRAM allocation
         is_exit_node_ = true;
@@ -119,6 +95,14 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
 
         // Set up ACK path: arq_[0] for sending ACKs back to source
         arq_[0].set_peer_addr(hdr.src_addr);
+
+        // Publish complete transfer meta to MQTT (Fix 5)
+        if (forward_meta_fn_)
+        {
+            forward_meta_fn_(ad.session_id, ad.filename, hdr.src_addr,
+                             ad.file_size, ad.fragment_count,
+                             ad.fragment_size, ad.crc32);
+        }
 
         ESP_LOGI(TAG, "Exit node mode: session=%" PRIu32 " source=0x%04X",
                  active_session_id_, source_addr_);
@@ -161,19 +145,8 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 {
     if (is_exit_node_)
     {
-        // Send ACK back to source
-        {
-            uint8_t buf[MAX_MTU];
-            PacketHeader ack_hdr = {};
-            ack_hdr.set_ver_type(PROTOCOL_VERSION, PacketType::ACK);
-            ack_hdr.src_addr = my_addr_;
-            ack_hdr.dst_addr = hdr.src_addr;
-            ack_hdr.set_ttl_hops(DEFAULT_TTL, 0);
-            ack_hdr.seq_num = hdr.seq_num;
-            memcpy(buf, &ack_hdr, PACKET_HEADER_SIZE);
-            Transport t = select_fn_(-90, 0xFF, PACKET_HEADER_SIZE);
-            send_raw_fn_(t, buf, PACKET_HEADER_SIZE, hdr.src_addr);
-        }
+        // Send ACK back to source — routed through mesh
+        send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
 
         // Forward fragment to MQTT
         if (forward_to_mqtt_fn_)
@@ -222,8 +195,7 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
 
 void TransferEngine::start_file_transfer(const char *filename,
                                          const uint8_t *data,
-                                         size_t size,
-                                         Transport preferred_transport)
+                                         size_t size)
 {
     if (transfer_.active)
     {
@@ -231,15 +203,21 @@ void TransferEngine::start_file_transfer(const char *filename,
         return;
     }
 
-    size_t frag_payload =
-        (preferred_transport == Transport::BLE) ? BLE_MAX_PAYLOAD
-                                                : LORA_MAX_PAYLOAD;
+    fec_encoder_.reset();
+
+    // Fix 3: Always use LORA_MAX_PAYLOAD so fragments fit on any transport
+    // at any relay hop (LoRa max packet is 255 bytes).
+    size_t frag_payload = LORA_MAX_PAYLOAD;
 
     transfer_.data = data;
     transfer_.size = size;
     transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
-    transfer_.fragment_count =
+    uint16_t data_frags =
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
+    uint16_t parity_frags =
+        static_cast<uint16_t>((data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
+    transfer_.fragment_count =
+        static_cast<uint16_t>(data_frags + parity_frags);
     transfer_.next_fragment = 0;
     transfer_.active = true;
     transfer_.session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -259,6 +237,7 @@ void TransferEngine::start_file_transfer(const char *filename,
     ad.file_size = static_cast<uint32_t>(size);
     ad.fragment_count = transfer_.fragment_count;
     ad.fragment_size = transfer_.fragment_size;
+    ad.crc32 = esp_rom_crc32_le(0, data, size);
     strncpy(ad.filename, filename, sizeof(ad.filename) - 1);
 
     // Start election
@@ -266,9 +245,13 @@ void TransferEngine::start_file_transfer(const char *filename,
     election_active_ = true;
     election_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
+    // Fix 1: Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
+    // BROADCAST_ADDR is excluded from forwarding in process_slab, meaning
+    // exit nodes >1 hop away would never see the ad.
     send_broadcast_with_retry(PacketType::TRANSFER_AD,
                               reinterpret_cast<const uint8_t *>(&ad),
-                              sizeof(ad));
+                              sizeof(ad),
+                              EXIT_ANY_ADDR);
 }
 
 // -- Periodic tick ------------------------------------------------------------
@@ -400,6 +383,7 @@ void TransferEngine::transfer_tick()
     }
 
     // Round-robin fragment assignment across alive exit nodes
+    // Sequence layout: every (FEC_GROUP_SIZE+1)th seq is a parity slot
     while (transfer_.next_fragment < transfer_.fragment_count)
     {
         // Find next alive exit node for this fragment
@@ -425,18 +409,50 @@ void TransferEngine::transfer_tick()
         if (arq_[arq_idx].sender_window_full())
             break;
 
-        size_t offset = static_cast<size_t>(transfer_.next_fragment) *
-                        transfer_.fragment_size;
-        size_t remain = transfer_.size - offset;
-        size_t frag_len = (remain < transfer_.fragment_size)
-                              ? remain
-                              : transfer_.fragment_size;
+        uint16_t seq = transfer_.next_fragment;
+        bool is_parity_slot =
+            (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
 
-        int ret = arq_[arq_idx].send_fragment(
-            transfer_.next_fragment, transfer_.data + offset, frag_len);
-        if (ret < 0)
+        if (is_parity_slot)
         {
-            break;
+            // Send parity fragment
+            int ret = arq_[arq_idx].send_fragment(
+                seq, fec_encoder_.parity_data(), fec_encoder_.parity_len());
+            if (ret < 0)
+                break;
+            fec_encoder_.reset();
+        }
+        else
+        {
+            // Map seq to data index (skip parity slots)
+            uint16_t group = seq / (FEC_GROUP_SIZE + 1);
+            uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
+            uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
+
+            size_t offset =
+                static_cast<size_t>(data_idx) * transfer_.fragment_size;
+            if (offset >= transfer_.size)
+            {
+                // Past end of file data — skip (tail parity will follow)
+                transfer_.next_fragment++;
+                continue;
+            }
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+
+            int ret = arq_[arq_idx].send_fragment(
+                seq, transfer_.data + offset, frag_len);
+            if (ret < 0)
+                break;
+
+            // Ingest into FEC encoder
+            fec_encoder_.ingest(transfer_.data + offset, frag_len);
+
+            // If this was the last data fragment and the group is not
+            // complete, the next seq should be a parity slot emitted by
+            // the tail-flush logic below
         }
 
         transfer_.next_fragment++;
@@ -594,10 +610,11 @@ void TransferEngine::broadcast_retry_tick(uint32_t now_ms)
         return;
     }
 
-    send_fn_(BROADCAST_ADDR,
+    send_fn_(broadcast_retry_.dst_addr,
              broadcast_retry_.type,
              broadcast_retry_.payload,
-             broadcast_retry_.payload_len);
+             broadcast_retry_.payload_len,
+             0);
     broadcast_retry_.attempt++;
 
     if (broadcast_retry_.attempt >= broadcast_retry_.max_retries)
@@ -619,6 +636,7 @@ void TransferEngine::broadcast_retry_tick(uint32_t now_ms)
 void TransferEngine::send_broadcast_with_retry(PacketType type,
                                                const uint8_t *payload,
                                                size_t payload_len,
+                                               uint16_t dst_addr,
                                                uint8_t max_retries)
 {
     if (payload_len > sizeof(broadcast_retry_.payload))
@@ -630,6 +648,7 @@ void TransferEngine::send_broadcast_with_retry(PacketType type,
     memcpy(broadcast_retry_.payload, payload, payload_len);
     broadcast_retry_.payload_len = payload_len;
     broadcast_retry_.type = type;
+    broadcast_retry_.dst_addr = dst_addr;
     broadcast_retry_.max_retries = max_retries;
     broadcast_retry_.attempt = 0;
     broadcast_retry_.backoff_ms = 500;

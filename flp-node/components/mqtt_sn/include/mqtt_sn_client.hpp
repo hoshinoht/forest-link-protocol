@@ -49,6 +49,15 @@ struct CloudNackItem
     uint16_t seq;
 };
 
+// Inbound mesh command from cloud (MQTT → exit node → mesh)
+struct MeshCmdItem
+{
+    uint16_t target_addr;
+    uint8_t cmd_id;
+    uint8_t data[64];
+    size_t data_len;
+};
+
 class MqttSnClient
 {
   public:
@@ -74,6 +83,12 @@ class MqttSnClient
     void publish_fragment(uint32_t session_id, uint16_t seq, uint16_t src_node,
                           const uint8_t *data, size_t len, const char *filename);
 
+    // Publish complete transfer meta (called when exit node receives TRANSFER_AD)
+    void publish_transfer_meta(uint32_t session_id, const char *filename,
+                               uint16_t src_node, uint16_t exit_node,
+                               uint32_t total_size, uint16_t chunk_count,
+                               uint16_t fragment_size, uint32_t crc32);
+
     void set_rx_callback(MqttRxCallback cb)
     {
         rx_callback_ = cb;
@@ -82,6 +97,9 @@ class MqttSnClient
     {
         return connected_;
     }
+
+    // Drain one pending mesh command (returns true if item was available)
+    bool receive_cmd(MeshCmdItem &out);
 
     TopicTable &topic_table()
     {
@@ -98,6 +116,7 @@ class MqttSnClient
     QueueHandle_t publish_queue_ = nullptr;
     QueueHandle_t file_publish_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
+    QueueHandle_t cmd_queue_ = nullptr; // inbound mesh commands from cloud
     MqttRxCallback rx_callback_ = nullptr;
     std::atomic<bool> connected_{false};
     uint16_t node_addr_ = 0;

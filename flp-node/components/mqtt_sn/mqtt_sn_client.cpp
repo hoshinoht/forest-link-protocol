@@ -24,8 +24,9 @@ void MqttSnClient::init()
     // Create publish queues
     publish_queue_ = xQueueCreate(16, sizeof(MqttPublishItem));
     file_publish_queue_ = xQueueCreate(2, sizeof(FilePublishRequest));
-    fragment_publish_queue_ = xQueueCreate(8, sizeof(FragmentPublishRequest));
+    fragment_publish_queue_ = xQueueCreate(64, sizeof(FragmentPublishRequest));
     nack_queue_ = xQueueCreate(16, sizeof(CloudNackItem));
+    cmd_queue_ = xQueueCreate(8, sizeof(MeshCmdItem));
 
     // Configure and start ESP-IDF MQTT client
     esp_mqtt_client_config_t mqtt_cfg = {};
@@ -112,10 +113,30 @@ void MqttSnClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             }
             topic_buf[tlen] = '\0';
 
-            // Admin command handler
-            if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data)
+            // Admin command handler — binary format: [target:2LE][cmd_id:1][data:N]
+            if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data &&
+                event->data_len >= 3)
             {
-                ESP_LOGI(TAG, "Admin cmd: %.*s", event->data_len, event->data);
+                MeshCmdItem cmd = {};
+                memcpy(&cmd.target_addr, event->data, 2); // little-endian
+                cmd.cmd_id = static_cast<uint8_t>(event->data[2]);
+                cmd.data_len = static_cast<size_t>(event->data_len) - 3;
+                if (cmd.data_len > sizeof(cmd.data))
+                    cmd.data_len = sizeof(cmd.data);
+                if (cmd.data_len > 0)
+                    memcpy(cmd.data, event->data + 3, cmd.data_len);
+
+                ESP_LOGI(TAG,
+                         "Admin cmd: target=0x%04X cmd=%u len=%zu",
+                         cmd.target_addr,
+                         cmd.cmd_id,
+                         cmd.data_len);
+
+                if (cmd_queue_ &&
+                    xQueueSend(cmd_queue_, &cmd, 0) != pdTRUE)
+                {
+                    ESP_LOGW(TAG, "Cmd queue full, dropping");
+                }
             }
 
             // Cloud NACK handler — parse {"type":"NACK","seq":N}
@@ -299,6 +320,43 @@ void MqttSnClient::process_file_publish(const FilePublishRequest &req)
     ESP_LOGI(TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
 }
 
+void MqttSnClient::publish_transfer_meta(uint32_t session_id,
+                                          const char *filename,
+                                          uint16_t src_node,
+                                          uint16_t exit_node,
+                                          uint32_t total_size,
+                                          uint16_t chunk_count,
+                                          uint16_t fragment_size,
+                                          uint32_t crc32)
+{
+    char meta_topic[64];
+    snprintf(meta_topic, sizeof(meta_topic), "flp/%04x/file/meta", node_addr_);
+
+    char meta_json[256];
+    int meta_len = snprintf(
+        meta_json, sizeof(meta_json),
+        "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\","
+        "\"src_node\":\"0x%04X\",\"exit_node\":\"0x%04X\","
+        "\"total_size\":%" PRIu32 ",\"chunk_count\":%u,"
+        "\"fragment_size\":%u,\"crc32\":%" PRIu32 "}",
+        session_id, filename, src_node, exit_node,
+        total_size, chunk_count, fragment_size, crc32);
+
+    if (connected_ && client_)
+    {
+        esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
+    }
+
+    // Mark meta as published so process_fragment_publish doesn't re-publish
+    meta_published_ = true;
+    last_meta_session_id_ = session_id;
+
+    ESP_LOGI(TAG,
+             "Published transfer meta: session=%" PRIu32 " file=%s size=%" PRIu32
+             " chunks=%u crc=%" PRIu32,
+             session_id, filename, total_size, chunk_count, crc32);
+}
+
 void MqttSnClient::publish_fragment(uint32_t session_id, uint16_t seq,
                                      uint16_t src_node, const uint8_t *data,
                                      size_t len, const char *filename)
@@ -459,8 +517,15 @@ void MqttSnClient::run()
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+}
+
+bool MqttSnClient::receive_cmd(MeshCmdItem &out)
+{
+    if (!cmd_queue_)
+        return false;
+    return xQueueReceive(cmd_queue_, &out, 0) == pdTRUE;
 }
 
 } // namespace flp

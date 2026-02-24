@@ -2,7 +2,7 @@
 // mesh_manager.cpp — Role 2: ESP32 Mesh Brain
 //
 // FR-MESH4  — Parse intent, reply as exit node if we have MQTT
-// FR-MESH6  — Adaptive protocol selection (BLE vs LoRa)
+// FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
 // FR-MESH7  — Intent broadcast retry, max 3 attempts
 // FR-MESH8  — Consume packet if dst == us, else relay
 // NFR-MESH2 — FreeRTOS queue-driven RX (interrupt-driven, no polling)
@@ -15,7 +15,9 @@
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_sn_client.hpp"
@@ -57,18 +59,14 @@ void MeshManager::init()
     assert(events_);
 
     // Pass unified queue and buffer pool to transports before init
-    ble_.set_packet_queue(packet_queue_);
-    ble_.set_buffer_pool(&buffer_pool_);
+    espnow_.set_packet_queue(packet_queue_);
+    espnow_.set_buffer_pool(&buffer_pool_);
     lora_.set_packet_queue(packet_queue_);
     lora_.set_buffer_pool(&buffer_pool_);
 
-    // Init transports
-    ble_.init();
+    // Init transports (WiFi must already be started for ESP-NOW)
+    espnow_.init();
     lora_.init(lora_rx_priority_);
-
-    // Start BLE advertising + scanning
-    ble_.start_advertise();
-    ble_.start_scan();
 
     // Init protocol selector
     protocol_selector_.init();
@@ -80,18 +78,9 @@ void MeshManager::init()
         [this](uint16_t dst,
                PacketType type,
                const uint8_t *payload,
-               size_t payload_len)
-        { send_packet(dst, type, payload, payload_len); },
-        [this](Transport t,
-               const uint8_t *data,
-               size_t len,
-               uint16_t peer_addr)
-        { send_raw(t, data, len, peer_addr); },
-        [this](int8_t rssi, uint8_t hops, size_t payload_size)
-        {
-            return protocol_selector_.select(
-                rssi, hops, payload_size, 100.0f);
-        });
+               size_t payload_len,
+               uint16_t seq_num)
+        { send_packet(dst, type, payload, payload_len, seq_num); });
 
     // Wire up fragment forwarding to MQTT
     transfer_engine_.set_forward_to_mqtt(
@@ -102,7 +91,21 @@ void MeshManager::init()
                                                data, len, filename);
         });
 
+    // Wire up transfer meta forwarding (exit node publishes complete meta)
+    transfer_engine_.set_forward_meta(
+        [this](uint32_t session_id, const char *filename, uint16_t src_node,
+               uint32_t total_size, uint16_t chunk_count,
+               uint16_t fragment_size, uint32_t crc32) {
+            if (mqtt_client_)
+                mqtt_client_->publish_transfer_meta(
+                    session_id, filename, src_node, my_addr_,
+                    total_size, chunk_count, fragment_size, crc32);
+        });
+
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+    // Init heap monitor
+    heap_monitor_.init();
 
     ESP_LOGI(TAG, "MeshManager initialized");
 }
@@ -150,8 +153,21 @@ void MeshManager::run()
         if (now - bias_timer_ms_ > 10000)
         {
             protocol_selector_.recalculate_bias();
+            heap_monitor_.periodic_check();
             bias_timer_ms_ = now;
         }
+
+        // Publish topology + metrics + heap every 30s via relay.
+        // relay_publish() handles both exit nodes (direct MQTT) and
+        // deep-field nodes (MESH_PUB routed through mesh to exit).
+        if (now - topo_metrics_timer_ms_ > 30000)
+        {
+            publish_all_telemetry();
+            topo_metrics_timer_ms_ = now;
+        }
+
+        // Drain inbound mesh commands from cloud (exit nodes only)
+        drain_cmd_queue();
 
         // Transfer engine tick (ARQ, election, broadcast retry, fragment feed)
         transfer_engine_.tick(now);
@@ -190,16 +206,21 @@ void MeshManager::process_slab(BufferSlab *slab)
     }
 
     // Update route table with source info
-    bool via_ble = (slab->source == RxTransport::BLE);
+    bool via_espnow = (slab->source == RxTransport::ESPNOW);
     bool via_lora = (slab->source == RxTransport::LORA);
     route_table_.update_neighbor(
-        hdr.src_addr, slab->rssi, hdr.hop_count(), via_ble, via_lora);
+        hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
 
     const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
     size_t payload_len = slab->len - PACKET_HEADER_SIZE;
 
-    // Is this packet for us or broadcast?
-    if (hdr.dst_addr == my_addr_ || hdr.dst_addr == BROADCAST_ADDR)
+    // EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others.
+    bool is_exit = has_internet_ && mqtt_client_;
+    bool for_us = (hdr.dst_addr == my_addr_) ||
+                  (hdr.dst_addr == BROADCAST_ADDR) ||
+                  (hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
+
+    if (for_us)
     {
         switch (hdr.type())
         {
@@ -215,15 +236,20 @@ void MeshManager::process_slab(BufferSlab *slab)
                     hdr, payload, payload_len);
                 break;
             case PacketType::DATA:
+            case PacketType::PARITY:
                 transfer_engine_.handle_data(hdr, payload, payload_len);
-                // Exit nodes forward fragments individually via forward_to_mqtt callback
-                // No reassembly check needed here
                 break;
             case PacketType::ACK:
                 transfer_engine_.handle_ack(hdr.seq_num, hdr.src_addr);
                 break;
             case PacketType::NACK:
                 transfer_engine_.handle_nack(hdr.seq_num, hdr.src_addr);
+                break;
+            case PacketType::MESH_PUB:
+                handle_mesh_pub(hdr, payload, payload_len);
+                break;
+            case PacketType::MESH_CMD:
+                handle_mesh_cmd(hdr, payload, payload_len);
                 break;
             default:
                 ESP_LOGD(TAG,
@@ -233,9 +259,24 @@ void MeshManager::process_slab(BufferSlab *slab)
         }
     }
 
-    // Forward if not for us (and not broadcast)
-    if (hdr.dst_addr != my_addr_ && hdr.dst_addr != BROADCAST_ADDR)
+    // Forward if not for us (not unicast-to-us, not broadcast).
+    // EXIT_ANY_ADDR packets are forwarded by non-exit nodes — next_hop()
+    // won't find 0xFFFE in neighbors so it falls back to routing toward
+    // the lowest hops_to_internet, which is exactly what we want.
+    bool should_forward = (hdr.dst_addr != my_addr_) &&
+                          (hdr.dst_addr != BROADCAST_ADDR) &&
+                          !(hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
+    if (should_forward)
     {
+        // Fix 4: Dedup — drop packets we've already forwarded to prevent
+        // broadcast storm (O(TTL × relays) amplification per packet).
+        if (already_seen(hdr.src_addr, hdr.dst_addr,
+                         static_cast<uint8_t>(hdr.type()), hdr.seq_num))
+        {
+            ESP_LOGD(TAG, "Dedup: dropping already-seen packet from 0x%04X seq=%u",
+                     hdr.src_addr, hdr.seq_num);
+            return;
+        }
         forward_packet(slab, hdr);
     }
 }
@@ -255,15 +296,32 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
     memcpy(&disc, payload, sizeof(disc));
 
     ESP_LOGI(TAG,
-             "Discovery from 0x%04X: inet=%u hops_inet=%u rssi=%d",
+             "Discovery from 0x%04X: inet=%u hops_inet=%u rssi=%d ch=%u",
              hdr.src_addr,
              disc.flags & 0x01,
              disc.hops_to_internet,
-             disc.rssi);
+             disc.rssi,
+             disc.wifi_channel);
 
     if (disc.flags & 0x01)
     {
         route_table_.set_has_internet(hdr.src_addr, true);
+    }
+
+    // Auto-sync ESP-NOW channel: if the peer advertises a valid channel
+    // and we're not connected to an AP (relay node or disconnected exit),
+    // switch to match so ESP-NOW can reach the mesh.
+    if (disc.wifi_channel > 0 && !has_internet_)
+    {
+        uint8_t cur_ch = 0;
+        wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&cur_ch, &sec);
+        if (cur_ch != disc.wifi_channel)
+        {
+            esp_wifi_set_channel(disc.wifi_channel, WIFI_SECOND_CHAN_NONE);
+            ESP_LOGI(TAG, "ESP-NOW channel synced: %u -> %u",
+                     cur_ch, disc.wifi_channel);
+        }
     }
 
     // Store hops_to_internet from the discovery payload.
@@ -287,6 +345,12 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
     }
     resp.rssi = 0;
+
+    // Include our current channel so the peer can sync
+    uint8_t resp_ch = 0;
+    wifi_second_chan_t resp_sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&resp_ch, &resp_sec);
+    resp.wifi_channel = resp_ch;
 
     send_packet(hdr.src_addr,
                 PacketType::DISCOVERY,
@@ -323,7 +387,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
              "Forwarding to 0x%04X via 0x%04X (%s), ttl=%u",
              hdr.dst_addr,
              next,
-             (t == Transport::BLE) ? "BLE" : "LoRa",
+             (t == Transport::ESPNOW) ? "ESPNOW" : "LoRa",
              fwd_hdr->ttl());
 
     send_raw(t, slab->data, slab->len, next);
@@ -348,6 +412,12 @@ void MeshManager::send_discovery()
     }
     disc.rssi = 0;
 
+    // Include current WiFi channel so relay nodes can auto-sync for ESP-NOW
+    uint8_t ch = 0;
+    wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&ch, &sec);
+    disc.wifi_channel = ch;
+
     // Single send — discovery is already periodic (every 10s), so retrying
     // here would block the main loop for up to 3.5s unnecessarily.
     // send_broadcast_with_retry is reserved for infrequent TRANSFER_AD
@@ -358,8 +428,161 @@ void MeshManager::send_discovery()
                 sizeof(disc));
 
     ESP_LOGD(TAG,
-             "Sent discovery broadcast (hops_to_inet=%u)",
-             disc.hops_to_internet);
+             "Sent discovery broadcast (hops_to_inet=%u ch=%u)",
+             disc.hops_to_internet,
+             disc.wifi_channel);
+}
+
+// -- Mesh relay layer ---------------------------------------------------------
+
+static const char *relay_topic_suffix(uint8_t topic_id)
+{
+    switch (topic_id)
+    {
+        case RelayTopic::HEAP:     return "heap";
+        case RelayTopic::METRICS:  return "metrics";
+        case RelayTopic::TOPOLOGY: return "topology";
+        case RelayTopic::STATUS:   return "status";
+        default:                   return "unknown";
+    }
+}
+
+void MeshManager::relay_publish(uint8_t relay_topic,
+                                const uint8_t *data,
+                                size_t len)
+{
+    if (has_internet_ && mqtt_client_)
+    {
+        // Exit node: publish directly to MQTT (may queue if temporarily
+        // disconnected — matches is_exit predicate in process_slab)
+        char topic[40];
+        snprintf(topic, sizeof(topic), "flp/%04X/%s",
+                 my_addr_, relay_topic_suffix(relay_topic));
+        mqtt_client_->publish_raw(topic, data, len);
+    }
+    else
+    {
+        // Deep-field node: wrap in MESH_PUB and route to nearest exit.
+        // Payload: [relay_topic:1][data:N]
+        uint8_t payload[MAX_MTU - PACKET_HEADER_SIZE];
+        payload[0] = relay_topic;
+        size_t copy_len = len;
+        if (copy_len > sizeof(payload) - 1)
+            copy_len = sizeof(payload) - 1;
+        memcpy(payload + 1, data, copy_len);
+        send_packet(EXIT_ANY_ADDR, PacketType::MESH_PUB,
+                    payload, 1 + copy_len);
+    }
+}
+
+void MeshManager::handle_mesh_pub(const PacketHeader &hdr,
+                                  const uint8_t *payload,
+                                  size_t payload_len)
+{
+    // Exit node received a relayed publish from a deep-field node.
+    // Forward to MQTT on behalf of the originator (hdr.src_addr).
+    if (payload_len < 2 || !mqtt_client_)
+        return;
+
+    uint8_t relay_topic = payload[0];
+    const uint8_t *data = payload + 1;
+    size_t data_len = payload_len - 1;
+
+    char topic[40];
+    snprintf(topic, sizeof(topic), "flp/%04X/%s",
+             hdr.src_addr, relay_topic_suffix(relay_topic));
+    mqtt_client_->publish_raw(topic, data, data_len);
+
+    ESP_LOGD(TAG, "Relayed MESH_PUB from 0x%04X topic=%s len=%zu",
+             hdr.src_addr, relay_topic_suffix(relay_topic), data_len);
+}
+
+void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
+                                  const uint8_t *payload,
+                                  size_t payload_len)
+{
+    if (payload_len < 1)
+        return;
+
+    uint8_t cmd_id = payload[0];
+    ESP_LOGI(TAG, "MESH_CMD from 0x%04X: cmd=%u len=%zu",
+             hdr.src_addr, cmd_id, payload_len - 1);
+
+    switch (cmd_id)
+    {
+        case MeshCmd::REQUEST_TELEMETRY:
+            publish_all_telemetry();
+            break;
+        case MeshCmd::REBOOT:
+            ESP_LOGW(TAG, "Remote reboot requested by 0x%04X", hdr.src_addr);
+            esp_restart();
+            break;
+        default:
+            ESP_LOGD(TAG, "Unknown MESH_CMD %u", cmd_id);
+            break;
+    }
+}
+
+void MeshManager::publish_all_telemetry()
+{
+    // Topology
+    uint8_t topo_buf[128];
+    size_t topo_len = route_table_.serialize(topo_buf, sizeof(topo_buf));
+    if (topo_len > 0)
+        relay_publish(RelayTopic::TOPOLOGY, topo_buf, topo_len);
+
+    // Protocol metrics
+    uint8_t metrics_buf[48];
+    size_t metrics_len = protocol_selector_.serialize_metrics(
+        metrics_buf, sizeof(metrics_buf));
+    if (metrics_len > 0)
+        relay_publish(RelayTopic::METRICS, metrics_buf, metrics_len);
+
+    // Heap stats
+    uint8_t heap_buf[20];
+    size_t heap_len = heap_monitor_.serialize(heap_buf, sizeof(heap_buf));
+    if (heap_len > 0)
+        relay_publish(RelayTopic::HEAP, heap_buf, heap_len);
+}
+
+void MeshManager::drain_cmd_queue()
+{
+    if (!mqtt_client_)
+        return;
+
+    // Exit nodes drain commands from MQTT and inject into mesh
+    MeshCmdItem cmd;
+    while (mqtt_client_->receive_cmd(cmd))
+    {
+        if (cmd.target_addr == my_addr_)
+        {
+            // Command is for this exit node itself
+            uint8_t buf[65];
+            buf[0] = cmd.cmd_id;
+            if (cmd.data_len > 0)
+                memcpy(buf + 1, cmd.data, cmd.data_len);
+
+            PacketHeader fake_hdr = {};
+            fake_hdr.src_addr = 0; // from cloud
+            handle_mesh_cmd(fake_hdr, buf, 1 + cmd.data_len);
+        }
+        else
+        {
+            // Route command into mesh toward target node
+            uint8_t payload[65];
+            payload[0] = cmd.cmd_id;
+            size_t plen = 1;
+            if (cmd.data_len > 0 && cmd.data_len <= 64)
+            {
+                memcpy(payload + 1, cmd.data, cmd.data_len);
+                plen += cmd.data_len;
+            }
+            send_packet(cmd.target_addr, PacketType::MESH_CMD,
+                        payload, plen);
+            ESP_LOGI(TAG, "Routed MESH_CMD to 0x%04X cmd=%u",
+                     cmd.target_addr, cmd.cmd_id);
+        }
+    }
 }
 
 // -- Start file transfer (delegates to TransferEngine) ------------------------
@@ -368,8 +591,7 @@ void MeshManager::start_file_transfer(const char *filename,
                                       const uint8_t *data,
                                       size_t size)
 {
-    Transport t = protocol_selector_.select(0, 0, size, 100.0f);
-    transfer_engine_.start_file_transfer(filename, data, size, t);
+    transfer_engine_.start_file_transfer(filename, data, size);
 }
 
 // -- send_packet / send_raw ---------------------------------------------------
@@ -377,7 +599,8 @@ void MeshManager::start_file_transfer(const char *filename,
 void MeshManager::send_packet(uint16_t dst,
                               PacketType type,
                               const uint8_t *payload,
-                              size_t payload_len)
+                              size_t payload_len,
+                              uint16_t seq_num)
 {
     if (PACKET_HEADER_SIZE + payload_len > MAX_MTU)
     {
@@ -393,7 +616,7 @@ void MeshManager::send_packet(uint16_t dst,
     hdr.src_addr = my_addr_;
     hdr.dst_addr = dst;
     hdr.set_ttl_hops(DEFAULT_TTL, 0);
-    hdr.seq_num = 0;
+    hdr.seq_num = seq_num;
 
     memcpy(buf, &hdr, PACKET_HEADER_SIZE);
     if (payload && payload_len > 0)
@@ -430,9 +653,9 @@ void MeshManager::send_raw(Transport transport,
     uint32_t t0 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     int rc;
 
-    if (transport == Transport::BLE)
+    if (transport == Transport::ESPNOW)
     {
-        rc = ble_.send(peer_addr, data, len);
+        rc = espnow_.send(peer_addr, data, len);
     }
     else
     {

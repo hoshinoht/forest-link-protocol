@@ -166,6 +166,18 @@ void UartIngest::handle_file_begin(const uint8_t *payload, uint16_t len)
         return;
     }
 
+    // Pre-allocation guard: check largest contiguous PSRAM block
+    size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (file_size > available)
+    {
+        ESP_LOGE(TAG,
+                 "Not enough PSRAM: need %lu, largest block %zu",
+                 (unsigned long) file_size,
+                 available);
+        send_nack(UART_CMD_FILE_BEGIN, UART_ERR_ALLOC_FAIL);
+        return;
+    }
+
     // Copy null-terminated filename
     size_t name_len = strnlen((const char *) &payload[4], len - 4);
     if (name_len >= sizeof(filename_))

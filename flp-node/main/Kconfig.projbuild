@@ -7,14 +7,14 @@ menu "Forest Link Protocol"
         help
             Determines the default role of this node in the mesh.
 
-    menu "LoRa SPI Pins (LilyGo T3)"
+    menu "LoRa SPI Pins (LilyGo T3-S3 V1.2)"
         config FLP_LORA_MOSI
             int "MOSI GPIO"
-            default 27
+            default 6
 
         config FLP_LORA_MISO
             int "MISO GPIO"
-            default 19
+            default 3
 
         config FLP_LORA_SCK
             int "SCK GPIO"
@@ -22,47 +22,95 @@ menu "Forest Link Protocol"
 
         config FLP_LORA_CS
             int "CS GPIO"
-            default 18
+            default 7
 
         config FLP_LORA_RST
             int "RST GPIO"
-            default 23
+            default 8
 
         config FLP_LORA_DIO0
-            int "DIO0 (IRQ) GPIO"
-            default 26
+            int "DIO1 (IRQ) GPIO"
+            default 9
+
+        config FLP_LORA_BUSY
+            int "BUSY GPIO (-1 if SX1276)"
+            default 36
     endmenu
+
+    config FLP_ESPNOW_CHANNEL
+        int "ESP-NOW initial boot channel (relay-only nodes)"
+        default 1
+        range 1 13
+        help
+            Initial WiFi channel for relay-only nodes at boot, before
+            LoRa discovery has run. Once the node receives a discovery
+            broadcast from an exit node (or a relay that already knows
+            the channel), it auto-switches to match. This value only
+            matters for the first ~10 seconds after boot.
+
+    config FLP_WIFI_DISABLED
+        bool "Disable WiFi AP connection (relay-only node)"
+        default n
+        help
+            When enabled, this node skips WiFi AP connection and MQTT
+            initialisation. WiFi is still started in STA mode (no connect)
+            for ESP-NOW. It participates in the ESP-NOW/LoRa mesh as a
+            relay but never becomes an exit node.
 
     config FLP_WIFI_SSID
         string "WiFi SSID"
         default "ForestLink_AP"
+        depends on !FLP_WIFI_DISABLED
         help
             SSID of the WiFi access point for MQTT cloud connectivity.
 
     config FLP_WIFI_PASSWORD
         string "WiFi Password"
         default "forestlink"
+        depends on !FLP_WIFI_DISABLED
         help
             Password for the WiFi access point.
 
     config FLP_MQTT_BROKER_URI
         string "MQTT Broker URI"
         default "mqtt://broker.local"
+        depends on !FLP_WIFI_DISABLED
         help
             URI of the MQTT broker for cloud gateway connectivity.
 
     menu "UART Ingest API"
         config FLP_UART_TX_PIN
             int "TX GPIO"
-            default 17
+            default 43
 
         config FLP_UART_RX_PIN
             int "RX GPIO"
-            default 16
+            default 44
     endmenu
 
     config FLP_DEMO_BUTTON_PIN
         int "Demo button GPIO"
         default 0
+
+    menu "OLED Display (SSD1306)"
+        config FLP_OLED_ENABLED
+            bool "Enable OLED display"
+            default y
+
+        config FLP_OLED_SDA
+            int "I2C SDA GPIO"
+            default 18
+            depends on FLP_OLED_ENABLED
+
+        config FLP_OLED_SCL
+            int "I2C SCL GPIO"
+            default 17
+            depends on FLP_OLED_ENABLED
+
+        config FLP_OLED_RST
+            int "OLED RST GPIO (-1 = none)"
+            default -1
+            depends on FLP_OLED_ENABLED
+    endmenu
 
 endmenu

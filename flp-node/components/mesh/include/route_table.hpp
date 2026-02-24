@@ -16,7 +16,7 @@ struct NeighborEntry
     uint8_t hop_count;
     uint8_t hops_to_internet;
     uint32_t last_seen_ms;
-    bool ble_reachable;
+    bool espnow_reachable;
     bool lora_reachable;
     bool has_internet;
 };
@@ -33,7 +33,7 @@ class RouteTable
     void update_neighbor(uint16_t addr,
                          int8_t rssi,
                          uint8_t hops,
-                         bool ble,
+                         bool espnow,
                          bool lora,
                          uint8_t hops_to_inet = 0xFF)
     {
@@ -46,7 +46,7 @@ class RouteTable
                 neighbors_[i].rssi = rssi;
                 neighbors_[i].hop_count = hops;
                 neighbors_[i].last_seen_ms = now;
-                neighbors_[i].ble_reachable = ble;
+                neighbors_[i].espnow_reachable = espnow;
                 neighbors_[i].lora_reachable = lora;
                 if (hops_to_inet != 0xFF)
                 {
@@ -59,7 +59,7 @@ class RouteTable
         if (count_ < MAX_NEIGHBORS)
         {
             neighbors_[count_] = {
-                addr, rssi, hops, hops_to_inet, now, ble, lora, false};
+                addr, rssi, hops, hops_to_inet, now, espnow, lora, false};
             count_++;
         }
         else
@@ -76,7 +76,7 @@ class RouteTable
                 }
             }
             neighbors_[oldest_idx] = {
-                addr, rssi, hops, hops_to_inet, now, ble, lora, false};
+                addr, rssi, hops, hops_to_inet, now, espnow, lora, false};
         }
     }
 
@@ -184,6 +184,33 @@ class RouteTable
                 break;
             }
         }
+    }
+
+    size_t serialize(uint8_t *buf, size_t max_len) const
+    {
+        // Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1, flags:1}*N]
+        // flags: bit0=espnow_reachable, bit1=lora_reachable, bit2=has_internet
+        size_t needed = 1 + count_ * 6;
+        if (needed > max_len)
+            return 0;
+        buf[0] = count_;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            size_t off = 1 + i * 6;
+            memcpy(buf + off, &neighbors_[i].addr, 2); // little-endian on ESP32
+            buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
+            buf[off + 3] = neighbors_[i].hop_count;
+            buf[off + 4] = neighbors_[i].hops_to_internet;
+            uint8_t flags = 0;
+            if (neighbors_[i].espnow_reachable)
+                flags |= 0x01;
+            if (neighbors_[i].lora_reachable)
+                flags |= 0x02;
+            if (neighbors_[i].has_internet)
+                flags |= 0x04;
+            buf[off + 5] = flags;
+        }
+        return needed;
     }
 
     uint8_t min_hops_to_internet() const

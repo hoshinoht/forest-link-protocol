@@ -182,6 +182,17 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
     file_size_ = file_size;
     fragments_received_ = 0;
 
+    // Pre-allocation guard: verify PSRAM can hold the reassembly buffer
+    size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (file_size > available)
+    {
+        ESP_LOGE(TAG,
+                 "Not enough PSRAM for reassembly: need %zu, largest block %zu",
+                 file_size,
+                 available);
+        return false;
+    }
+
     // Try PSRAM first, fall back to regular heap
     reassembly_buf_ =
         static_cast<uint8_t *>(heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM));
@@ -225,6 +236,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
 
     expected_seq_ = 0;
     receiver_active_ = true;
+    fec_decoder_.reset();
     ESP_LOGI(TAG,
              "Receiver init: %u fragments, %zu bytes each, %zu total",
              total_fragments,
@@ -247,6 +259,22 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         return false;
     }
 
+    bool is_parity = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
+
+    // Feed to FEC decoder before anything else so recovery can reduce NACKs
+    bool recovered = fec_decoder_.ingest(seq, data, len, is_parity);
+
+    // If FEC recovered a missing fragment, insert it recursively
+    if (recovered)
+    {
+        ESP_LOGI(TAG,
+                 "FEC recovered seq=%u from group",
+                 fec_decoder_.recovered_seq());
+        receive_fragment(fec_decoder_.recovered_seq(),
+                         fec_decoder_.recovered_data(),
+                         fec_decoder_.recovered_len());
+    }
+
     // Check for duplicate
     uint8_t byte_idx = seq / 8;
     uint8_t bit_mask = 1 << (seq % 8);
@@ -260,30 +288,44 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         return false;
     }
 
-    // Store fragment at correct offset
-    size_t offset = static_cast<size_t>(seq) * fragment_size_;
-    size_t copy_len = len;
-    if (offset + copy_len > file_size_)
-    {
-        copy_len = file_size_ - offset;
-    }
-    memcpy(reassembly_buf_ + offset, data, copy_len);
-
-    // Mark received
+    // Mark received and send ACK
     recv_bitmap_[byte_idx] |= bit_mask;
     fragments_received_++;
 
-    // Send ACK
     if (send_cb_)
     {
         send_cb_(peer_addr_, PacketType::ACK, seq, nullptr, 0);
     }
 
-    ESP_LOGD(TAG,
-             "RX frag seq=%u (%u/%u)",
-             seq,
-             fragments_received_,
-             total_fragments_);
+    // Parity fragments: ACK but do NOT store in reassembly buffer
+    if (is_parity)
+    {
+        ESP_LOGD(TAG, "RX parity seq=%u (%u/%u)", seq,
+                 fragments_received_, total_fragments_);
+    }
+    else
+    {
+        // Map seq to data index (skip parity slots)
+        uint16_t group = seq / (FEC_GROUP_SIZE + 1);
+        uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
+        uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
+
+        // Store fragment at correct offset in reassembly buffer
+        size_t offset = static_cast<size_t>(data_idx) * fragment_size_;
+        size_t copy_len = len;
+        if (offset + copy_len > file_size_)
+        {
+            copy_len = file_size_ - offset;
+        }
+        memcpy(reassembly_buf_ + offset, data, copy_len);
+
+        ESP_LOGD(TAG,
+                 "RX frag seq=%u data_idx=%u (%u/%u)",
+                 seq,
+                 data_idx,
+                 fragments_received_,
+                 total_fragments_);
+    }
 
     // Advance expected_seq_ past consecutive received fragments
     while (expected_seq_ < total_fragments_)
