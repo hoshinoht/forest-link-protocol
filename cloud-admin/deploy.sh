@@ -98,6 +98,12 @@ cmd_install() {
         fedora) pkg_install mosquitto ;;  # clients included in main package
     esac
 
+    mkdir -p "$(dirname "${MOSQUITTO_CONF}")"
+    # Ensure mosquitto.conf includes the conf.d/ directory
+    if [[ -f /etc/mosquitto/mosquitto.conf ]] && \
+       ! grep -q "include_dir /etc/mosquitto/conf.d" /etc/mosquitto/mosquitto.conf; then
+        echo "include_dir /etc/mosquitto/conf.d" >> /etc/mosquitto/mosquitto.conf
+    fi
     info "Writing FLP Mosquitto config to ${MOSQUITTO_CONF}..."
     cat > "${MOSQUITTO_CONF}" <<'EOF'
 # Forest Link Protocol — Mosquitto configuration
