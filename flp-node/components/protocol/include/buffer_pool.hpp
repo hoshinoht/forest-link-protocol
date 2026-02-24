@@ -14,7 +14,7 @@ struct BufferSlab
     uint8_t data[MAX_MTU];
     size_t len = 0;
     int8_t rssi = 0;
-    RxTransport source = RxTransport::BLE;
+    RxTransport source = RxTransport::ESPNOW;
     std::atomic<uint8_t> refcount{0};
 };
 

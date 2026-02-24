@@ -2,7 +2,7 @@
 // mesh_manager.cpp — Role 2: ESP32 Mesh Brain
 //
 // FR-MESH4  — Parse intent, reply as exit node if we have MQTT
-// FR-MESH6  — Adaptive protocol selection (BLE vs LoRa)
+// FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
 // FR-MESH7  — Intent broadcast retry, max 3 attempts
 // FR-MESH8  — Consume packet if dst == us, else relay
 // NFR-MESH2 — FreeRTOS queue-driven RX (interrupt-driven, no polling)
@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_sn_client.hpp"
@@ -58,18 +59,14 @@ void MeshManager::init()
     assert(events_);
 
     // Pass unified queue and buffer pool to transports before init
-    ble_.set_packet_queue(packet_queue_);
-    ble_.set_buffer_pool(&buffer_pool_);
+    espnow_.set_packet_queue(packet_queue_);
+    espnow_.set_buffer_pool(&buffer_pool_);
     lora_.set_packet_queue(packet_queue_);
     lora_.set_buffer_pool(&buffer_pool_);
 
-    // Init transports
-    ble_.init();
+    // Init transports (WiFi must already be started for ESP-NOW)
+    espnow_.init();
     lora_.init(lora_rx_priority_);
-
-    // Start BLE advertising + scanning
-    ble_.start_advertise();
-    ble_.start_scan();
 
     // Init protocol selector
     protocol_selector_.init();
@@ -209,10 +206,10 @@ void MeshManager::process_slab(BufferSlab *slab)
     }
 
     // Update route table with source info
-    bool via_ble = (slab->source == RxTransport::BLE);
+    bool via_espnow = (slab->source == RxTransport::ESPNOW);
     bool via_lora = (slab->source == RxTransport::LORA);
     route_table_.update_neighbor(
-        hdr.src_addr, slab->rssi, hdr.hop_count(), via_ble, via_lora);
+        hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
 
     const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
     size_t payload_len = slab->len - PACKET_HEADER_SIZE;
@@ -299,15 +296,32 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
     memcpy(&disc, payload, sizeof(disc));
 
     ESP_LOGI(TAG,
-             "Discovery from 0x%04X: inet=%u hops_inet=%u rssi=%d",
+             "Discovery from 0x%04X: inet=%u hops_inet=%u rssi=%d ch=%u",
              hdr.src_addr,
              disc.flags & 0x01,
              disc.hops_to_internet,
-             disc.rssi);
+             disc.rssi,
+             disc.wifi_channel);
 
     if (disc.flags & 0x01)
     {
         route_table_.set_has_internet(hdr.src_addr, true);
+    }
+
+    // Auto-sync ESP-NOW channel: if the peer advertises a valid channel
+    // and we're not connected to an AP (relay node or disconnected exit),
+    // switch to match so ESP-NOW can reach the mesh.
+    if (disc.wifi_channel > 0 && !has_internet_)
+    {
+        uint8_t cur_ch = 0;
+        wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&cur_ch, &sec);
+        if (cur_ch != disc.wifi_channel)
+        {
+            esp_wifi_set_channel(disc.wifi_channel, WIFI_SECOND_CHAN_NONE);
+            ESP_LOGI(TAG, "ESP-NOW channel synced: %u -> %u",
+                     cur_ch, disc.wifi_channel);
+        }
     }
 
     // Store hops_to_internet from the discovery payload.
@@ -331,6 +345,12 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
     }
     resp.rssi = 0;
+
+    // Include our current channel so the peer can sync
+    uint8_t resp_ch = 0;
+    wifi_second_chan_t resp_sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&resp_ch, &resp_sec);
+    resp.wifi_channel = resp_ch;
 
     send_packet(hdr.src_addr,
                 PacketType::DISCOVERY,
@@ -367,7 +387,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
              "Forwarding to 0x%04X via 0x%04X (%s), ttl=%u",
              hdr.dst_addr,
              next,
-             (t == Transport::BLE) ? "BLE" : "LoRa",
+             (t == Transport::ESPNOW) ? "ESPNOW" : "LoRa",
              fwd_hdr->ttl());
 
     send_raw(t, slab->data, slab->len, next);
@@ -392,6 +412,12 @@ void MeshManager::send_discovery()
     }
     disc.rssi = 0;
 
+    // Include current WiFi channel so relay nodes can auto-sync for ESP-NOW
+    uint8_t ch = 0;
+    wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&ch, &sec);
+    disc.wifi_channel = ch;
+
     // Single send — discovery is already periodic (every 10s), so retrying
     // here would block the main loop for up to 3.5s unnecessarily.
     // send_broadcast_with_retry is reserved for infrequent TRANSFER_AD
@@ -402,8 +428,9 @@ void MeshManager::send_discovery()
                 sizeof(disc));
 
     ESP_LOGD(TAG,
-             "Sent discovery broadcast (hops_to_inet=%u)",
-             disc.hops_to_internet);
+             "Sent discovery broadcast (hops_to_inet=%u ch=%u)",
+             disc.hops_to_internet,
+             disc.wifi_channel);
 }
 
 // -- Mesh relay layer ---------------------------------------------------------
@@ -626,9 +653,9 @@ void MeshManager::send_raw(Transport transport,
     uint32_t t0 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     int rc;
 
-    if (transport == Transport::BLE)
+    if (transport == Transport::ESPNOW)
     {
-        rc = ble_.send(peer_addr, data, len);
+        rc = espnow_.send(peer_addr, data, len);
     }
     else
     {

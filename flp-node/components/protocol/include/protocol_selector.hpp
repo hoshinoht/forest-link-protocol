@@ -9,7 +9,7 @@ namespace flp
 
 enum class Transport : uint8_t
 {
-    BLE,
+    ESPNOW,
     LORA,
 };
 
@@ -66,15 +66,15 @@ class ProtocolSelector
             memcpy(buf + off + 16, &m.rx_count, 4);
             memcpy(buf + off + 20, &m.duty_cycle_ms, 4);
         };
-        write(0, ble_metrics_);
+        write(0, espnow_metrics_);
         write(24, lora_metrics_);
         return 48;
     }
 
   private:
-    TransportMetrics ble_metrics_;
+    TransportMetrics espnow_metrics_;
     TransportMetrics lora_metrics_;
-    int8_t reliability_bias_ = 0; // +ve favors BLE, -ve favors LoRa
+    int8_t reliability_bias_ = 0; // +ve favors ESPNOW, -ve favors LoRa
 };
 
 } // namespace flp

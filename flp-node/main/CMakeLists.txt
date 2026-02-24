@@ -5,12 +5,12 @@ idf_component_register(
         nvs_flash
         esp_wifi
         driver
-        bt
         mqtt
         mesh
-        ble
+        espnow
         lora
         mqtt_sn
         protocol
         uart_api
+        display
 )

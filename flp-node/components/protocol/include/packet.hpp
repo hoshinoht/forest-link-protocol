@@ -10,7 +10,7 @@ static constexpr uint16_t BROADCAST_ADDR = 0xFFFF;
 static constexpr uint16_t EXIT_ANY_ADDR = 0xFFFE; // route toward nearest exit
 static constexpr uint8_t PROTOCOL_VERSION = 1;
 static constexpr uint8_t DEFAULT_TTL = 8;
-static constexpr size_t MAX_MTU = 512;
+static constexpr size_t MAX_MTU = 250;
 static constexpr uint8_t ARQ_WINDOW = 32;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
 static constexpr uint8_t MAX_RETRIES = 3;
@@ -91,13 +91,14 @@ static_assert(sizeof(PacketHeader) == 8, "PacketHeader must be 8 bytes");
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t LORA_MAX_PAYLOAD =
     255 - PACKET_HEADER_SIZE;                                       // 247 bytes
-static constexpr size_t BLE_MAX_PAYLOAD = 512 - PACKET_HEADER_SIZE; // 504 bytes
+static constexpr size_t ESPNOW_MAX_PAYLOAD = 250 - PACKET_HEADER_SIZE; // 242 bytes
 
 struct __attribute__((packed)) DiscoveryPayload
 {
     uint8_t flags; // bit 0: has_internet
     uint8_t hops_to_internet;
     int8_t rssi;
+    uint8_t wifi_channel; // ESP-NOW channel (0 = unknown)
 };
 
 struct __attribute__((packed)) TransferAdPayload
@@ -121,7 +122,7 @@ struct __attribute__((packed)) TransferAckPayload
 // Unified inbound packet used across transports and mesh manager
 enum class RxTransport : uint8_t
 {
-    BLE,
+    ESPNOW,
     LORA,
 };
 

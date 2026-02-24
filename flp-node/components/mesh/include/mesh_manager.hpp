@@ -5,13 +5,13 @@
 //
 // Implements:
 //   FR-MESH4  — Parse intent packets, reply as exit node if we have MQTT
-//   FR-MESH6  — Adaptive protocol selection (BLE vs LoRa)
+//   FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
 //   FR-MESH7  — Intent broadcast retry, max 3 attempts
 //   FR-MESH8  — Route packet to self (consume) or relay forward
 //   NFR-MESH2 — Interrupt-driven via FreeRTOS queue (no polling)
 //
 // Calls into (does NOT implement):
-//   BleTransport::send()       — Role 3
+//   EspNowTransport::send()    — Role 3
 //   LoraTransport::send()      — Role 4
 //   MqttSnClient::publish()    — Role 1
 //   ProtocolSelector::select() — shared component
@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "ble_transport.hpp"
+#include "espnow_transport.hpp"
 #include "buffer_pool.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -81,6 +81,26 @@ class MeshManager
         return events_;
     }
 
+    bool has_internet() const { return has_internet_.load(); }
+    uint8_t get_neighbor_count() const { return route_table_.get_count(); }
+    uint8_t get_espnow_peer_count() const { return espnow_.get_peer_count(); }
+    uint8_t get_hops_to_internet() const
+    {
+        return route_table_.min_hops_to_internet();
+    }
+    bool is_transfer_active() const
+    {
+        return transfer_engine_.is_transfer_active();
+    }
+    const char *get_transfer_filename() const
+    {
+        return transfer_engine_.current_filename();
+    }
+    uint8_t get_transfer_progress() const
+    {
+        return transfer_engine_.get_progress_pct();
+    }
+
     void send_packet(uint16_t dst,
                      PacketType type,
                      const uint8_t *payload,
@@ -114,7 +134,7 @@ class MeshManager
     void drain_cmd_queue();
 
     RouteTable route_table_;
-    BleTransport ble_;
+    EspNowTransport espnow_;
     LoraTransport lora_;
     ProtocolSelector protocol_selector_;
     TransferEngine transfer_engine_;

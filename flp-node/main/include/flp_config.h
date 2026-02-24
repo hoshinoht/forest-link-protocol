@@ -19,7 +19,7 @@
 #define FLP_BROADCAST_RETRIES 3
 
 // Fragment sizes
-#define FLP_BLE_MTU          512
+#define FLP_ESPNOW_MTU       250
 #define FLP_LORA_MAX_PAYLOAD 255
 
 // ARQ sliding window
@@ -34,6 +34,11 @@
 #define FLP_BUTTON_TASK_STACK    2048
 #define FLP_BUTTON_TASK_PRIORITY 5
 #define FLP_BUTTON_DEBOUNCE_MS   2000
+
+// OLED display
+#define FLP_DISPLAY_TASK_STACK    3072
+#define FLP_DISPLAY_TASK_PRIORITY 3
+#define FLP_DISPLAY_UPDATE_MS     500
 
 // Maximum ingest file size (10 MB) — pre-allocation guard in uart_ingest
 // checks available PSRAM before allocating, so this only succeeds if memory

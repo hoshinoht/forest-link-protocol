@@ -33,14 +33,25 @@ menu "Forest Link Protocol"
             default 26
     endmenu
 
+    config FLP_ESPNOW_CHANNEL
+        int "ESP-NOW initial boot channel (relay-only nodes)"
+        default 1
+        range 1 13
+        help
+            Initial WiFi channel for relay-only nodes at boot, before
+            LoRa discovery has run. Once the node receives a discovery
+            broadcast from an exit node (or a relay that already knows
+            the channel), it auto-switches to match. This value only
+            matters for the first ~10 seconds after boot.
+
     config FLP_WIFI_DISABLED
-        bool "Disable WiFi (relay-only node)"
+        bool "Disable WiFi AP connection (relay-only node)"
         default n
         help
-            When enabled, this node skips WiFi and MQTT initialisation
-            entirely. It participates in the BLE/LoRa mesh as a relay
-            but never becomes an exit node. Useful for demo setups that
-            need interior nodes with no internet access.
+            When enabled, this node skips WiFi AP connection and MQTT
+            initialisation. WiFi is still started in STA mode (no connect)
+            for ESP-NOW. It participates in the ESP-NOW/LoRa mesh as a
+            relay but never becomes an exit node.
 
     config FLP_WIFI_SSID
         string "WiFi SSID"
@@ -76,5 +87,26 @@ menu "Forest Link Protocol"
     config FLP_DEMO_BUTTON_PIN
         int "Demo button GPIO"
         default 0
+
+    menu "OLED Display (SSD1306)"
+        config FLP_OLED_ENABLED
+            bool "Enable OLED display"
+            default y
+
+        config FLP_OLED_SDA
+            int "I2C SDA GPIO"
+            default 17
+            depends on FLP_OLED_ENABLED
+
+        config FLP_OLED_SCL
+            int "I2C SCL GPIO"
+            default 18
+            depends on FLP_OLED_ENABLED
+
+        config FLP_OLED_RST
+            int "OLED RST GPIO (-1 = none)"
+            default 21
+            depends on FLP_OLED_ENABLED
+    endmenu
 
 endmenu
