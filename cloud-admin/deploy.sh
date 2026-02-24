@@ -131,6 +131,10 @@ EOF
         git clone "${MQTTSN_GW_REPO}" "${MQTTSN_GW_DIR}"
     fi
 
+    # Build MQTTSNPacket library first (gateway links against it)
+    info "Building MQTTSNPacket library..."
+    make -C "${MQTTSN_GW_DIR}/MQTTSNPacket/src" -j"$(nproc)"
+
     info "Building MQTT-SN gateway..."
     cd "${MQTTSN_GW_DIR}/MQTTSNGateway"
     if [[ -d build ]]; then
