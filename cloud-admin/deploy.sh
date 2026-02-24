@@ -138,11 +138,12 @@ EOF
     cmake .. -DBUILD_TESTING=OFF
     make -j"$(nproc)" MQTTSNPacket
 
-    # Copy built library to where the gateway's linker expects it
+    # Install library to /usr/local/lib where the gateway's cmake looks
     cp -f "${MQTTSN_GW_DIR}"/MQTTSNPacket/build/src/libMQTTSNPacket.* \
-          "${MQTTSN_GW_DIR}/MQTTSNPacket/src/" 2>/dev/null \
+          /usr/local/lib/ 2>/dev/null \
     || cp -f "${MQTTSN_GW_DIR}"/MQTTSNPacket/build/libMQTTSNPacket.* \
-             "${MQTTSN_GW_DIR}/MQTTSNPacket/src/"
+             /usr/local/lib/
+    ldconfig
 
     info "Building MQTT-SN gateway..."
     cd "${MQTTSN_GW_DIR}/MQTTSNGateway"
