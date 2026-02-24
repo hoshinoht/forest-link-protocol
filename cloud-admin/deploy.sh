@@ -135,8 +135,8 @@ EOF
     info "Building MQTTSNPacket library..."
     cd "${MQTTSN_GW_DIR}/MQTTSNPacket"
     rm -rf build && mkdir build && cd build
-    cmake ..
-    make -j"$(nproc)"
+    cmake .. -DBUILD_TESTING=OFF
+    make -j"$(nproc)" MQTTSNPacket
 
     info "Building MQTT-SN gateway..."
     cd "${MQTTSN_GW_DIR}/MQTTSNGateway"
