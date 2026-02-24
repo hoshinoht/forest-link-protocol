@@ -135,13 +135,13 @@ EOF
     info "Building MQTTSNPacket library..."
     cd "${MQTTSN_GW_DIR}/MQTTSNPacket"
     rm -rf build && mkdir build && cd build
-    cmake .. -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF
+    cmake .. -DBUILD_TESTING=OFF
     make -j"$(nproc)" MQTTSNPacket
 
-    # Copy .a to where the gateway's cmake expects it (next to the sources)
-    cp -f "${MQTTSN_GW_DIR}/MQTTSNPacket/build/src/libMQTTSNPacket.a" \
+    # Copy built library to where the gateway's linker expects it
+    cp -f "${MQTTSN_GW_DIR}"/MQTTSNPacket/build/src/libMQTTSNPacket.* \
           "${MQTTSN_GW_DIR}/MQTTSNPacket/src/" 2>/dev/null \
-    || cp -f "${MQTTSN_GW_DIR}/MQTTSNPacket/build/libMQTTSNPacket.a" \
+    || cp -f "${MQTTSN_GW_DIR}"/MQTTSNPacket/build/libMQTTSNPacket.* \
              "${MQTTSN_GW_DIR}/MQTTSNPacket/src/"
 
     info "Building MQTT-SN gateway..."
