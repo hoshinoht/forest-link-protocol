@@ -28,7 +28,7 @@ static struct ble_gatt_chr_def kFlpCharacteristics[] = {
     {
         // TX characteristic — server notifies peers
         .uuid = &kFlpTxCharUuid.u,
-        .access_cb = nullptr,
+        .access_cb = BleTransport::on_gatt_tx_access,
         .arg = nullptr,
         .descriptors = nullptr,
         .flags = BLE_GATT_CHR_F_NOTIFY,
@@ -79,10 +79,10 @@ void BleTransport::init()
 
     s_instance = this;
 
-    // Derive node address from base MAC
+    // Derive node address from base MAC (must match MeshManager)
     uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_BT);
-    node_addr_ = (uint16_t) (mac[5] << 8 | mac[4]);
+    esp_efuse_mac_get_default(mac);
+    node_addr_ = static_cast<uint16_t>((mac[4] << 8) | mac[5]);
 
     // Init NimBLE
     esp_err_t ret = nimble_port_init();
@@ -161,6 +161,15 @@ void BleTransport::register_gatt_services()
 }
 
 // ── Callbacks ────────────────────────────────────────────────────────────
+
+int BleTransport::on_gatt_tx_access(uint16_t conn_handle,
+                                    uint16_t attr_handle,
+                                    struct ble_gatt_access_ctxt *ctxt,
+                                    void *arg)
+{
+    // Notify-only characteristic — no read/write access needed
+    return BLE_ATT_ERR_UNLIKELY;
+}
 
 int BleTransport::on_gatt_rx_write(uint16_t conn_handle,
                                    uint16_t attr_handle,

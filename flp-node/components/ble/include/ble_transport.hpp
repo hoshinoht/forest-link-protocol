@@ -105,6 +105,10 @@ class BleTransport : public ITransport
 
     // NimBLE callback trampolines (must be public for C callbacks)
     static int on_gap_event(struct ble_gap_event *event, void *arg);
+    static int on_gatt_tx_access(uint16_t conn_handle,
+                                 uint16_t attr_handle,
+                                 struct ble_gatt_access_ctxt *ctxt,
+                                 void *arg);
     static int on_gatt_rx_write(uint16_t conn_handle,
                                 uint16_t attr_handle,
                                 struct ble_gatt_access_ctxt *ctxt,
