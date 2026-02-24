@@ -93,7 +93,10 @@ cmd_install() {
 
     # ── 1. Mosquitto ────────────────────────────────────────────────
     info "Installing Mosquitto MQTT broker..."
-    pkg_install mosquitto mosquitto-clients
+    case "$DISTRO_FAMILY" in
+        debian) pkg_install mosquitto mosquitto-clients ;;
+        fedora) pkg_install mosquitto ;;  # clients included in main package
+    esac
 
     info "Writing FLP Mosquitto config to ${MOSQUITTO_CONF}..."
     cat > "${MOSQUITTO_CONF}" <<'EOF'
