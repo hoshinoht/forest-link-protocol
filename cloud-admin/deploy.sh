@@ -153,7 +153,7 @@ EOF
     info "MQTT-SN gateway built successfully."
 
     # Install binary
-    cp -f MQTT-SNGateway /usr/local/bin/mqtt-sn-gateway
+    cp -f "${MQTTSN_GW_DIR}/MQTTSNGateway/bin/MQTT-SNGateway" /usr/local/bin/mqtt-sn-gateway
     chmod +x /usr/local/bin/mqtt-sn-gateway
 
     # Write config
