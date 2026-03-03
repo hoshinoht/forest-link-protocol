@@ -7,20 +7,24 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "flp_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "oled";
 
 // ── Icon bitmaps (8x8, column-major, LSB = top) ────────────────────────
-static const uint8_t ICON_WIFI_ON[8]  = {0x00, 0x7E, 0x42, 0x3C, 0x24, 0x18, 0x10, 0x10};
-static const uint8_t ICON_WIFI_OFF[8] = {0x00, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x00};
-static const uint8_t ICON_LORA[8]     = {0x00, 0x08, 0x08, 0x08, 0x1C, 0x2A, 0x49, 0x08};
+static const uint8_t ICON_WIFI_ON[8] = {
+    0x00, 0x7E, 0x42, 0x3C, 0x24, 0x18, 0x10, 0x10};
+static const uint8_t ICON_WIFI_OFF[8] = {
+    0x00, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x00};
+static const uint8_t ICON_LORA[8] = {
+    0x00, 0x08, 0x08, 0x08, 0x1C, 0x2A, 0x49, 0x08};
 
-static constexpr int64_t SPLASH_DURATION_US   = 2000000;  // 2 seconds
-static constexpr int64_t TRANSFER_HOLD_US     = 3000000;  // 3 seconds
-static constexpr int     CONTRAST_DIM         = 0x10;
-static constexpr int     CONTRAST_BRIGHT      = 0xCF;
+static constexpr int64_t SPLASH_DURATION_US = 2000000; // 2 seconds
+static constexpr int64_t TRANSFER_HOLD_US = 3000000;   // 3 seconds
+static constexpr int CONTRAST_DIM = 0x10;
+static constexpr int CONTRAST_BRIGHT = 0xCF;
 
 namespace flp
 {
@@ -29,8 +33,11 @@ namespace flp
 
 void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
 {
-    ESP_LOGI(TAG, "Initializing SSD1306 (SDA=%d SCL=%d RST=%d)...",
-             sda_pin, scl_pin, rst_pin);
+    ESP_LOGI(TAG,
+             "Initializing SSD1306 (SDA=%d SCL=%d RST=%d)...",
+             sda_pin,
+             scl_pin,
+             rst_pin);
 
     // Hardware reset (high-low-high pulse)
     if (rst_pin >= 0)
@@ -95,8 +102,11 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     dimmed_ = false;
 
     initialized_ = true;
-    ESP_LOGI(TAG, "SSD1306 128x64 OLED initialized (SDA=%d SCL=%d RST=%d)",
-             sda_pin, scl_pin, rst_pin);
+    ESP_LOGI(TAG,
+             "SSD1306 128x64 OLED initialized (SDA=%d SCL=%d RST=%d)",
+             sda_pin,
+             scl_pin,
+             rst_pin);
 }
 
 void OledDisplay::clear()
@@ -115,7 +125,10 @@ void OledDisplay::draw_title_bar(const char *text)
 
 void OledDisplay::draw_progress_bar(int page, uint8_t pct)
 {
-    if (pct > 100) pct = 100;
+    if (pct > 100)
+    {
+        pct = 100;
+    }
     int fill = (pct * 124) / 100;
 
     uint8_t bar[128];
@@ -140,8 +153,10 @@ void OledDisplay::render_splash(const NodeStatus &s)
     ssd1306_display_text_x3(&dev_, 2, addr, strlen(addr), false);
 
     // Label text on pages 6-7
+    char version[20];
+    snprintf(version, sizeof(version), "  Protocol v%s", FLP_VERSION);
     ssd1306_display_text(&dev_, 6, "  Forest Link", 13, false);
-    ssd1306_display_text(&dev_, 7, "  Protocol v0.1", 15, false);
+    ssd1306_display_text(&dev_, 7, version, strlen(version), false);
 }
 
 void OledDisplay::render_status(const NodeStatus &s)
@@ -150,7 +165,7 @@ void OledDisplay::render_status(const NodeStatus &s)
     char line[17];
 
     // Page 0: inverted title bar
-    snprintf(line, sizeof(line), "FLP-%04X  v0.1.0", s.node_addr);
+    snprintf(line, sizeof(line), "FLP-%04X %s", s.node_addr, FLP_VERSION);
     draw_title_bar(line);
 
     // Page 1: icons + peer count
@@ -162,11 +177,13 @@ void OledDisplay::render_status(const NodeStatus &s)
     // Peer count text starting at character position 5 (seg 40)
     // Display on page 1 — use display_image trick: render text separately
     // We'll use a small text rendered at page offset
-    // Actually, ssd1306_display_text always starts at seg 0, so we write padded text
+    // Actually, ssd1306_display_text always starts at seg 0, so we write padded
+    // text
     char peer_line[17];
     snprintf(peer_line, sizeof(peer_line), "     P:%02u", s.espnow_peers);
     ssd1306_display_text(&dev_, 1, peer_line, strlen(peer_line), false);
-    // Re-draw icons over the first chars (display_image overwrites at specific seg)
+    // Re-draw icons over the first chars (display_image overwrites at specific
+    // seg)
     ssd1306_display_image(&dev_, 1, 0, wifi_icon, 8);
     ssd1306_display_image(&dev_, 1, 16, ICON_LORA, 8);
 
@@ -177,8 +194,11 @@ void OledDisplay::render_status(const NodeStatus &s)
     }
     else
     {
-        snprintf(line, sizeof(line), "Nbrs:%-3u GW:%uh",
-                 s.neighbor_count, s.hops_to_internet);
+        snprintf(line,
+                 sizeof(line),
+                 "Nbrs:%-3u GW:%uh",
+                 s.neighbor_count,
+                 s.hops_to_internet);
     }
     ssd1306_display_text(&dev_, 2, line, strlen(line), false);
 
@@ -197,15 +217,19 @@ void OledDisplay::render_status(const NodeStatus &s)
     ssd1306_display_text(&dev_, 4, line, strlen(line), false);
 
     // Page 6: heap
-    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long)s.free_heap_kb);
+    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long) s.free_heap_kb);
     ssd1306_display_text(&dev_, 6, line, strlen(line), false);
 
     // Page 7: uptime
     uint32_t h = s.uptime_s / 3600;
     uint32_t m = (s.uptime_s % 3600) / 60;
     uint32_t sec = s.uptime_s % 60;
-    snprintf(line, sizeof(line), "Up %02lu:%02lu:%02lu",
-             (unsigned long)h, (unsigned long)m, (unsigned long)sec);
+    snprintf(line,
+             sizeof(line),
+             "Up %02lu:%02lu:%02lu",
+             (unsigned long) h,
+             (unsigned long) m,
+             (unsigned long) sec);
     ssd1306_display_text(&dev_, 7, line, strlen(line), false);
 
     // Flush line-drawing buffer (separator)
@@ -218,7 +242,7 @@ void OledDisplay::render_transfer(const NodeStatus &s)
     char line[17];
 
     // Page 0: inverted title bar
-    snprintf(line, sizeof(line), "FLP-%04X    XFER", s.node_addr);
+    snprintf(line, sizeof(line), "FLP-%04X %s", s.node_addr, FLP_VERSION);
     draw_title_bar(line);
 
     // Page 1: filename (scrolling if > 16 chars)
@@ -255,13 +279,16 @@ void OledDisplay::render_transfer(const NodeStatus &s)
     }
     else
     {
-        snprintf(line, sizeof(line), "Nbrs:%-3u GW:%uh",
-                 s.neighbor_count, s.hops_to_internet);
+        snprintf(line,
+                 sizeof(line),
+                 "Nbrs:%-3u GW:%uh",
+                 s.neighbor_count,
+                 s.hops_to_internet);
     }
     ssd1306_display_text(&dev_, 6, line, strlen(line), false);
 
     // Page 7: heap
-    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long)s.free_heap_kb);
+    snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long) s.free_heap_kb);
     ssd1306_display_text(&dev_, 7, line, strlen(line), false);
 }
 
@@ -278,58 +305,58 @@ void OledDisplay::update(const NodeStatus &s)
 
     switch (state_)
     {
-    case State::SPLASH:
-        if (now - splash_start_us_ >= SPLASH_DURATION_US)
-        {
-            state_ = State::STATUS;
-            // Don't dim right away — let status render once first
-        }
-        else
-        {
-            if (dimmed_)
-            {
-                ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
-                dimmed_ = false;
-            }
-            render_splash(s);
-            return;
-        }
-        break; // fall through to STATUS
-
-    case State::STATUS:
-        if (s.transfer_active)
-        {
-            state_ = State::TRANSFER;
-            scroll_offset_ = 0;
-            // Brighten on transfer start
-            if (dimmed_)
-            {
-                ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
-                dimmed_ = false;
-            }
-        }
-        break;
-
-    case State::TRANSFER:
-        if (!s.transfer_active)
-        {
-            if (transfer_was_active_)
-            {
-                // Transfer just completed — start hold timer
-                transfer_done_us_ = now;
-                transfer_was_active_ = false;
-            }
-
-            if (now - transfer_done_us_ >= TRANSFER_HOLD_US)
+        case State::SPLASH:
+            if (now - splash_start_us_ >= SPLASH_DURATION_US)
             {
                 state_ = State::STATUS;
+                // Don't dim right away — let status render once first
             }
-        }
-        else
-        {
-            transfer_was_active_ = true;
-        }
-        break;
+            else
+            {
+                if (dimmed_)
+                {
+                    ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
+                    dimmed_ = false;
+                }
+                render_splash(s);
+                return;
+            }
+            break; // fall through to STATUS
+
+        case State::STATUS:
+            if (s.transfer_active)
+            {
+                state_ = State::TRANSFER;
+                scroll_offset_ = 0;
+                // Brighten on transfer start
+                if (dimmed_)
+                {
+                    ssd1306_contrast(&dev_, CONTRAST_BRIGHT);
+                    dimmed_ = false;
+                }
+            }
+            break;
+
+        case State::TRANSFER:
+            if (!s.transfer_active)
+            {
+                if (transfer_was_active_)
+                {
+                    // Transfer just completed — start hold timer
+                    transfer_done_us_ = now;
+                    transfer_was_active_ = false;
+                }
+
+                if (now - transfer_done_us_ >= TRANSFER_HOLD_US)
+                {
+                    state_ = State::STATUS;
+                }
+            }
+            else
+            {
+                transfer_was_active_ = true;
+            }
+            break;
     }
 
     // Contrast dimming: dim when idle on STATUS screen
@@ -353,16 +380,16 @@ void OledDisplay::update(const NodeStatus &s)
     // Render current screen
     switch (state_)
     {
-    case State::SPLASH:
-        render_splash(s);
-        break;
-    case State::STATUS:
-        render_status(s);
-        break;
-    case State::TRANSFER:
-        scroll_offset_++;
-        render_transfer(s);
-        break;
+        case State::SPLASH:
+            render_splash(s);
+            break;
+        case State::STATUS:
+            render_status(s);
+            break;
+        case State::TRANSFER:
+            scroll_offset_++;
+            render_transfer(s);
+            break;
     }
 }
 

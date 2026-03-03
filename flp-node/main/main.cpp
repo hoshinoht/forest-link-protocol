@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "flp_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -13,8 +14,6 @@
 #include "mesh_manager.hpp"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
-
-#include "esp_wifi.h"
 #if !CONFIG_FLP_WIFI_DISABLED
 #include "mqtt_client.hpp"
 #endif
@@ -31,7 +30,7 @@ static flp::UartIngest uart_ingest;
 #if !CONFIG_FLP_WIFI_DISABLED
 static flp::MqttClient mqtt_client;
 static EventGroupHandle_t s_wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
+static constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
 #endif
 
 #if CONFIG_FLP_OLED_ENABLED
@@ -93,11 +92,13 @@ static void wifi_event_handler(void *arg,
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+        auto *event = static_cast<ip_event_got_ip_t *>(event_data);
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         // Task 1: Wire WiFi status into MeshManager
         mesh_manager.set_has_internet(true);
+        // Update ESP-NOW broadcast peer after WiFi connects
+        mesh_manager.update_espnow_broadcast_peer();
     }
 }
 #endif
@@ -147,8 +148,7 @@ static void display_task(void *arg)
         status.filename = mgr->get_transfer_filename();
         status.transfer_pct = mgr->get_transfer_progress();
         status.free_heap_kb = esp_get_free_heap_size() / 1024;
-        status.uptime_s =
-            static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+        status.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
 
         oled_display.update(status);
 
@@ -182,9 +182,10 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_start());
 
     // Set fixed channel for relay nodes (must match exit node AP channel)
-    ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_FLP_ESPNOW_CHANNEL,
-                                          WIFI_SECOND_CHAN_NONE));
-    ESP_LOGI(TAG, "WiFi STA started (no AP) for ESP-NOW, ch=%d",
+    ESP_ERROR_CHECK(
+        esp_wifi_set_channel(CONFIG_FLP_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_LOGI(TAG,
+             "WiFi STA started (no AP) for ESP-NOW, ch=%d",
              CONFIG_FLP_ESPNOW_CHANNEL);
 #else
     // Initialize WiFi station
@@ -208,6 +209,8 @@ extern "C" void app_main()
     strncpy((char *) wifi_config.sta.password,
             CONFIG_FLP_WIFI_PASSWORD,
             sizeof(wifi_config.sta.password));
+    wifi_config.sta.ssid[sizeof(wifi_config.sta.ssid) - 1] = '\0';
+    wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = '\0';
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
@@ -215,13 +218,13 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
 #endif
 
-    // ESP-NOW init is handled by EspNowTransport::init() called from MeshManager
+    // ESP-NOW init is handled by EspNowTransport::init() called from
+    // MeshManager
 
     // Init OLED early — it's local hardware, no network dependency
 #if CONFIG_FLP_OLED_ENABLED
-    oled_display.init(CONFIG_FLP_OLED_SDA,
-                      CONFIG_FLP_OLED_SCL,
-                      CONFIG_FLP_OLED_RST);
+    oled_display.init(
+        CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
 #endif
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);

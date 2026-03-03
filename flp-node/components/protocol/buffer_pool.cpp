@@ -1,4 +1,5 @@
 #include "buffer_pool.hpp"
+
 #include "esp_log.h"
 
 static const char *TAG = "buf_pool";
@@ -14,8 +15,10 @@ void BufferPool::init()
         freelist_[i] = static_cast<int8_t>(i);
     }
     top_.store(POOL_SIZE - 1, std::memory_order_release);
-    ESP_LOGI(TAG, "BufferPool initialized: %u slabs (~%u bytes)",
-             POOL_SIZE, (unsigned)(POOL_SIZE * sizeof(BufferSlab)));
+    ESP_LOGI(TAG,
+             "BufferPool initialized: %u slabs (~%u bytes)",
+             POOL_SIZE,
+             (unsigned) (POOL_SIZE * sizeof(BufferSlab)));
 }
 
 BufferSlab *BufferPool::acquire()
@@ -23,8 +26,7 @@ BufferSlab *BufferPool::acquire()
     int8_t t = top_.load(std::memory_order_acquire);
     while (t >= 0)
     {
-        if (top_.compare_exchange_weak(t, t - 1,
-                                       std::memory_order_acq_rel))
+        if (top_.compare_exchange_weak(t, t - 1, std::memory_order_acq_rel))
         {
             int8_t idx = freelist_[t];
             slabs_[idx].refcount.store(1, std::memory_order_relaxed);
@@ -39,9 +41,18 @@ BufferSlab *BufferPool::acquire()
 void BufferPool::release(BufferSlab *slab)
 {
     if (!slab)
+    {
         return;
+    }
 
     uint8_t prev = slab->refcount.fetch_sub(1, std::memory_order_acq_rel);
+    if (prev == 0)
+    {
+        slab->refcount.store(0, std::memory_order_relaxed);
+        ESP_LOGW(TAG, "release called on slab with refcount=0");
+        return;
+    }
+
     if (prev == 1)
     {
         // Return to pool
@@ -51,9 +62,14 @@ void BufferPool::release(BufferSlab *slab)
         do
         {
             new_top = t + 1;
+            if (new_top >= POOL_SIZE)
+            {
+                ESP_LOGW(TAG, "pool overflow while releasing slab");
+                return;
+            }
             freelist_[new_top] = idx;
-        } while (!top_.compare_exchange_weak(t, new_top,
-                                              std::memory_order_acq_rel));
+        } while (
+            !top_.compare_exchange_weak(t, new_top, std::memory_order_acq_rel));
     }
 }
 

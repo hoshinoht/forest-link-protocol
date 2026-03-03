@@ -6,7 +6,7 @@ idf_component_register(
          "${LIB_DIR}/ssd1306_i2c_new.c"
          "${LIB_DIR}/ssd1306_spi.c"
     INCLUDE_DIRS "include" "${LIB_DIR}"
-    REQUIRES driver esp_driver_i2c esp_driver_gpio esp_driver_spi esp_timer
+    REQUIRES driver esp_driver_i2c esp_driver_gpio esp_driver_spi esp_timer main
 )
 
 # Provide Kconfig symbols the library expects (normally from its Kconfig.projbuild)

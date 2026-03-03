@@ -8,6 +8,7 @@
 #include "packet.hpp"
 
 static const char *TAG = "espnow_xport";
+static const uint8_t ESPNOW_BCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Singleton pointer for C callback trampolines
 static flp::EspNowTransport *s_instance = nullptr;
@@ -66,22 +67,32 @@ void EspNowTransport::add_peer_if_new(const uint8_t *mac, int8_t rssi)
             esp_now_peer_info_t peer_info = {};
             memcpy(peer_info.peer_addr, mac, 6);
             peer_info.channel = 0; // use current channel
+            peer_info.ifidx = WIFI_IF_STA;
             peer_info.encrypt = false;
             esp_err_t err = esp_now_add_peer(&peer_info);
             if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST)
             {
-                ESP_LOGW(TAG, "esp_now_add_peer failed: %s",
-                         esp_err_to_name(err));
+                ESP_LOGW(
+                    TAG, "esp_now_add_peer failed: %s", esp_err_to_name(err));
             }
 
-            ESP_LOGI(TAG, "New peer 0x%04X (MAC %02X:%02X:%02X:%02X:%02X:%02X)",
-                     addr, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            ESP_LOGI(TAG,
+                     "New peer 0x%04X (MAC %02X:%02X:%02X:%02X:%02X:%02X)",
+                     addr,
+                     mac[0],
+                     mac[1],
+                     mac[2],
+                     mac[3],
+                     mac[4],
+                     mac[5]);
             return;
         }
     }
 
-    ESP_LOGW(TAG, "Peer table full (%d), ignoring new peer 0x%04X",
-             ESPNOW_MAX_PEERS, addr);
+    ESP_LOGW(TAG,
+             "Peer table full (%d), ignoring new peer 0x%04X",
+             ESPNOW_MAX_PEERS,
+             addr);
 }
 
 // ── Init / Deinit ────────────────────────────────────────────────────────
@@ -112,22 +123,49 @@ void EspNowTransport::init()
     esp_now_register_recv_cb(EspNowTransport::on_recv);
     esp_now_register_send_cb(EspNowTransport::on_send);
 
-    // Add broadcast peer (required for esp_now_send with NULL dest)
+    // Add broadcast peer (required for ESP-NOW broadcast send)
     esp_now_peer_info_t bcast_peer = {};
-    memset(bcast_peer.peer_addr, 0xFF, 6);
+    memcpy(bcast_peer.peer_addr, ESPNOW_BCAST_MAC, 6);
     bcast_peer.channel = 0;
+    bcast_peer.ifidx = WIFI_IF_STA;
     bcast_peer.encrypt = false;
     esp_err_t err = esp_now_add_peer(&bcast_peer);
     if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST)
     {
-        ESP_LOGW(TAG, "Failed to add broadcast peer: %s",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "Failed to add broadcast peer: %s", esp_err_to_name(err));
     }
 
     initialized_ = true;
-    ESP_LOGI(TAG,
-             "ESP-NOW transport initialized, node_addr=0x%04X",
-             node_addr_);
+    ESP_LOGI(
+        TAG, "ESP-NOW transport initialized, node_addr=0x%04X", node_addr_);
+}
+
+void EspNowTransport::update_broadcast_peer()
+{
+    if (!initialized_)
+    {
+        return;
+    }
+
+    // Remove existing broadcast peer (if any)
+    esp_now_del_peer(ESPNOW_BCAST_MAC); // Ignore errors
+
+    // Re-add with current WiFi channel
+    esp_now_peer_info_t bcast_peer = {};
+    memcpy(bcast_peer.peer_addr, ESPNOW_BCAST_MAC, 6);
+    bcast_peer.channel = 0; // Use current channel
+    bcast_peer.ifidx = WIFI_IF_STA;
+    bcast_peer.encrypt = false;
+    esp_err_t err = esp_now_add_peer(&bcast_peer);
+    if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST)
+    {
+        ESP_LOGW(
+            TAG, "Failed to re-add broadcast peer: %s", esp_err_to_name(err));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Broadcast peer updated");
+    }
 }
 
 void EspNowTransport::deinit()
@@ -146,8 +184,8 @@ void EspNowTransport::deinit()
 // ── Callbacks ────────────────────────────────────────────────────────────
 
 void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
-                               const uint8_t *data,
-                               int len)
+                              const uint8_t *data,
+                              int len)
 {
     if (!s_instance || !s_instance->packet_queue_ || !s_instance->buffer_pool_)
     {
@@ -181,13 +219,19 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
 }
 
 void EspNowTransport::on_send(const esp_now_send_info_t *info,
-                               esp_now_send_status_t status)
+                              esp_now_send_status_t status)
 {
     if (status != ESP_NOW_SEND_SUCCESS)
     {
         const uint8_t *mac = info->des_addr;
-        ESP_LOGD(TAG, "ESP-NOW send failed to %02X:%02X:%02X:%02X:%02X:%02X",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        ESP_LOGD(TAG,
+                 "ESP-NOW send failed to %02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0],
+                 mac[1],
+                 mac[2],
+                 mac[3],
+                 mac[4],
+                 mac[5]);
     }
 }
 
@@ -197,19 +241,26 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
 {
     if (len > ESP_NOW_MAX_DATA_LEN)
     {
-        ESP_LOGW(TAG, "Payload %zu exceeds ESP-NOW max (%d), dropping",
-                 len, ESP_NOW_MAX_DATA_LEN);
+        ESP_LOGW(TAG,
+                 "Payload %zu exceeds ESP-NOW max (%d), dropping",
+                 len,
+                 ESP_NOW_MAX_DATA_LEN);
         return -1;
     }
 
     // Broadcast
     if (peer_addr == 0xFFFF)
     {
-        esp_err_t err = esp_now_send(NULL, data, len);
+        if (!esp_now_is_peer_exist(ESPNOW_BCAST_MAC))
+        {
+            update_broadcast_peer();
+        }
+
+        esp_err_t err = esp_now_send(ESPNOW_BCAST_MAC, data, len);
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "ESP-NOW broadcast send failed: %s",
-                     esp_err_to_name(err));
+            ESP_LOGE(
+                TAG, "ESP-NOW broadcast send failed: %s", esp_err_to_name(err));
             return -1;
         }
         ESP_LOGD(TAG, "Broadcast %zu bytes", len);
@@ -227,8 +278,10 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
     esp_err_t err = esp_now_send(mac, data, len);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "ESP-NOW send to 0x%04X failed: %s",
-                 peer_addr, esp_err_to_name(err));
+        ESP_LOGE(TAG,
+                 "ESP-NOW send to 0x%04X failed: %s",
+                 peer_addr,
+                 esp_err_to_name(err));
         return -1;
     }
 

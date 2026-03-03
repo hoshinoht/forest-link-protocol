@@ -22,8 +22,8 @@ CONFIG_FLP_OLED_RST=-1
 
 # Please change the following Wi-Fi credentials to your own Wi-Fi network before
 # building and flashing the firmware.
-CONFIG_FLP_WIFI_SSID="PO-FAMILY"
-CONFIG_FLP_WIFI_PASSWORD="Hoshi@869978"
+CONFIG_FLP_WIFI_SSID="hoshiyomi"
+CONFIG_FLP_WIFI_PASSWORD="Kiseki033171"
 
 
 # Mqtt gateway

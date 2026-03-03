@@ -1,16 +1,22 @@
 #include "uart_ingest.hpp"
 
+#include <cstring>
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "mesh_manager.hpp"
 
-#ifndef FLP_INGEST_MAX_SIZE
-#define FLP_INGEST_MAX_SIZE (3 * 1024 * 1024)
-#endif
-
-#include <cstring>
-
 static const char *TAG = "uart_ingest";
+
+namespace
+{
+#ifdef FLP_INGEST_MAX_SIZE
+constexpr size_t FLP_INGEST_MAX_SIZE_BYTES =
+    static_cast<size_t>(FLP_INGEST_MAX_SIZE);
+#else
+constexpr size_t FLP_INGEST_MAX_SIZE_BYTES = 3U * 1024U * 1024U;
+#endif
+} // namespace
 
 namespace flp
 {
@@ -159,7 +165,7 @@ void UartIngest::handle_file_begin(const uint8_t *payload, uint16_t len)
                          ((uint32_t) payload[2] << 16) |
                          ((uint32_t) payload[3] << 24);
 
-    if (file_size == 0 || file_size > FLP_INGEST_MAX_SIZE)
+    if (file_size == 0 || file_size > FLP_INGEST_MAX_SIZE_BYTES)
     {
         ESP_LOGE(TAG, "Invalid file size: %lu", (unsigned long) file_size);
         send_nack(UART_CMD_FILE_BEGIN, UART_ERR_ALLOC_FAIL);
@@ -244,6 +250,13 @@ void UartIngest::handle_file_end()
              filename_,
              received_size_,
              ingest_size_);
+
+    if (!mgr_)
+    {
+        ESP_LOGE(TAG, "FILE_END with null MeshManager");
+        send_nack(UART_CMD_FILE_END, UART_ERR_NO_TRANSFER);
+        return;
+    }
 
     // Hand off to mesh manager — it reads from this buffer throughout the
     // multi-minute transfer. Do NOT free it here.

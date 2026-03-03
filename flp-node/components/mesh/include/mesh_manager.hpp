@@ -21,21 +21,21 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "espnow_transport.hpp"
 #include "buffer_pool.hpp"
+#include "espnow_transport.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "heap_monitor.hpp"
 #include "lora_transport.hpp"
 #include "packet.hpp"
 #include "protocol_selector.hpp"
 #include "route_table.hpp"
-#include "heap_monitor.hpp"
 #include "transfer_engine.hpp"
 
-#define FLP_EVT_WIFI_CONNECTED    BIT0
-#define FLP_EVT_TRANSFER_COMPLETE BIT1
-#define FLP_EVT_EXIT_NODE_ELECTED BIT2
+inline constexpr EventBits_t FLP_EVT_WIFI_CONNECTED = BIT0;
+inline constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
+inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 
 namespace flp
 {
@@ -52,6 +52,7 @@ class MeshManager
 
     // Task 1: WiFi status wiring
     void set_has_internet(bool v);
+    void update_espnow_broadcast_peer();
 
     // Task 5: File transfer API
     void
@@ -83,9 +84,18 @@ class MeshManager
         return events_;
     }
 
-    bool has_internet() const { return has_internet_.load(); }
-    uint8_t get_neighbor_count() const { return route_table_.get_count(); }
-    uint8_t get_espnow_peer_count() const { return espnow_.get_peer_count(); }
+    bool has_internet() const
+    {
+        return has_internet_.load();
+    }
+    uint8_t get_neighbor_count() const
+    {
+        return route_table_.get_count();
+    }
+    uint8_t get_espnow_peer_count() const
+    {
+        return espnow_.get_peer_count();
+    }
     uint8_t get_hops_to_internet() const
     {
         return route_table_.min_hops_to_internet();
@@ -112,6 +122,7 @@ class MeshManager
   private:
     void process_slab(BufferSlab *slab);
     void handle_discovery(const PacketHeader &hdr,
+                          RxTransport source,
                           const uint8_t *payload,
                           size_t payload_len);
     void handle_mesh_pub(const PacketHeader &hdr,
@@ -129,9 +140,7 @@ class MeshManager
 
     // Generic relay: publishes via MQTT if exit node, else routes
     // through mesh to nearest exit node.
-    void relay_publish(uint8_t relay_topic,
-                       const uint8_t *data,
-                       size_t len);
+    void relay_publish(uint8_t relay_topic, const uint8_t *data, size_t len);
     void publish_all_telemetry();
     void drain_cmd_queue();
     void handle_topic_msg(const uint8_t *data, size_t len);
@@ -184,7 +193,9 @@ class MeshManager
         {
             if (seen_cache_[i].src == src && seen_cache_[i].dst == dst &&
                 seen_cache_[i].type == type && seen_cache_[i].seq == seq)
+            {
                 return true;
+            }
         }
         seen_cache_[seen_idx_] = {src, dst, type, seq};
         seen_idx_ = (seen_idx_ + 1) % SEEN_CACHE_SIZE;

@@ -19,17 +19,31 @@ class EspNowTransport : public ITransport
   public:
     EspNowTransport() = default;
 
-    void set_packet_queue(QueueHandle_t q) { packet_queue_ = q; }
-    void set_buffer_pool(BufferPool *p) { buffer_pool_ = p; }
+    void set_packet_queue(QueueHandle_t q)
+    {
+        packet_queue_ = q;
+    }
+    void set_buffer_pool(BufferPool *p)
+    {
+        buffer_pool_ = p;
+    }
 
     void init() override;
     void deinit() override;
 
     int send(uint16_t peer_addr, const uint8_t *data, size_t len) override;
 
-    uint16_t get_node_addr() const { return node_addr_; }
+    void update_broadcast_peer();
 
-    uint8_t get_peer_count() const { return peer_count_; }
+    uint16_t get_node_addr() const
+    {
+        return node_addr_;
+    }
+
+    uint8_t get_peer_count() const
+    {
+        return peer_count_;
+    }
 
     int8_t get_peer_rssi(uint16_t peer_addr) const;
 
@@ -53,9 +67,8 @@ class EspNowTransport : public ITransport
     uint16_t addr_from_mac(const uint8_t *mac) const;
     bool find_mac(uint16_t addr, uint8_t *mac_out) const;
 
-    static void on_recv(const esp_now_recv_info_t *info,
-                        const uint8_t *data,
-                        int len);
+    static void
+    on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
     static void on_send(const esp_now_send_info_t *info,
                         esp_now_send_status_t status);
 };
