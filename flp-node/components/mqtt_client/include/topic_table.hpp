@@ -27,9 +27,16 @@ class TopicTable
 
     uint16_t register_topic(const char *name)
     {
-        xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!mutex_ || !name)
+        {
+            return 0;
+        }
+        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE)
+        {
+            return 0;
+        }
 
-        // Check if topic already exists
+        /* Check if topic already exists */
         for (uint8_t i = 0; i < count_; i++)
         {
             if (entries_[i].registered &&
@@ -38,16 +45,16 @@ class TopicTable
                         sizeof(entries_[i].topic_name)) == 0)
             {
                 uint16_t id = entries_[i].topic_id;
-                xSemaphoreGive(mutex_);
+                (void) xSemaphoreGive(mutex_);
                 return id;
             }
         }
 
-        // Add new entry if space available
+        /* Add new entry if space available */
         if (count_ >= MAX_TOPICS)
         {
-            xSemaphoreGive(mutex_);
-            return 0; // table full
+            (void) xSemaphoreGive(mutex_);
+            return 0; /* table full */
         }
 
         uint16_t new_id = next_id_++;
@@ -60,25 +67,32 @@ class TopicTable
         entries_[count_].registered = true;
         count_++;
 
-        xSemaphoreGive(mutex_);
+        (void) xSemaphoreGive(mutex_);
         return new_id;
     }
 
     const char *lookup(uint16_t topic_id) const
     {
-        xSemaphoreTake(mutex_, portMAX_DELAY);
+        if (!mutex_)
+        {
+            return nullptr;
+        }
+        if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE)
+        {
+            return nullptr;
+        }
 
         for (uint8_t i = 0; i < count_; i++)
         {
             if (entries_[i].registered && entries_[i].topic_id == topic_id)
             {
                 const char *name = entries_[i].topic_name;
-                xSemaphoreGive(mutex_);
+                (void) xSemaphoreGive(mutex_);
                 return name;
             }
         }
 
-        xSemaphoreGive(mutex_);
+        (void) xSemaphoreGive(mutex_);
         return nullptr;
     }
 
@@ -90,4 +104,4 @@ class TopicTable
     mutable SemaphoreHandle_t mutex_ = nullptr;
 };
 
-} // namespace flp
+} /* namespace flp */

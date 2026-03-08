@@ -23,7 +23,7 @@ struct FragmentSlot
     uint8_t retries;
 };
 
-// Callback for sending packets (ACK, NACK, retransmit data)
+/* Callback for sending packets (ACK, NACK, retransmit data) */
 using SendCallback = std::function<void(uint16_t dst,
                                         PacketType type,
                                         uint16_t seq,
@@ -37,7 +37,7 @@ class SelectiveRepeat
 
     void init(uint8_t window_size, uint32_t timeout_ms);
 
-    // Sender API
+    /* Sender API */
     int send_fragment(uint16_t seq, const uint8_t *data, size_t len);
     void handle_ack(uint16_t seq);
     void handle_nack(uint16_t seq);
@@ -54,7 +54,7 @@ class SelectiveRepeat
     bool sender_window_full() const;
     void reset_sender();
 
-    // Receiver API
+    /* Receiver API */
     bool init_receiver(uint16_t total_fragments,
                        size_t fragment_size,
                        size_t file_size);
@@ -70,13 +70,13 @@ class SelectiveRepeat
     }
     void cleanup_receiver();
 
-    // Set the callback for outbound packets
+    /* Set the callback for outbound packets */
     void set_send_callback(SendCallback cb)
     {
         send_cb_ = cb;
     }
 
-    // Destination for sender-side retransmits and receiver-side ACKs
+    /* Destination for sender-side retransmits and receiver-side ACKs */
     void set_peer_addr(uint16_t addr)
     {
         peer_addr_ = addr;
@@ -88,20 +88,20 @@ class SelectiveRepeat
         return static_cast<uint32_t>(esp_timer_get_time() / 1000);
     }
 
-    // Sender state
+    /* Sender state */
     FragmentSlot window_[ARQ_WINDOW] = {};
     uint8_t window_size_ = 0;
     uint32_t timeout_ms_ = 0;
     uint16_t base_seq_ = 0;
     uint16_t next_seq_ = 0;
 
-    // Receiver state
+    /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;
     uint8_t *recv_bitmap_ = nullptr;
-    uint32_t *nack_sent_ms_ = nullptr; // Per-seq NACK cooldown timestamps
+    uint32_t *nack_sent_ms_ = nullptr; /* Per-seq NACK cooldown timestamps */
     uint16_t total_fragments_ = 0;
     uint16_t fragments_received_ = 0;
-    uint16_t expected_seq_ = 0; // Next expected in-order fragment
+    uint16_t expected_seq_ = 0; /* Next expected in-order fragment */
     size_t fragment_size_ = 0;
     size_t file_size_ = 0;
     bool receiver_active_ = false;
@@ -112,4 +112,4 @@ class SelectiveRepeat
     uint16_t peer_addr_ = BROADCAST_ADDR;
 };
 
-} // namespace flp
+} /* namespace flp */

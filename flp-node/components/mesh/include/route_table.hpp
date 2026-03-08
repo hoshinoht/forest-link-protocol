@@ -9,6 +9,12 @@
 namespace flp
 {
 
+inline constexpr uint8_t ROUTE_HOPS_UNKNOWN = 0xFF;
+inline constexpr int8_t ROUTE_RSSI_INVALID = -127;
+inline constexpr uint8_t ROUTE_FLAG_ESPNOW = 0x01;
+inline constexpr uint8_t ROUTE_FLAG_LORA = 0x02;
+inline constexpr uint8_t ROUTE_FLAG_INTERNET = 0x04;
+
 struct NeighborEntry
 {
     uint16_t addr;
@@ -21,7 +27,7 @@ struct NeighborEntry
     bool has_internet;
 };
 
-// All RouteTable accesses occur on the single mesh_task — no mutex needed.
+/* All RouteTable accesses occur on the single mesh_task — no mutex needed. */
 class RouteTable
 {
   public:
@@ -35,7 +41,7 @@ class RouteTable
                          uint8_t hops,
                          bool espnow,
                          bool lora,
-                         uint8_t hops_to_inet = 0xFF)
+                         uint8_t hops_to_inet = ROUTE_HOPS_UNKNOWN)
     {
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
@@ -48,7 +54,7 @@ class RouteTable
                 neighbors_[i].last_seen_ms = now;
                 neighbors_[i].espnow_reachable = espnow;
                 neighbors_[i].lora_reachable = lora;
-                if (hops_to_inet != 0xFF)
+                if (hops_to_inet != ROUTE_HOPS_UNKNOWN)
                 {
                     neighbors_[i].hops_to_internet = hops_to_inet;
                 }
@@ -91,14 +97,13 @@ class RouteTable
         }
 
         uint16_t best_addr = BROADCAST_ADDR;
-        uint8_t best_hops_inet = 0xFF;
-        int8_t best_rssi = -127;
+        uint8_t best_hops_inet = ROUTE_HOPS_UNKNOWN;
+        int8_t best_rssi = ROUTE_RSSI_INVALID;
         for (uint8_t i = 0; i < count_; i++)
         {
             uint8_t h = neighbors_[i].hops_to_internet;
             int8_t r = neighbors_[i].rssi;
-            if (h < best_hops_inet ||
-                (h == best_hops_inet && r > best_rssi))
+            if (h < best_hops_inet || (h == best_hops_inet && r > best_rssi))
             {
                 best_hops_inet = h;
                 best_rssi = r;
@@ -188,26 +193,37 @@ class RouteTable
 
     size_t serialize(uint8_t *buf, size_t max_len) const
     {
-        // Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1, flags:1}*N]
-        // flags: bit0=espnow_reachable, bit1=lora_reachable, bit2=has_internet
+        /*
+         * Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1,
+         * flags:1}*N] flags: bit0=espnow_reachable, bit1=lora_reachable,
+         * bit2=has_internet
+         */
         size_t needed = 1 + count_ * 6;
         if (needed > max_len)
+        {
             return 0;
+        }
         buf[0] = count_;
         for (uint8_t i = 0; i < count_; i++)
         {
             size_t off = 1 + i * 6;
-            memcpy(buf + off, &neighbors_[i].addr, 2); // little-endian on ESP32
+            memcpy(buf + off, &neighbors_[i].addr, 2); /* little-endian on ESP32 */
             buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
             buf[off + 3] = neighbors_[i].hop_count;
             buf[off + 4] = neighbors_[i].hops_to_internet;
             uint8_t flags = 0;
             if (neighbors_[i].espnow_reachable)
-                flags |= 0x01;
+            {
+                flags |= ROUTE_FLAG_ESPNOW;
+            }
             if (neighbors_[i].lora_reachable)
-                flags |= 0x02;
+            {
+                flags |= ROUTE_FLAG_LORA;
+            }
             if (neighbors_[i].has_internet)
-                flags |= 0x04;
+            {
+                flags |= ROUTE_FLAG_INTERNET;
+            }
             buf[off + 5] = flags;
         }
         return needed;
@@ -215,11 +231,11 @@ class RouteTable
 
     uint8_t min_hops_to_internet() const
     {
-        uint8_t best = 0xFF;
+        uint8_t best = ROUTE_HOPS_UNKNOWN;
         for (uint8_t i = 0; i < count_; i++)
         {
             if (neighbors_[i].has_internet ||
-                neighbors_[i].hops_to_internet < 0xFF)
+                neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
                 uint8_t h = neighbors_[i].hops_to_internet;
                 if (h < best)
@@ -236,4 +252,4 @@ class RouteTable
     uint8_t count_ = 0;
 };
 
-} // namespace flp
+} /* namespace flp */

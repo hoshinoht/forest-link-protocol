@@ -1,6 +1,8 @@
-// =============================================================================
-// transfer_engine.cpp — File transfer state machine
-// =============================================================================
+/*
+ * =============================================================================
+ * transfer_engine.cpp — File transfer state machine
+ * =============================================================================
+ */
 
 #include "transfer_engine.hpp"
 
@@ -14,9 +16,12 @@
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
+static constexpr uint32_t FAST_ARQ_TIMEOUT_MS = 700;
+static constexpr uint32_t ELECTION_TIMEOUT_MS = 3000;
+static constexpr uint32_t BROADCAST_INITIAL_BACKOFF_MS = 500;
 
-#define FLP_EVT_TRANSFER_COMPLETE BIT1
-#define FLP_EVT_EXIT_NODE_ELECTED BIT2
+constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
+constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 
 void TransferEngine::init(EventGroupHandle_t events,
                           uint16_t my_addr,
@@ -28,7 +33,7 @@ void TransferEngine::init(EventGroupHandle_t events,
 
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
-        arq_[i].init(ARQ_WINDOW, ARQ_TIMEOUT);
+        arq_[i].init(ARQ_WINDOW, FAST_ARQ_TIMEOUT_MS);
         arq_[i].set_send_callback(
             [this](uint16_t dst,
                    PacketType type,
@@ -36,8 +41,10 @@ void TransferEngine::init(EventGroupHandle_t events,
                    const uint8_t *data,
                    size_t len)
             {
-                // Route through mesh — send_fn_ handles header construction,
-                // route table lookup, transport selection, and next-hop relay.
+                /*
+                 * Route through mesh — send_fn_ handles header construction,
+                 * route table lookup, transport selection, and next-hop relay.
+                 */
                 send_fn_(dst, type, data, len, seq);
             });
     }
@@ -45,7 +52,7 @@ void TransferEngine::init(EventGroupHandle_t events,
     ESP_LOGI(TAG, "TransferEngine initialized");
 }
 
-// -- Packet handlers ----------------------------------------------------------
+/* -- Packet handlers ---------------------------------------------------------- */
 
 void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                                         const uint8_t *payload,
@@ -69,11 +76,11 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
              ad.fragment_count,
              ad.session_id);
 
-    // Store the filename so handle_data can use it for MQTT publish
+    /* Store the filename so handle_data can use it for MQTT publish */
     strncpy(transfer_.filename, ad.filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
 
-    // If we have internet, respond as exit node candidate
+    /* If we have internet, respond as exit node candidate */
     if (has_internet)
     {
         TransferAckPayload ack = {};
@@ -88,24 +95,30 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                  sizeof(ack),
                  0);
 
-        // Set up as exit node -- NO PSRAM allocation
+        /* Set up as exit node -- NO PSRAM allocation */
         is_exit_node_ = true;
         active_session_id_ = ad.session_id;
         source_addr_ = hdr.src_addr;
 
-        // Set up ACK path: arq_[0] for sending ACKs back to source
+        /* Set up ACK path: arq_[0] for sending ACKs back to source */
         arq_[0].set_peer_addr(hdr.src_addr);
 
-        // Publish complete transfer meta to MQTT (Fix 5)
+        /* Publish complete transfer meta to MQTT (Fix 5) */
         if (forward_meta_fn_)
         {
-            forward_meta_fn_(ad.session_id, ad.filename, hdr.src_addr,
-                             ad.file_size, ad.fragment_count,
-                             ad.fragment_size, ad.crc32);
+            forward_meta_fn_(ad.session_id,
+                             ad.filename,
+                             hdr.src_addr,
+                             ad.file_size,
+                             ad.fragment_count,
+                             ad.fragment_size,
+                             ad.crc32);
         }
 
-        ESP_LOGI(TAG, "Exit node mode: session=%" PRIu32 " source=0x%04X",
-                 active_session_id_, source_addr_);
+        ESP_LOGI(TAG,
+                 "Exit node mode: session=%" PRIu32 " source=0x%04X",
+                 active_session_id_,
+                 source_addr_);
     }
 }
 
@@ -145,20 +158,23 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 {
     if (is_exit_node_)
     {
-        // Send ACK back to source — routed through mesh
+        /* Send ACK back to source — routed through mesh */
         send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
 
-        // Forward fragment to MQTT
+        /* Forward fragment to MQTT */
         if (forward_to_mqtt_fn_)
         {
-            forward_to_mqtt_fn_(active_session_id_, hdr.seq_num,
-                               source_addr_, payload, payload_len,
-                               transfer_.filename);
+            forward_to_mqtt_fn_(active_session_id_,
+                                hdr.seq_num,
+                                source_addr_,
+                                payload,
+                                payload_len,
+                                transfer_.filename);
         }
         return;
     }
 
-    // Legacy receiver path (non-exit-node, for backward compat)
+    /* Legacy receiver path (non-exit-node, for backward compat) */
     arq_[0].set_peer_addr(hdr.src_addr);
     arq_[0].receive_fragment(hdr.seq_num, payload, payload_len);
 }
@@ -178,7 +194,9 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
 {
     int8_t idx = arq_index_for_peer(from_addr);
     if (idx >= 0)
+    {
         arq_[idx].handle_nack(seq);
+    }
 }
 
 int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
@@ -186,16 +204,20 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
         if (transfer_.exit_nodes[i] == addr)
+        {
             return static_cast<int8_t>(i);
+        }
     }
     return -1;
 }
 
-// -- Start file transfer ------------------------------------------------------
+/* -- Start file transfer ------------------------------------------------------ */
 
 void TransferEngine::start_file_transfer(const char *filename,
                                          const uint8_t *data,
-                                         size_t size)
+                                         size_t size,
+                                         bool has_internet,
+                                         bool has_mqtt)
 {
     if (transfer_.active)
     {
@@ -205,33 +227,68 @@ void TransferEngine::start_file_transfer(const char *filename,
 
     fec_encoder_.reset();
 
-    // Fix 3: Always use LORA_MAX_PAYLOAD so fragments fit on any transport
-    // at any relay hop (LoRa max packet is 255 bytes).
-    size_t frag_payload = LORA_MAX_PAYLOAD;
+    /*
+     * Use payload size that is safe for both LoRa and ESP-NOW so the
+     * adaptive selector can choose ESP-NOW fast path without drops.
+     */
+    size_t frag_payload = ESPNOW_MAX_PAYLOAD;
 
     transfer_.data = data;
     transfer_.size = size;
     transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
     uint16_t data_frags =
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
-    uint16_t parity_frags =
-        static_cast<uint16_t>((data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
-    transfer_.fragment_count =
-        static_cast<uint16_t>(data_frags + parity_frags);
     transfer_.next_fragment = 0;
     transfer_.active = true;
     transfer_.session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
 
-    ESP_LOGI(TAG,
-             "Starting file transfer: %s (%zu bytes, %u fragments, session=%" PRIu32 ")",
-             filename,
-             size,
-             transfer_.fragment_count,
-             transfer_.session_id);
+    /* Local-exit fast path: source node has internet + MQTT, skip mesh entirely */
+    local_exit_ = (has_internet && has_mqtt && forward_to_mqtt_fn_);
+    if (local_exit_)
+    {
+        /* No FEC parity needed — no lossy channel */
+        transfer_.fragment_count = data_frags;
 
-    // Broadcast TRANSFER_AD with retry
+        ESP_LOGI(TAG,
+                 "Local-exit transfer: %s (%zu bytes, %u fragments, "
+                 "session=%" PRIu32 ")",
+                 filename,
+                 size,
+                 transfer_.fragment_count,
+                 transfer_.session_id);
+
+        /* Publish transfer meta directly */
+        uint32_t crc = esp_rom_crc32_le(0, data, size);
+        if (forward_meta_fn_)
+        {
+            forward_meta_fn_(transfer_.session_id,
+                             filename,
+                             my_addr_,
+                             static_cast<uint32_t>(size),
+                             transfer_.fragment_count,
+                             transfer_.fragment_size,
+                             crc);
+        }
+        return; /* transfer_tick() will publish fragments */
+    }
+
+    /* Normal mesh path — include FEC parity fragments */
+    uint16_t parity_frags = static_cast<uint16_t>(
+        (data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
+    transfer_.fragment_count = static_cast<uint16_t>(data_frags + parity_frags);
+
+    ESP_LOGI(
+        TAG,
+        "Starting file transfer: %s (%zu bytes, %u fragments, session=%" PRIu32
+        ")",
+        filename,
+        size,
+        transfer_.fragment_count,
+        transfer_.session_id);
+
+    /* Broadcast TRANSFER_AD with retry */
     TransferAdPayload ad = {};
     ad.session_id = transfer_.session_id;
     ad.file_size = static_cast<uint32_t>(size);
@@ -240,44 +297,49 @@ void TransferEngine::start_file_transfer(const char *filename,
     ad.crc32 = esp_rom_crc32_le(0, data, size);
     strncpy(ad.filename, filename, sizeof(ad.filename) - 1);
 
-    // Start election
+    /* Start election */
     candidate_count_ = 0;
     election_active_ = true;
     election_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
-    // Fix 1: Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
-    // BROADCAST_ADDR is excluded from forwarding in process_slab, meaning
-    // exit nodes >1 hop away would never see the ad.
+    /*
+     * Fix 1: Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
+     * BROADCAST_ADDR is excluded from forwarding in process_slab, meaning
+     * exit nodes >1 hop away would never see the ad.
+     */
     send_broadcast_with_retry(PacketType::TRANSFER_AD,
                               reinterpret_cast<const uint8_t *>(&ad),
                               sizeof(ad),
                               EXIT_ANY_ADDR);
 }
 
-// -- Periodic tick ------------------------------------------------------------
+/* -- Periodic tick ------------------------------------------------------------ */
 
 void TransferEngine::tick(uint32_t now_ms)
 {
-    // ARQ timeout retransmits — tick ALL instances
+    /* ARQ timeout retransmits — tick ALL instances */
     for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+    {
         arq_[i].tick();
+    }
 
-    // Broadcast retry
+    /* Broadcast retry */
     broadcast_retry_tick(now_ms);
 
-    // Election timeout
+    /* Election timeout */
     election_timeout_tick(now_ms);
 
-    // Check for dead exit nodes and redistribute
+    /* Check for dead exit nodes and redistribute */
     exit_node_health_tick(now_ms);
 
-    // Feed fragments into ARQ window
+    /* Feed fragments into ARQ window */
     transfer_tick();
 }
 
 void TransferEngine::election_timeout_tick(uint32_t now_ms)
 {
-    if (!election_active_ || (now_ms - election_start_ms_ <= 3000))
+    if (!election_active_ ||
+        (now_ms - election_start_ms_ <= ELECTION_TIMEOUT_MS))
     {
         return;
     }
@@ -290,11 +352,13 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
         transfer_.active = false;
         transfer_.data = nullptr;
         for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+        {
             arq_[i].reset_sender();
+        }
     }
     else
     {
-        // Use ALL candidates as exit nodes
+        /* Use ALL candidates as exit nodes */
         transfer_.exit_node_count = candidate_count_;
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         for (uint8_t i = 0; i < candidate_count_; i++)
@@ -318,17 +382,60 @@ void TransferEngine::transfer_tick()
     {
         return;
     }
+
+    /* Local-exit fast path: publish fragments directly to MQTT, no ARQ */
+    if (local_exit_)
+    {
+        /* Pace: publish up to 4 fragments per tick to avoid starving other tasks */
+        constexpr uint8_t kLocalExitBatchSize = 2;
+        uint8_t sent = 0;
+        while (transfer_.next_fragment < transfer_.fragment_count &&
+               sent < kLocalExitBatchSize)
+        {
+            uint16_t seq = transfer_.next_fragment;
+            size_t offset =
+                static_cast<size_t>(seq) * transfer_.fragment_size;
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+
+            forward_to_mqtt_fn_(transfer_.session_id,
+                                seq,
+                                my_addr_,
+                                transfer_.data + offset,
+                                frag_len,
+                                transfer_.filename);
+            transfer_.next_fragment++;
+            sent++;
+        }
+
+        if (transfer_.next_fragment >= transfer_.fragment_count)
+        {
+            ESP_LOGI(TAG,
+                     "Local-exit transfer complete: %s",
+                     transfer_.filename);
+            transfer_.active = false;
+            transfer_.data = nullptr;
+            local_exit_ = false;
+            xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
+        }
+        return;
+    }
+
     if (transfer_.exit_node_count == 0)
     {
         return;
     }
 
-    // Count alive exit nodes
+    /* Count alive exit nodes */
     uint8_t alive_count = 0;
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
         if (transfer_.exit_node_alive[i])
+        {
             alive_count++;
+        }
     }
     if (alive_count == 0)
     {
@@ -338,14 +445,14 @@ void TransferEngine::transfer_tick()
         return;
     }
 
-    // Drain pending redistribution queue first
+    /* Drain pending redistribution queue first */
     if (redist_count_ > 0)
     {
         uint8_t new_count = 0;
         for (uint8_t r = 0; r < redist_count_; r++)
         {
             uint16_t seq = redist_pending_[r];
-            // Pick a surviving ARQ
+            /* Pick a surviving ARQ */
             uint8_t target = 0;
             uint8_t rr = seq % alive_count;
             uint8_t cnt = 0;
@@ -375,27 +482,28 @@ void TransferEngine::transfer_tick()
             }
             else
             {
-                // Still can't fit, keep in queue
+                /* Still can't fit, keep in queue */
                 redist_pending_[new_count++] = seq;
             }
         }
         redist_count_ = new_count;
     }
 
-    // Round-robin fragment assignment across alive exit nodes
-    // Sequence layout: every (FEC_GROUP_SIZE+1)th seq is a parity slot
+    /*
+     * Round-robin fragment assignment across alive exit nodes
+     * Sequence layout: every (FEC_GROUP_SIZE+1)th seq is a parity slot
+     */
     while (transfer_.next_fragment < transfer_.fragment_count)
     {
-        // Find next alive exit node for this fragment
+        /* Find next alive exit node for this fragment */
         uint8_t arq_idx = transfer_.next_fragment % transfer_.exit_node_count;
         if (!transfer_.exit_node_alive[arq_idx])
         {
-            // Find next alive node
+            /* Find next alive node */
             bool found = false;
             for (uint8_t j = 1; j < transfer_.exit_node_count; j++)
             {
-                uint8_t try_idx =
-                    (arq_idx + j) % transfer_.exit_node_count;
+                uint8_t try_idx = (arq_idx + j) % transfer_.exit_node_count;
                 if (transfer_.exit_node_alive[try_idx])
                 {
                     arq_idx = try_idx;
@@ -404,27 +512,32 @@ void TransferEngine::transfer_tick()
                 }
             }
             if (!found)
+            {
                 break;
+            }
         }
         if (arq_[arq_idx].sender_window_full())
+        {
             break;
+        }
 
         uint16_t seq = transfer_.next_fragment;
-        bool is_parity_slot =
-            (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
+        bool is_parity_slot = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
 
         if (is_parity_slot)
         {
-            // Send parity fragment
+            /* Send parity fragment */
             int ret = arq_[arq_idx].send_fragment(
                 seq, fec_encoder_.parity_data(), fec_encoder_.parity_len());
             if (ret < 0)
+            {
                 break;
+            }
             fec_encoder_.reset();
         }
         else
         {
-            // Map seq to data index (skip parity slots)
+            /* Map seq to data index (skip parity slots) */
             uint16_t group = seq / (FEC_GROUP_SIZE + 1);
             uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
             uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
@@ -433,7 +546,7 @@ void TransferEngine::transfer_tick()
                 static_cast<size_t>(data_idx) * transfer_.fragment_size;
             if (offset >= transfer_.size)
             {
-                // Past end of file data — skip (tail parity will follow)
+                /* Past end of file data — skip (tail parity will follow) */
                 transfer_.next_fragment++;
                 continue;
             }
@@ -445,27 +558,33 @@ void TransferEngine::transfer_tick()
             int ret = arq_[arq_idx].send_fragment(
                 seq, transfer_.data + offset, frag_len);
             if (ret < 0)
+            {
                 break;
+            }
 
-            // Ingest into FEC encoder
+            /* Ingest into FEC encoder */
             fec_encoder_.ingest(transfer_.data + offset, frag_len);
 
-            // If this was the last data fragment and the group is not
-            // complete, the next seq should be a parity slot emitted by
-            // the tail-flush logic below
+            /*
+             * If this was the last data fragment and the group is not
+             * complete, the next seq should be a parity slot emitted by
+             * the tail-flush logic below
+             */
         }
 
         transfer_.next_fragment++;
     }
 
-    // Check if all fragments sent and acknowledged (only check alive exits)
+    /* Check if all fragments sent and acknowledged (only check alive exits) */
     if (transfer_.next_fragment >= transfer_.fragment_count)
     {
         bool all_done = true;
         for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
         {
             if (!transfer_.exit_node_alive[i])
+            {
                 continue;
+            }
             if (arq_[i].get_base_seq() < transfer_.fragment_count)
             {
                 all_done = false;
@@ -478,7 +597,9 @@ void TransferEngine::transfer_tick()
             transfer_.active = false;
             transfer_.data = nullptr;
             for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+            {
                 arq_[i].reset_sender();
+            }
             xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
         }
     }
@@ -494,13 +615,16 @@ void TransferEngine::exit_node_health_tick(uint32_t now_ms)
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
         if (!transfer_.exit_node_alive[i])
+        {
             continue;
+        }
 
-        // Check if this ARQ has unacked in-flight fragments
-        bool has_pending =
-            arq_[i].get_base_seq() < arq_[i].get_next_seq();
+        /* Check if this ARQ has unacked in-flight fragments */
+        bool has_pending = arq_[i].get_base_seq() < arq_[i].get_next_seq();
         if (!has_pending)
+        {
             continue;
+        }
 
         if ((now_ms - transfer_.last_ack_ms[i]) > EXIT_NODE_TIMEOUT_MS)
         {
@@ -518,12 +642,12 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 {
     transfer_.exit_node_alive[dead_idx] = false;
 
-    // Collect unacked fragment sequences from the dead ARQ's window
+    /* Collect unacked fragment sequences from the dead ARQ's window */
     uint16_t base = arq_[dead_idx].get_base_seq();
     uint16_t next = arq_[dead_idx].get_next_seq();
     arq_[dead_idx].reset_sender();
 
-    // Count surviving exit nodes
+    /* Count surviving exit nodes */
     uint8_t alive_count = 0;
     uint8_t first_alive = 0;
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
@@ -531,7 +655,9 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
         if (transfer_.exit_node_alive[i])
         {
             if (alive_count == 0)
+            {
                 first_alive = i;
+            }
             alive_count++;
         }
     }
@@ -542,13 +668,15 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
         return;
     }
 
-    // Re-enqueue unacked fragments by resending them through surviving ARQs.
-    // The fragments between base and next were in the dead ARQ's window but
-    // never ACKed. We re-send them via surviving exit nodes.
+    /*
+     * Re-enqueue unacked fragments by resending them through surviving ARQs.
+     * The fragments between base and next were in the dead ARQ's window but
+     * never ACKed. We re-send them via surviving exit nodes.
+     */
     uint16_t redistributed = 0;
     for (uint16_t seq = base; seq < next; seq++)
     {
-        // Pick a surviving ARQ via round-robin among alive nodes
+        /* Pick a surviving ARQ via round-robin among alive nodes */
         uint8_t target = first_alive;
         uint8_t rr = seq % alive_count;
         uint8_t count = 0;
@@ -565,9 +693,8 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
             }
         }
 
-        // Compute fragment data offset
-        size_t offset =
-            static_cast<size_t>(seq) * transfer_.fragment_size;
+        /* Compute fragment data offset */
+        size_t offset = static_cast<size_t>(seq) * transfer_.fragment_size;
         size_t remain = transfer_.size - offset;
         size_t frag_len = (remain < transfer_.fragment_size)
                               ? remain
@@ -575,27 +702,28 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 
         if (!arq_[target].sender_window_full())
         {
-            arq_[target].send_fragment(
-                seq, transfer_.data + offset, frag_len);
+            arq_[target].send_fragment(seq, transfer_.data + offset, frag_len);
             redistributed++;
         }
-        else if (redist_count_ < sizeof(redist_pending_) /
-                                      sizeof(redist_pending_[0]))
+        else if (redist_count_ <
+                 sizeof(redist_pending_) / sizeof(redist_pending_[0]))
         {
-            // Queue for retry on next tick
+            /* Queue for retry on next tick */
             redist_pending_[redist_count_++] = seq;
         }
         else
         {
-            ESP_LOGE(TAG, "Redistribution queue full, fragment seq=%u lost",
-                     seq);
+            ESP_LOGE(
+                TAG, "Redistribution queue full, fragment seq=%u lost", seq);
         }
     }
 
     ESP_LOGI(TAG,
              "Redistributed %u fragments from dead exit 0x%04X to %u survivors"
              " (%u pending)",
-             redistributed, transfer_.exit_nodes[dead_idx], alive_count,
+             redistributed,
+             transfer_.exit_nodes[dead_idx],
+             alive_count,
              redist_count_);
 }
 
@@ -651,7 +779,7 @@ void TransferEngine::send_broadcast_with_retry(PacketType type,
     broadcast_retry_.dst_addr = dst_addr;
     broadcast_retry_.max_retries = max_retries;
     broadcast_retry_.attempt = 0;
-    broadcast_retry_.backoff_ms = 500;
+    broadcast_retry_.backoff_ms = BROADCAST_INITIAL_BACKOFF_MS;
     broadcast_retry_.next_send_ms = 0;
     broadcast_retry_.active = true;
 }

@@ -1,46 +1,48 @@
 #pragma once
 
-// =============================================================================
-// mesh_manager.hpp — Role 2: ESP32 Mesh Brain
-//
-// Implements:
-//   FR-MESH4  — Parse intent packets, reply as exit node if we have MQTT
-//   FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
-//   FR-MESH7  — Intent broadcast retry, max 3 attempts
-//   FR-MESH8  — Route packet to self (consume) or relay forward
-//   NFR-MESH2 — Interrupt-driven via FreeRTOS queue (no polling)
-//
-// Calls into (does NOT implement):
-//   EspNowTransport::send()    — Role 3
-//   LoraTransport::send()      — Role 4
-//   MqttClient::publish()      — Role 1
-//   ProtocolSelector::select() — shared component
-// =============================================================================
+/*
+ * =============================================================================
+ * mesh_manager.hpp — Role 2: ESP32 Mesh Brain
+ * 
+ * Implements:
+ * FR-MESH4  — Parse intent packets, reply as exit node if we have MQTT
+ * FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
+ * FR-MESH7  — Intent broadcast retry, max 3 attempts
+ * FR-MESH8  — Route packet to self (consume) or relay forward
+ * NFR-MESH2 — Interrupt-driven via FreeRTOS queue (no polling)
+ * 
+ * Calls into (does NOT implement):
+ * EspNowTransport::send()    — Role 3
+ * LoraTransport::send()      — Role 4
+ * MqttClient::publish()      — Role 1
+ * ProtocolSelector::select() — shared component
+ * =============================================================================
+ */
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 
-#include "espnow_transport.hpp"
 #include "buffer_pool.hpp"
+#include "espnow_transport.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "heap_monitor.hpp"
 #include "lora_transport.hpp"
 #include "packet.hpp"
 #include "protocol_selector.hpp"
 #include "route_table.hpp"
-#include "heap_monitor.hpp"
 #include "transfer_engine.hpp"
 
-#define FLP_EVT_WIFI_CONNECTED    BIT0
-#define FLP_EVT_TRANSFER_COMPLETE BIT1
-#define FLP_EVT_EXIT_NODE_ELECTED BIT2
+inline constexpr EventBits_t FLP_EVT_WIFI_CONNECTED = BIT0;
+inline constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
+inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 
 namespace flp
 {
 
-class MqttClient; // forward declaration
+class MqttClient; /* forward declaration */
 
 class MeshManager
 {
@@ -48,16 +50,17 @@ class MeshManager
     MeshManager() = default;
 
     void init();
-    void run(); // main loop -- called from FreeRTOS task
+    void run(); /* main loop -- called from FreeRTOS task */
 
-    // Task 1: WiFi status wiring
+    /* Task 1: WiFi status wiring */
     void set_has_internet(bool v);
+    void update_espnow_broadcast_peer();
 
-    // Task 5: File transfer API
+    /* Task 5: File transfer API */
     void
     start_file_transfer(const char *filename, const uint8_t *data, size_t size);
 
-    // Task 6: MQTT bridge wiring
+    /* Task 6: MQTT bridge wiring */
     void set_mqtt_client(MqttClient *client)
     {
         mqtt_client_ = client;
@@ -83,9 +86,19 @@ class MeshManager
         return events_;
     }
 
-    bool has_internet() const { return has_internet_.load(); }
-    uint8_t get_neighbor_count() const { return route_table_.get_count(); }
-    uint8_t get_espnow_peer_count() const { return espnow_.get_peer_count(); }
+    bool has_internet() const
+    {
+        return has_internet_.load();
+    }
+    bool is_mqtt_connected() const;
+    uint8_t get_neighbor_count() const
+    {
+        return route_table_.get_count();
+    }
+    uint8_t get_espnow_peer_count() const
+    {
+        return espnow_.get_peer_count();
+    }
     uint8_t get_hops_to_internet() const
     {
         return route_table_.min_hops_to_internet();
@@ -112,6 +125,7 @@ class MeshManager
   private:
     void process_slab(BufferSlab *slab);
     void handle_discovery(const PacketHeader &hdr,
+                          RxTransport source,
                           const uint8_t *payload,
                           size_t payload_len);
     void handle_mesh_pub(const PacketHeader &hdr,
@@ -127,11 +141,11 @@ class MeshManager
                   size_t len,
                   uint16_t peer_addr);
 
-    // Generic relay: publishes via MQTT if exit node, else routes
-    // through mesh to nearest exit node.
-    void relay_publish(uint8_t relay_topic,
-                       const uint8_t *data,
-                       size_t len);
+    /*
+     * Generic relay: publishes via MQTT if exit node, else routes
+     * through mesh to nearest exit node.
+     */
+    void relay_publish(uint8_t relay_topic, const uint8_t *data, size_t len);
     void publish_all_telemetry();
     void drain_cmd_queue();
     void handle_topic_msg(const uint8_t *data, size_t len);
@@ -153,20 +167,22 @@ class MeshManager
     std::atomic<bool> has_internet_{false};
     uint8_t lora_rx_priority_ = 5;
 
-    // Heap monitor
+    /* Heap monitor */
     HeapMonitor heap_monitor_;
     uint32_t heap_timer_ms_ = 0;
 
-    // MQTT bridge
+    /* MQTT bridge */
     MqttClient *mqtt_client_ = nullptr;
 
-    // Topic subscriptions for cloud-to-deep-node messaging
+    /* Topic subscriptions for cloud-to-deep-node messaging */
     char subscribed_topics_[4][32] = {};
     uint8_t subscribed_topic_count_ = 0;
 
-    // Fix 4: Forwarding dedup cache — prevents broadcast storm by dropping
-    // packets we've already forwarded. Ring buffer of recently-seen
-    // (src, dst, type, seq) tuples.
+    /*
+     * Fix 4: Forwarding dedup cache — prevents broadcast storm by dropping
+     * packets we've already forwarded. Ring buffer of recently-seen
+     * (src, dst, type, seq) tuples.
+     */
     struct SeenEntry
     {
         uint16_t src;
@@ -184,7 +200,9 @@ class MeshManager
         {
             if (seen_cache_[i].src == src && seen_cache_[i].dst == dst &&
                 seen_cache_[i].type == type && seen_cache_[i].seq == seq)
+            {
                 return true;
+            }
         }
         seen_cache_[seen_idx_] = {src, dst, type, seq};
         seen_idx_ = (seen_idx_ + 1) % SEEN_CACHE_SIZE;
@@ -192,4 +210,4 @@ class MeshManager
     }
 };
 
-} // namespace flp
+} /* namespace flp */

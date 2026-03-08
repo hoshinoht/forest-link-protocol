@@ -1,16 +1,22 @@
 #include "uart_ingest.hpp"
 
+#include <cstring>
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "mesh_manager.hpp"
 
-#ifndef FLP_INGEST_MAX_SIZE
-#define FLP_INGEST_MAX_SIZE (3 * 1024 * 1024)
-#endif
-
-#include <cstring>
-
 static const char *TAG = "uart_ingest";
+
+namespace
+{
+#ifdef FLP_INGEST_MAX_SIZE
+constexpr size_t FLP_INGEST_MAX_SIZE_BYTES =
+    static_cast<size_t>(FLP_INGEST_MAX_SIZE);
+#else
+constexpr size_t FLP_INGEST_MAX_SIZE_BYTES = 3U * 1024U * 1024U;
+#endif
+} /* namespace */
 
 namespace flp
 {
@@ -139,7 +145,7 @@ void UartIngest::handle_frame()
 void UartIngest::handle_file_begin(const uint8_t *payload, uint16_t len)
 {
     if (len < 5)
-    { // 4 bytes size + at least 1 byte filename
+    { /* 4 bytes size + at least 1 byte filename */
         send_nack(UART_CMD_FILE_BEGIN, UART_ERR_ALLOC_FAIL);
         return;
     }
@@ -159,14 +165,14 @@ void UartIngest::handle_file_begin(const uint8_t *payload, uint16_t len)
                          ((uint32_t) payload[2] << 16) |
                          ((uint32_t) payload[3] << 24);
 
-    if (file_size == 0 || file_size > FLP_INGEST_MAX_SIZE)
+    if (file_size == 0 || file_size > FLP_INGEST_MAX_SIZE_BYTES)
     {
         ESP_LOGE(TAG, "Invalid file size: %lu", (unsigned long) file_size);
         send_nack(UART_CMD_FILE_BEGIN, UART_ERR_ALLOC_FAIL);
         return;
     }
 
-    // Pre-allocation guard: check largest contiguous PSRAM block
+    /* Pre-allocation guard: check largest contiguous PSRAM block */
     size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     if (file_size > available)
     {
@@ -178,7 +184,7 @@ void UartIngest::handle_file_begin(const uint8_t *payload, uint16_t len)
         return;
     }
 
-    // Copy null-terminated filename
+    /* Copy null-terminated filename */
     size_t name_len = strnlen((const char *) &payload[4], len - 4);
     if (name_len >= sizeof(filename_))
     {
@@ -245,13 +251,24 @@ void UartIngest::handle_file_end()
              received_size_,
              ingest_size_);
 
-    // Hand off to mesh manager — it reads from this buffer throughout the
-    // multi-minute transfer. Do NOT free it here.
+    if (!mgr_)
+    {
+        ESP_LOGE(TAG, "FILE_END with null MeshManager");
+        send_nack(UART_CMD_FILE_END, UART_ERR_NO_TRANSFER);
+        return;
+    }
+
+    /*
+     * Hand off to mesh manager — it reads from this buffer throughout the
+     * multi-minute transfer. Do NOT free it here.
+     */
     mgr_->start_file_transfer(filename_, ingest_buf_, received_size_);
     send_ack(UART_CMD_FILE_END);
 
-    // Wait for the mesh transfer to complete before freeing the buffer.
-    // MeshManager sets FLP_EVT_TRANSFER_COMPLETE when all fragments are ACKed.
+    /*
+     * Wait for the mesh transfer to complete before freeing the buffer.
+     * MeshManager sets FLP_EVT_TRANSFER_COMPLETE when all fragments are ACKed.
+     */
     EventGroupHandle_t events = mgr_->get_events();
     if (events)
     {
@@ -272,9 +289,9 @@ void UartIngest::handle_status()
             ? (xEventGroupGetBits(mgr_->get_events()) & FLP_EVT_WIFI_CONNECTED)
                   ? 1
                   : 0
-            : 0; // has_inet
-    resp[1] = 0; // neighbor count (TODO: expose from route table)
-    resp[2] = 0; // transfer_active (TODO: expose from MeshManager)
+            : 0; /* has_inet */
+    resp[1] = 0; /* neighbor count (TODO: expose from route table) */
+    resp[2] = 0; /* transfer_active (TODO: expose from MeshManager) */
     uint16_t addr = mgr_->get_addr();
     resp[3] = addr & 0xFF;
     resp[4] = (addr >> 8) & 0xFF;
@@ -310,4 +327,4 @@ void UartIngest::send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len)
     }
 }
 
-} // namespace flp
+} /* namespace flp */

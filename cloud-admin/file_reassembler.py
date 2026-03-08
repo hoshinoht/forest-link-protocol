@@ -63,12 +63,14 @@ class FecDecoder:
 
 
 class FileReassembler:
-    def __init__(self, session_id, filename, total_size, chunk_count, expected_crc):
+    def __init__(self, session_id, filename, total_size, chunk_count, expected_crc,
+                 fragment_size=None):
         self.session_id = session_id
         self.filename = filename
         self.total_size = total_size
         self.chunk_count = chunk_count
         self.expected_crc = expected_crc
+        self.chunk_size = fragment_size if fragment_size else CHUNK_SIZE
         self.buffer = bytearray(total_size)
         self.bitmap = bytearray((chunk_count + 7) // 8)
         self.chunks_received = 0
@@ -76,18 +78,33 @@ class FileReassembler:
 
     def write_chunk(self, seq, data):
         """Write chunk at correct offset. Returns True if new chunk."""
-        is_parity = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE)
+        # Detect FEC mode: if chunk_count includes parity slots, enable FEC.
+        # Pure data transfers (e.g. local-exit) have no parity — every seq
+        # is a data fragment and the FEC group check must be skipped.
+        data_frags = (self.total_size + self.chunk_size - 1) // self.chunk_size
+        fec_active = self.chunk_count > data_frags
 
-        # Feed to FEC decoder
-        result = self.fec.ingest(seq, data, is_parity=is_parity)
+        if fec_active:
+            is_parity = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE)
 
-        if is_parity:
-            # Don't write parity to output buffer
-            # But try FEC recovery
-            if result:
-                rec_seq, rec_data = result
-                return self.write_chunk(rec_seq, rec_data)
-            return False
+            # Feed to FEC decoder
+            result = self.fec.ingest(seq, data, is_parity=is_parity)
+
+            if is_parity:
+                # Don't write parity to output buffer
+                # But try FEC recovery
+                if result:
+                    rec_seq, rec_data = result
+                    return self.write_chunk(rec_seq, rec_data)
+                return False
+
+            # Map seq to data index (skip parity slots in sequence)
+            group = seq // (FEC_GROUP_SIZE + 1)
+            idx_in_group = seq % (FEC_GROUP_SIZE + 1)
+            data_idx = group * FEC_GROUP_SIZE + idx_in_group
+        else:
+            result = None
+            data_idx = seq
 
         # Normal data fragment
         byte_idx = seq // 8
@@ -95,14 +112,16 @@ class FileReassembler:
         if self.bitmap[byte_idx] & (1 << bit_idx):
             return False  # duplicate
 
-        offset = seq * CHUNK_SIZE
+        offset = data_idx * self.chunk_size
         end = min(offset + len(data), self.total_size)
+        if offset >= self.total_size:
+            return False
         self.buffer[offset:end] = data[:end - offset]
         self.bitmap[byte_idx] |= (1 << bit_idx)
         self.chunks_received += 1
 
         # If FEC recovered a fragment (from a non-parity ingest), write it too
-        if result:
+        if fec_active and result:
             rec_seq, rec_data = result
             self.write_chunk(rec_seq, rec_data)
 

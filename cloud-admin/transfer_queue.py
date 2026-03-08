@@ -18,6 +18,7 @@ class TransferSession:
     total_size: int
     chunk_count: int
     crc32: int
+    fragment_size: int = 0
     started_at: float = 0.0
     completed_at: float = 0.0
     exit_nodes: set = dataclasses.field(default_factory=set)
@@ -30,7 +31,8 @@ class TransferQueue:
         self.completed = []
         self.cmd_callback = None  # set by mqtt_admin to publish commands
 
-    def enqueue(self, session_id, node_id, filename, total_size, chunk_count, crc32):
+    def enqueue(self, session_id, node_id, filename, total_size, chunk_count, crc32,
+                fragment_size=0):
         """Add a transfer to the queue. Starts immediately if no active transfer.
 
         If a session with the same session_id already exists (active or queued),
@@ -55,7 +57,8 @@ class TransferQueue:
         # New session — create and enqueue
         session = TransferSession(
             session_id=session_id, node_id=node_id, filename=filename,
-            total_size=total_size, chunk_count=chunk_count, crc32=crc32
+            total_size=total_size, chunk_count=chunk_count, crc32=crc32,
+            fragment_size=fragment_size
         )
         session.exit_nodes.add(node_id)
         self.queue.append(session)

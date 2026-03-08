@@ -20,4 +20,4 @@ class ITransport
     virtual int send(uint16_t peer_addr, const uint8_t *data, size_t len) = 0;
 };
 
-} // namespace flp
+} /* namespace flp */

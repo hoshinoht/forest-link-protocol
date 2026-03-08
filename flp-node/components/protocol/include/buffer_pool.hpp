@@ -34,4 +34,4 @@ class BufferPool
     std::atomic<int8_t> top_{-1};
 };
 
-} // namespace flp
+} /* namespace flp */

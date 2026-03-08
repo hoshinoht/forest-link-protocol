@@ -31,7 +31,7 @@ void HeapMonitor::log_snapshot(const char *tag)
 void HeapMonitor::periodic_check()
 {
     check_count_++;
-    // Log every call (~10s cadence set by caller)
+    /* Log every call (~10s cadence set by caller) */
     ESP_LOGI(TAG,
              "free_int=%zu free_ps=%zu min_int=%zu min_ps=%zu",
              free_internal(),
@@ -83,4 +83,4 @@ size_t HeapMonitor::serialize(uint8_t *buf, size_t max_len) const
     return 20;
 }
 
-} // namespace flp
+} /* namespace flp */

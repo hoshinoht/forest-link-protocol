@@ -66,7 +66,7 @@ Transport ProtocolSelector::select(int8_t rssi,
                                    size_t payload_size,
                                    float battery_pct)
 {
-    // Hard-gate: LoRa hardware cannot send > 255 bytes total
+    /* Hard-gate: LoRa hardware cannot send > 255 bytes total */
     if (payload_size > LORA_MAX_PAYLOAD)
     {
         return Transport::ESPNOW;
@@ -74,7 +74,7 @@ Transport ProtocolSelector::select(int8_t rssi,
 
     int espnow_score = 0, lora_score = 0;
 
-    // RSSI scoring
+    /* RSSI scoring */
     if (rssi > -60)
     {
         espnow_score += 3;
@@ -88,7 +88,7 @@ Transport ProtocolSelector::select(int8_t rssi,
         lora_score += 3;
     }
 
-    // Hop count scoring
+    /* Hop count scoring */
     if (hop_count <= 1)
     {
         espnow_score += 2;
@@ -98,19 +98,19 @@ Transport ProtocolSelector::select(int8_t rssi,
         lora_score += 3;
     }
 
-    // Payload size scoring
+    /* Payload size scoring */
     if (payload_size > LORA_MAX_PAYLOAD / 2)
     {
         espnow_score += 2;
     }
 
-    // Battery scoring — ESP-NOW uses less TX power than LoRa
+    /* Battery scoring — ESP-NOW uses less TX power than LoRa */
     if (battery_pct < 20.0f)
     {
         espnow_score += 2;
     }
 
-    // Task 7: Apply reliability bias from feedback loop
+    /* Task 7: Apply reliability bias from feedback loop */
     if (reliability_bias_ > 0)
     {
         espnow_score += reliability_bias_;
@@ -132,4 +132,4 @@ Transport ProtocolSelector::select(int8_t rssi,
     return (espnow_score >= lora_score) ? Transport::ESPNOW : Transport::LORA;
 }
 
-} // namespace flp
+} /* namespace flp */

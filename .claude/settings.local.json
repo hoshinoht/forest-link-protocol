@@ -48,7 +48,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(git submodule:*)",
       "Bash(tail:*)",
-      "Bash(/usr/bin/grep:*)"
+      "Bash(/usr/bin/grep:*)",
+      "Bash(git mv:*)"
     ]
   },
   "outputStyle": "default"
