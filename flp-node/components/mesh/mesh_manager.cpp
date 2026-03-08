@@ -82,6 +82,11 @@ void MeshManager::set_has_internet(bool v)
     }
 }
 
+bool MeshManager::is_mqtt_connected() const
+{
+    return mqtt_client_ && mqtt_client_->is_connected();
+}
+
 void MeshManager::update_espnow_broadcast_peer()
 {
     espnow_.update_broadcast_peer();
@@ -787,7 +792,9 @@ void MeshManager::start_file_transfer(const char *filename,
                                       const uint8_t *data,
                                       size_t size)
 {
-    transfer_engine_.start_file_transfer(filename, data, size);
+    bool mqtt_ready = mqtt_client_ && mqtt_client_->is_connected();
+    transfer_engine_.start_file_transfer(
+        filename, data, size, has_internet_, mqtt_ready);
 }
 
 // -- send_packet / send_raw ---------------------------------------------------

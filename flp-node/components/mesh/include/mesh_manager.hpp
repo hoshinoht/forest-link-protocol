@@ -88,6 +88,7 @@ class MeshManager
     {
         return has_internet_.load();
     }
+    bool is_mqtt_connected() const;
     uint8_t get_neighbor_count() const
     {
         return route_table_.get_count();

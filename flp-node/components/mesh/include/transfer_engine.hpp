@@ -108,9 +108,12 @@ class TransferEngine
     void handle_nack(uint16_t seq, uint16_t from_addr);
 
     // Start a file transfer (sender side)
+    // If has_internet && has_mqtt, uses local-exit fast path (no mesh).
     void start_file_transfer(const char *filename,
                              const uint8_t *data,
-                             size_t size);
+                             size_t size,
+                             bool has_internet = false,
+                             bool has_mqtt = false);
 
     // Periodic tick — call from MeshManager::run()
     void tick(uint32_t now_ms);
@@ -170,6 +173,7 @@ class TransferEngine
     ForwardToMqttFn forward_to_mqtt_fn_;
     ForwardMetaFn forward_meta_fn_;
     bool is_exit_node_ = false;
+    bool local_exit_ = false;
     uint32_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
 

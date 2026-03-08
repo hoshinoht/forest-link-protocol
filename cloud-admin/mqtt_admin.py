@@ -122,6 +122,7 @@ class FlpMqttAdmin:
             total_size = meta["total_size"]
             chunk_count = meta["chunk_count"]
             crc32 = meta.get("crc32", 0)
+            fragment_size = meta.get("fragment_size", 0)
 
             print(
                 f"[Meta] File transfer from {node_id}: {filename} ({total_size} bytes, {chunk_count} chunks)")
@@ -132,7 +133,8 @@ class FlpMqttAdmin:
                     and self.transfer_queue.active_transfer.session_id == session_id
                 )
                 session = self.transfer_queue.enqueue(
-                    session_id, node_id, filename, total_size, chunk_count, crc32)
+                    session_id, node_id, filename, total_size, chunk_count, crc32,
+                    fragment_size)
 
                 # Set up reassembler and SR only when this session first becomes
                 # active. If it was already active before enqueue() returned,
@@ -154,7 +156,8 @@ class FlpMqttAdmin:
             filename=session.filename,
             total_size=session.total_size,
             chunk_count=session.chunk_count,
-            expected_crc=session.crc32
+            expected_crc=session.crc32,
+            fragment_size=session.fragment_size or None
         )
         self.sr.start_session(session.chunk_count)
         print(

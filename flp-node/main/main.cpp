@@ -37,7 +37,10 @@ static constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
 static flp::OledDisplay oled_display;
 #endif
 
-static const uint8_t DEMO_PAYLOAD[] = "Hello from Forest Link Protocol!";
+// 8 KB payload — large enough to produce ~33 data fragments + FEC parity,
+// cycling through the ARQ sliding window multiple times.
+static constexpr size_t DEMO_PAYLOAD_SIZE = 8192;
+static uint8_t DEMO_PAYLOAD[DEMO_PAYLOAD_SIZE];
 
 #if CONFIG_FLP_DEMO_AUTO
 // Auto demo mode: periodic transfer without button
@@ -47,16 +50,27 @@ static void auto_demo_task(void *arg)
     const TickType_t interval =
         pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
 
-    // Initial delay to let mesh stabilise
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    // Wait for MQTT to be ready before starting demo transfers
+    ESP_LOGI(TAG, "Auto demo: waiting for MQTT connection...");
+    while (!mgr->is_mqtt_connected())
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "Auto demo: MQTT connected, starting transfers");
 
     while (true)
     {
+        if (!mgr->is_mqtt_connected())
+        {
+            ESP_LOGW(TAG, "Auto demo: MQTT disconnected, skipping transfer");
+            vTaskDelay(interval);
+            continue;
+        }
         ESP_LOGI(TAG,
                  "Auto demo transfer: demo.txt (%u bytes)",
-                 sizeof(DEMO_PAYLOAD));
+                 DEMO_PAYLOAD_SIZE);
         mgr->start_file_transfer(
-            "demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
+            "demo.txt", DEMO_PAYLOAD, DEMO_PAYLOAD_SIZE);
         vTaskDelay(interval);
     }
 }
@@ -87,9 +101,9 @@ static void button_task(void *arg)
         s_last_button_press = now;
 
         ESP_LOGI(
-            TAG, "Demo transfer: demo.txt (%u bytes)", sizeof(DEMO_PAYLOAD));
+            TAG, "Demo transfer: demo.txt (%u bytes)", DEMO_PAYLOAD_SIZE);
         mgr->start_file_transfer(
-            "demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
+            "demo.txt", DEMO_PAYLOAD, DEMO_PAYLOAD_SIZE);
     }
 }
 #endif
@@ -183,6 +197,12 @@ static void display_task(void *arg)
 extern "C" void app_main()
 {
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
+
+    // Fill demo payload with repeating ASCII pattern for easy verification
+    for (size_t i = 0; i < DEMO_PAYLOAD_SIZE; i++)
+    {
+        DEMO_PAYLOAD[i] = static_cast<uint8_t>('A' + (i % 26));
+    }
 
     // Initialize NVS (required for WiFi + ESP-NOW)
     esp_err_t ret = nvs_flash_init();

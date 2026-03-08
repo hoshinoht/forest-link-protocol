@@ -469,36 +469,6 @@ void MqttClient::process_fragment_publish()
     FragmentPublishRequest req;
     while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
-        // Publish meta on first fragment of a new session
-        if (!meta_published_ || last_meta_session_id_ != req.session_id)
-        {
-            char meta_topic[64];
-            snprintf(meta_topic,
-                     sizeof(meta_topic),
-                     "flp/%04x/file/meta",
-                     node_addr_);
-
-            char meta_json[256];
-            int meta_len =
-                snprintf(meta_json,
-                         sizeof(meta_json),
-                         "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\","
-                         "\"src_node\":\"0x%04X\",\"exit_node\":\"0x%04X\"}",
-                         req.session_id,
-                         req.filename,
-                         req.src_node,
-                         node_addr_);
-
-            esp_mqtt_client_publish(
-                client_, meta_topic, meta_json, meta_len, 1, 0);
-            meta_published_ = true;
-            last_meta_session_id_ = req.session_id;
-            ESP_LOGI(TAG,
-                     "Published fragment meta: session=%" PRIu32 " file=%s",
-                     req.session_id,
-                     req.filename);
-        }
-
         // Publish chunk: [2-byte seq_le][data]
         char data_topic[64];
         snprintf(
@@ -509,10 +479,24 @@ void MqttClient::process_fragment_publish()
         chunk_buf[1] = static_cast<uint8_t>((req.seq >> 8) & 0xFF);
         memcpy(chunk_buf + 2, req.data, req.len);
 
-        esp_mqtt_client_publish(
+        int msg_id = esp_mqtt_client_publish(
             client_, data_topic, (const char *) chunk_buf, 2 + req.len, 1, 0);
 
-        ESP_LOGD(TAG, "Published fragment seq=%u len=%zu", req.seq, req.len);
+        if (msg_id < 0)
+        {
+            // Outbox full — put fragment back and retry next tick
+            ESP_LOGW(TAG,
+                     "MQTT outbox full, deferring seq=%u",
+                     req.seq);
+            xQueueSendToFront(fragment_publish_queue_, &req, 0);
+            break;
+        }
+
+        ESP_LOGI(TAG,
+                 "Published fragment seq=%u len=%zu msg_id=%d",
+                 req.seq,
+                 req.len,
+                 msg_id);
     }
 }
 

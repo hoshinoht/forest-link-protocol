@@ -211,7 +211,9 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
 
 void TransferEngine::start_file_transfer(const char *filename,
                                          const uint8_t *data,
-                                         size_t size)
+                                         size_t size,
+                                         bool has_internet,
+                                         bool has_mqtt)
 {
     if (transfer_.active)
     {
@@ -230,14 +232,46 @@ void TransferEngine::start_file_transfer(const char *filename,
     transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
     uint16_t data_frags =
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
-    uint16_t parity_frags = static_cast<uint16_t>(
-        (data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
-    transfer_.fragment_count = static_cast<uint16_t>(data_frags + parity_frags);
     transfer_.next_fragment = 0;
     transfer_.active = true;
     transfer_.session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
+
+    // Local-exit fast path: source node has internet + MQTT, skip mesh entirely
+    local_exit_ = (has_internet && has_mqtt && forward_to_mqtt_fn_);
+    if (local_exit_)
+    {
+        // No FEC parity needed — no lossy channel
+        transfer_.fragment_count = data_frags;
+
+        ESP_LOGI(TAG,
+                 "Local-exit transfer: %s (%zu bytes, %u fragments, "
+                 "session=%" PRIu32 ")",
+                 filename,
+                 size,
+                 transfer_.fragment_count,
+                 transfer_.session_id);
+
+        // Publish transfer meta directly
+        uint32_t crc = esp_rom_crc32_le(0, data, size);
+        if (forward_meta_fn_)
+        {
+            forward_meta_fn_(transfer_.session_id,
+                             filename,
+                             my_addr_,
+                             static_cast<uint32_t>(size),
+                             transfer_.fragment_count,
+                             transfer_.fragment_size,
+                             crc);
+        }
+        return; // transfer_tick() will publish fragments
+    }
+
+    // Normal mesh path — include FEC parity fragments
+    uint16_t parity_frags = static_cast<uint16_t>(
+        (data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
+    transfer_.fragment_count = static_cast<uint16_t>(data_frags + parity_frags);
 
     ESP_LOGI(
         TAG,
@@ -340,6 +374,47 @@ void TransferEngine::transfer_tick()
     {
         return;
     }
+
+    // Local-exit fast path: publish fragments directly to MQTT, no ARQ
+    if (local_exit_)
+    {
+        // Pace: publish up to 4 fragments per tick to avoid starving other tasks
+        constexpr uint8_t kLocalExitBatchSize = 2;
+        uint8_t sent = 0;
+        while (transfer_.next_fragment < transfer_.fragment_count &&
+               sent < kLocalExitBatchSize)
+        {
+            uint16_t seq = transfer_.next_fragment;
+            size_t offset =
+                static_cast<size_t>(seq) * transfer_.fragment_size;
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+
+            forward_to_mqtt_fn_(transfer_.session_id,
+                                seq,
+                                my_addr_,
+                                transfer_.data + offset,
+                                frag_len,
+                                transfer_.filename);
+            transfer_.next_fragment++;
+            sent++;
+        }
+
+        if (transfer_.next_fragment >= transfer_.fragment_count)
+        {
+            ESP_LOGI(TAG,
+                     "Local-exit transfer complete: %s",
+                     transfer_.filename);
+            transfer_.active = false;
+            transfer_.data = nullptr;
+            local_exit_ = false;
+            xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
+        }
+        return;
+    }
+
     if (transfer_.exit_node_count == 0)
     {
         return;
