@@ -274,12 +274,19 @@ void OledDisplay::render_transfer(const NodeStatus &s)
         ssd1306_display_text(&dev_, 1, window, 16, false);
     }
 
-    /* Page 3: percentage text (centered) */
-    snprintf(line, sizeof(line), "      %3u%%", s.transfer_pct);
-    ssd1306_display_text(&dev_, 3, line, strlen(line), false);
-
-    /* Page 4: graphical progress bar */
-    draw_progress_bar(4, s.transfer_pct);
+    /* Page 3: percentage text (centered) / completion message */
+    if (show_complete_)
+    {
+        snprintf(line, sizeof(line), "    COMPLETE");
+        ssd1306_display_text(&dev_, 3, line, strlen(line), false);
+        draw_progress_bar(4, 100);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "      %3u%%", s.transfer_pct);
+        ssd1306_display_text(&dev_, 3, line, strlen(line), false);
+        draw_progress_bar(4, s.transfer_pct);
+    }
 
     /* Page 6: condensed mesh info */
     if (s.hops_to_internet == 0xFF)
@@ -354,11 +361,13 @@ void OledDisplay::update(const NodeStatus &s)
                     /* Transfer just completed — start hold timer */
                     transfer_done_us_ = now;
                     transfer_was_active_ = false;
+                    show_complete_ = true;
                 }
 
                 if (now - transfer_done_us_ >= TRANSFER_HOLD_US)
                 {
                     state_ = State::STATUS;
+                    show_complete_ = false;
                 }
             }
             else
