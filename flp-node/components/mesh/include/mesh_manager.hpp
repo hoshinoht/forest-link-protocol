@@ -101,6 +101,7 @@ class MeshManager
     }
     uint8_t get_hops_to_internet() const
     {
+        if (has_internet_) { return 0; }
         return route_table_.min_hops_to_internet();
     }
     bool is_transfer_active() const
