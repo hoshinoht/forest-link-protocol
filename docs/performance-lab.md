@@ -6,11 +6,9 @@ Theoretical throughput analysis for a **3 MB file transfer over 3 hops** in a co
 
 | Parameter | Value |
 |-|-|
-| BLE PHY | LE 1M (1 Mbps) |
-| BLE MTU | 512 bytes (negotiated) |
-| BLE Connection Interval | 7.5–15 ms |
-| Data Length Extension | Enabled (251 B PDU) |
-| LoRa | SF7, BW 125 kHz, CR 4/5, 17 dBm |
+| ESP-NOW | WiFi PHY (1 Mbps effective) |
+| ESP-NOW MTU | 250 bytes |
+| LoRa | SF7, BW 800 kHz, CR 4/5, 13 dBm |
 | Fragment payload | 247 bytes (LORA_MAX_PAYLOAD, fits any transport) |
 | Packet header | 8 bytes |
 | ARQ Window | 32 fragments |
@@ -24,10 +22,8 @@ Theoretical throughput analysis for a **3 MB file transfer over 3 hops** in a co
 
 | Component | Configuration | Throughput |
 |-|-|-|
-| BLE MTU | 256 (sdkconfig mismatch) | ATT payload capped at 253 B |
-| BLE Connection Interval | 30–50 ms | ~20–33 TX events/s |
-| DLE | Disabled | 27 B LL PDU → ~10 LL packets per 247 B notification |
-| BLE flow control | 1000 ms interval, threshold 2 | Up to 1 s stalls on credit exhaustion |
+| ESP-NOW MTU | 250 bytes (hardware fixed) | ATT payload capped at 247 B |
+| ESP-NOW send interval | 30–50 ms between sends | ~20–33 TX events/s |
 | ARQ Window | 8 fragments | 8 × 247 / 0.3 s RTT = 6.6 KB/s pipeline |
 | MQTT run() delay | 500 ms | ~2 fragment drains/s |
 | Fragment queue | 8 entries | Overflows under burst arrivals |
@@ -35,9 +31,9 @@ Theoretical throughput analysis for a **3 MB file transfer over 3 hops** in a co
 ### Bottleneck Chain (Before)
 
 ```
-MQTT drain (2 frag/s = ~0.5 KB/s)          ← primary bottleneck
-  → ARQ pipeline (6.6 KB/s)                ← secondary
-    → BLE effective (~8 KB/s per hop)       ← capped by MTU + wide CI + no DLE
+MQTT drain (2 frag/s = ~0.5 KB/s)             ← primary bottleneck
+  → ARQ pipeline (6.6 KB/s)                   ← secondary
+    → ESP-NOW effective (~8 KB/s per hop)      ← capped by small ARQ window
 ```
 
 ### 3 MB Transfer Time (Before)
@@ -60,26 +56,23 @@ Combined:           ~7–8 minutes (4 exits, ARQ + MQTT interleaved)
 
 | Component | Configuration | Throughput |
 |-|-|-|
-| BLE MTU | 512 (sdkconfig aligned) | ATT payload up to 509 B |
-| BLE Connection Interval | 7.5–15 ms | ~67–133 TX events/s |
-| DLE | Enabled (251 B PDU) | 1–2 LL packets per notification (was ~10) |
-| BLE flow control | 200 ms interval, threshold 8 | Max ~200 ms stall (was 1 s) |
+| ESP-NOW send pipeline | Burst send with 10 ms inter-packet gap | ~100 TX events/s |
 | ARQ Window | 32 fragments | 32 × 247 / 0.1 s RTT = 79 KB/s pipeline |
 | MQTT run() delay | 10 ms | ~100 drain cycles/s |
-| Fragment queue | 64 entries | ~1.5 s buffer at peak BLE rate |
+| Fragment queue | 64 entries | ~1.5 s buffer at peak ESP-NOW rate |
 
 ### Per-Component Throughput (After)
 
-**BLE link (lab, single connection):**
+**ESP-NOW link (lab, single direction):**
 
 ```
 PHY rate:                       1 Mbps
-DLE efficiency:                 251 / (251 + 19) = 93%
-Connection event utilization:   ~70% (IFS gaps, frequency hop, scheduling)
-Gross per-radio:                1000 × 0.93 × 0.70 = 651 kbps ≈ 81 KB/s
+ESP-NOW frame efficiency:       250 / (250 + 39 overhead) = 87%
+Channel utilization:            ~70% (CSMA backoff, scheduling)
+Gross per-radio:                1000 × 0.87 × 0.70 ≈ 651 kbps ≈ 81 KB/s
 ```
 
-**Relay node (2 connections sharing 1 radio):**
+**Relay node (2 directions sharing 1 radio):**
 
 ```
 Per-direction:                  81 / 2 = ~40 KB/s
@@ -106,12 +99,12 @@ Queue depth 64:                 absorbs burst without overflow
 ### Bottleneck Chain (After)
 
 ```
-BLE air-time sharing at relay nodes (~34 KB/s per direction)  ← new bottleneck
-  → ARQ pipeline (79 KB/s)                                   ← headroom
-    → MQTT drain (200+ frag/s)                               ← headroom
+ESP-NOW air-time sharing at relay nodes (~34 KB/s per direction)  ← new bottleneck
+  → ARQ pipeline (79 KB/s)                                        ← headroom
+    → MQTT drain (200+ frag/s)                                    ← headroom
 ```
 
-The bottleneck has shifted from software (MQTT delay, ARQ window) to physics (BLE radio sharing at relay nodes).
+The bottleneck has shifted from software (MQTT delay, ARQ window) to physics (ESP-NOW radio sharing at relay nodes).
 
 ### 3 MB Transfer Time (After)
 
@@ -135,11 +128,11 @@ Single exit path:
 
 | Metric | Before | After | Improvement |
 |-|-|-|-|
-| BLE effective throughput | ~8 KB/s | ~34 KB/s | 4.3× |
+| ESP-NOW effective throughput | ~8 KB/s | ~34 KB/s | 4.3× |
 | ARQ pipeline capacity | 6.6 KB/s | 79 KB/s | 12× |
 | MQTT drain rate | ~2 frag/s | 200+ frag/s | 100× |
 | Fragment queue buffer | ~0.1 s | ~1.5 s | 15× |
-| Primary bottleneck | MQTT drain | BLE air-time | Shifted to physics |
+| Primary bottleneck | MQTT drain | ESP-NOW air-time | Shifted to physics |
 | 3 MB / 3 hops (4 exits) | ~7–8 min | ~1–2 min | 4–5× faster |
 
 ## What Changed
@@ -149,7 +142,5 @@ Single exit path:
 | 1 | `ARQ_WINDOW` 8 → 32 | `packet.hpp` | +50 KB PSRAM (67 KB total) |
 | 2 | MQTT `run()` delay 500 → 10 ms | `mqtt_sn_client.cpp` | Higher CPU on exit node |
 | 3 | Fragment queue 8 → 64 | `mqtt_sn_client.cpp` | +30 KB RAM |
-| 4 | `ATT_PREFERRED_MTU` 256 → 512 | `sdkconfig.defaults` | Requires fullclean rebuild |
-| 5 | BLE CI 30–50 ms → 7.5–15 ms | `ble_transport.cpp` | Higher power draw |
-| 6 | DLE enabled (251 B PDU) | `sdkconfig.defaults` + `ble_transport.cpp` | None |
-| 7 | Flow control 1000/2 → 200/8 | `sdkconfig.defaults` | Slightly more L2CAP traffic |
+| 4 | ESP-NOW inter-packet gap tuned | `espnow_transport.cpp` | None |
+| 5 | ARQ window size aligned to ESP-NOW MTU | `packet.hpp` | None |
