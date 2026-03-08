@@ -88,9 +88,19 @@ menu "Forest Link Protocol"
             default 44
     endmenu
 
+    config FLP_DEMO_AUTO
+        bool "Auto demo mode (transfer every N seconds, no button needed)"
+        default n
+
+    config FLP_DEMO_AUTO_INTERVAL_S
+        int "Auto demo interval (seconds)"
+        default 30
+        depends on FLP_DEMO_AUTO
+
     config FLP_DEMO_BUTTON_PIN
         int "Demo button GPIO"
-        default 0
+        default 1
+        depends on !FLP_DEMO_AUTO
 
     menu "OLED Display (SSD1306)"
         config FLP_OLED_ENABLED

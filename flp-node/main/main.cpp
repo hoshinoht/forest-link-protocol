@@ -37,11 +37,33 @@ static constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
 static flp::OledDisplay oled_display;
 #endif
 
-// Demo button
+static const uint8_t DEMO_PAYLOAD[] = "Hello from Forest Link Protocol!";
+
+#if CONFIG_FLP_DEMO_AUTO
+// Auto demo mode: periodic transfer without button
+static void auto_demo_task(void *arg)
+{
+    auto *mgr = static_cast<flp::MeshManager *>(arg);
+    const TickType_t interval =
+        pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
+
+    // Initial delay to let mesh stabilise
+    vTaskDelay(pdMS_TO_TICKS(10000));
+
+    while (true)
+    {
+        ESP_LOGI(TAG,
+                 "Auto demo transfer: demo.txt (%u bytes)",
+                 sizeof(DEMO_PAYLOAD));
+        mgr->start_file_transfer(
+            "demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
+        vTaskDelay(interval);
+    }
+}
+#else
+// Manual demo mode: button-triggered transfer
 static TaskHandle_t s_button_task_handle = nullptr;
 static TickType_t s_last_button_press = 0;
-
-static const uint8_t DEMO_PAYLOAD[] = "Hello from Forest Link Protocol!";
 
 static void IRAM_ATTR button_isr_handler(void *arg)
 {
@@ -70,6 +92,7 @@ static void button_task(void *arg)
             "demo.txt", DEMO_PAYLOAD, sizeof(DEMO_PAYLOAD));
     }
 }
+#endif
 
 #if !CONFIG_FLP_WIFI_DISABLED
 static void wifi_event_handler(void *arg,
@@ -266,6 +289,18 @@ extern "C" void app_main()
                 FLP_UART_TASK_PRIORITY,
                 nullptr);
 
+#if CONFIG_FLP_DEMO_AUTO
+    // Auto demo mode: periodic transfer task
+    xTaskCreate(auto_demo_task,
+                "auto_demo",
+                FLP_BUTTON_TASK_STACK,
+                &mesh_manager,
+                FLP_BUTTON_TASK_PRIORITY,
+                nullptr);
+    ESP_LOGI(TAG,
+             "Auto demo enabled: transfer every %d seconds",
+             CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
+#else
     // Demo button (GPIO ISR + lightweight handler task)
     xTaskCreate(button_task,
                 "button_task",
@@ -292,6 +327,7 @@ extern "C" void app_main()
         static_cast<gpio_num_t>(CONFIG_FLP_DEMO_BUTTON_PIN),
         button_isr_handler,
         nullptr));
+#endif
 
 #if CONFIG_FLP_OLED_ENABLED
     xTaskCreate(display_task,
@@ -302,9 +338,17 @@ extern "C" void app_main()
                 nullptr);
 #endif
 
+#if CONFIG_FLP_DEMO_AUTO
+    ESP_LOGI(TAG,
+             "All tasks created (UART on GPIO %d/%d, auto demo every %ds)",
+             CONFIG_FLP_UART_TX_PIN,
+             CONFIG_FLP_UART_RX_PIN,
+             CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
+#else
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, button on GPIO %d)",
              CONFIG_FLP_UART_TX_PIN,
              CONFIG_FLP_UART_RX_PIN,
              CONFIG_FLP_DEMO_BUTTON_PIN);
+#endif
 }

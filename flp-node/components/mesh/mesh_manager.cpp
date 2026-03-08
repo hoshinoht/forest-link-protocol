@@ -45,6 +45,19 @@ constexpr uint8_t kMeshCmdMaxDataLen = 64;
 constexpr size_t kMeshCmdBufLen = static_cast<size_t>(kMeshCmdMaxDataLen) + 1;
 constexpr size_t kTopicBufLen = 32;
 
+const char *rx_transport_name(RxTransport source)
+{
+    switch (source)
+    {
+        case RxTransport::ESPNOW:
+            return "ESP-NOW";
+        case RxTransport::LORA:
+            return "LoRa";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 uint8_t compute_hops_to_internet(const RouteTable &route_table,
                                  bool has_internet)
 {
@@ -252,7 +265,27 @@ void MeshManager::process_slab(BufferSlab *slab)
 
     if (hdr.version() != PROTOCOL_VERSION)
     {
-        ESP_LOGW(TAG, "Unknown version %u", hdr.version());
+        ESP_LOGW(TAG,
+                 "Drop non-FLP frame: ver=%u raw_ver_type=0x%02X src=0x%04X "
+                 "dst=0x%04X ttl=%u hops=%u len=%zu rssi=%d via=%s "
+                 "head=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+                 hdr.version(),
+                 hdr.ver_type,
+                 hdr.src_addr,
+                 hdr.dst_addr,
+                 hdr.ttl(),
+                 hdr.hop_count(),
+                 slab->len,
+                 slab->rssi,
+                 rx_transport_name(slab->source),
+                 slab->data[0],
+                 slab->data[1],
+                 slab->data[2],
+                 slab->data[3],
+                 slab->data[4],
+                 slab->data[5],
+                 slab->data[6],
+                 slab->data[7]);
         return;
     }
 
