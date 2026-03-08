@@ -26,7 +26,7 @@ idf.py menuconfig         # Configure Kconfig options (GPIO pins, demo mode, OLE
 
 - `flp-node/` — ESP32 firmware (ESP-IDF project)
   - `components/espnow/` — ESP-NOW transport
-  - `components/lora/` — LoRa (SX1276) transport
+  - `components/lora/` — LoRa (SX1280) transport
   - `components/mesh/` — MeshManager, TransferEngine, route table
   - `components/protocol/` — SelectiveRepeat ARQ, FEC codec, packet types
   - `components/mqtt_client/` — MQTT-SN client, cloud NACK handling
@@ -65,11 +65,11 @@ Functional requirements use `[FR-MESH#]` and `[FR-MQTT#]` tags. Non-functional r
 ## SPI Bus Assignments
 
 - SPI2_HOST: SD card (CS=13, MOSI=11, SCK=14, MISO=2)
-- SPI3_HOST: LoRa SX1276 (CS=7, MOSI=6, SCK=5, MISO=3)
+- SPI3_HOST: LoRa SX1280 (CS=7, MOSI=6, SCK=5, MISO=3)
 
 ## Hardware
 
-- Board: LILYGO T3-S3 (ESP32-S3 + SX1276 LoRa)
+- Board: LILYGO T3-S3 (ESP32-S3 + SX1280 LoRa)
 - PSRAM: 8MB octal, enabled via `CONFIG_SPIRAM=y` + `CONFIG_SPIRAM_MODE_OCT=y`
 - SD/TF card slot on SPI2 (no conflict with LoRa on SPI3)
 - GPIO 0 is the BOOT button; avoid using it for application logic

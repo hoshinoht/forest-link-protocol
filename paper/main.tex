@@ -61,7 +61,7 @@ The Forest Link Protocol (FLP) addresses these challenges by designing a custom 
 
 \subsection{Problem Statement}
 
-The primary issue we identified is the ``Green Wall'' effect, where dense and water-heavy foliage severely attenuates 2.4\,GHz WiFi signals. Standard IoT deployments in these areas face a ``Bandwidth-Reach Paradox'': high-bandwidth protocols (WiFi) cannot penetrate the vegetation over long distances, while long-range protocols (LoRa) lack the throughput necessary to move rich media or large data logs.
+The primary issue we identified is the ``Green Wall'' effect, where dense and water-heavy foliage severely attenuates 2.4\,GHz signals. Standard IoT deployments in these areas face a ``Bandwidth-Reach Paradox'': high-bandwidth protocols (ESP-NOW) cannot maintain reliable links over long distances through dense vegetation, while long-range protocols (LoRa) leverage spread-spectrum coding gain to extend range even at 2.4\,GHz, but lack the throughput necessary to move rich media or large data logs. Both FLP transports operate in the 2.4\,GHz ISM band: ESP-NOW provides high throughput over short hops, while LoRa's spread-spectrum modulation provides~6--18\,dB of coding gain over ESP-NOW (depending on spreading factor), translating to substantially greater range through dense foliage.
 
 This results in disconnected or brittle networks that fail to deliver critical environmental data when signal quality fluctuates. Specific technical challenges include:
 
@@ -127,7 +127,7 @@ FLP employs a three-layer communication architecture with adaptive protocol sele
 
 \begin{enumerate}
   \item \textbf{ESP-NOW (Short-Range Mesh)}:High-bandwidth (\(\sim\)34\,KB/s per hop), short-range (30--50\,m in forest) inter-node communication for bulk data relay.
-  \item \textbf{LoRa (Long-Range Control)}:Extended range (200--500\,m in forest), lower bandwidth (617\,B/s at SF7) for broadcast discovery, route advertisements, and transfer coordination.
+  \item \textbf{LoRa (Long-Range Control)}:Extended range (50--150\,m in forest at SF7/BW800), higher bandwidth (\(\sim\)6\,KB/s at SF7/BW800) than narrowband LoRa, used for broadcast discovery, route advertisements, and transfer coordination. Spread-spectrum coding gain provides~6--18\,dB advantage over ESP-NOW depending on SF.
   \item \textbf{WiFi + MQTT (External Gateway)}:Opportunistic cloud connectivity via MQTT for data exfiltration when a node detects internet access.
 \end{enumerate}
 
@@ -145,7 +145,7 @@ FLP employs a three-layer communication architecture with adaptive protocol sele
 
 \subsection{Hardware Platform}
 
-All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 8\,MB octal PSRAM and an integrated SX1276 LoRa transceiver. Table~\ref{tab:hardware} summarizes the key hardware specifications.
+All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 8\,MB octal PSRAM and an integrated SX1280 LoRa transceiver. Table~\ref{tab:hardware} summarizes the key hardware specifications.
 
 \begin{table}[htbp]
   \centering
@@ -157,7 +157,7 @@ All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with
     \midrule
     MCU & ESP32-S3, dual-core Xtensa LX7 \\
     PSRAM & 8\,MB octal (fragment reassembly buffer) \\
-    LoRa & SX1276, 915\,MHz, SF7--SF10 adaptive \\
+    LoRa & SX1280, 2.4\,GHz, BW 800\,kHz, SF7--SF10 adaptive \\
     WiFi & 802.11 b/g/n, 2.4\,GHz \\
     ESP-NOW & 250\,B MTU, broadcast + unicast \\
     Display & SSD1306 128$\times$64 OLED \\
@@ -234,7 +234,7 @@ A \texttt{ProtocolSelector} module continuously evaluates transport suitability 
 
 \subsection{Adaptive LoRa Spreading Factor}
 
-Inspired by LoRaWAN's ADR mechanism, FLP adjusts the LoRa spreading factor (SF7--SF10) every 10\,s based on link quality and neighbor count. Poor LoRa success rates with few neighbors trigger an increase to SF10 for extended range, while good conditions with sufficient neighbors revert to SF7 for maximum throughput.
+Inspired by LoRaWAN's ADR mechanism, FLP adjusts the SX1280 LoRa spreading factor (SF7--SF10) every 10\,s based on link quality and neighbor count. At SF7/BW800, the SX1280 achieves approximately 50\,kbps and~41\,ms airtime per 255-byte packet, providing adequate control-plane throughput. Poor LoRa success rates with few neighbors trigger an increase toward SF10 for extended coding gain, while good conditions with sufficient neighbors revert to SF7 for minimum airtime and lower contention.
 
 \subsection{Security}
 
@@ -255,7 +255,7 @@ Users interact with forest nodes through the cloud by publishing MQTT packets to
 
 \subsection{System Prototyping and Development Tools}
 
-The FLP system is prototyped using ESP32-S3 microcontrollers equipped with 8\,MB PSRAM, programmed in C/C++ using ESP-IDF v5.5 (Espressif IoT Development Framework). ESP-IDF provides the build system, component management, and runtime configuration through Kconfig. The dual-protocol mesh relies on ESP-NOW for short-range, high-bandwidth communication and an SX1276 LoRa transceiver on the LILYGO T3-S3 board for long-range links.
+The FLP system is prototyped using ESP32-S3 microcontrollers equipped with 8\,MB PSRAM, programmed in C/C++ using ESP-IDF v5.5 (Espressif IoT Development Framework). ESP-IDF provides the build system, component management, and runtime configuration through Kconfig. The dual-protocol mesh relies on ESP-NOW for short-range, high-bandwidth communication and an SX1280 2.4\,GHz LoRa transceiver on the LILYGO T3-S3 board for long-range links.
 
 On the cloud side, a Mosquitto MQTT broker serves as the external gateway, paired with an MQTT Admin service responsible for fragment reassembly, sliding window flow control, and topic management. Each node is fitted with an SSD1306 OLED display for real-time status output during development and demonstration.
 
@@ -280,7 +280,17 @@ The FLP system is deployed in a multi-layered mesh configuration consisting of S
 
 \subsection{Testing Process}
 
-For this project, the system is deployed and tested in a lab environment. Nodes are placed at intervals across the lab space, with at least one node within WiFi range of an internet-connected access point to serve as an exit node. The remaining nodes communicate exclusively over ESP-NOW and LoRa, relaying data hop-by-hop toward the nearest exit node. Physical obstructions such as walls, furniture, and partitions within the lab are used to simulate signal attenuation and approximate the NLOS conditions of a real forest deployment.
+The system is validated through four structured experiments covering direct, multi-hop, and multi-exit topologies, with both uplink (forest-to-cloud) and downlink (cloud-to-forest via \texttt{MESH\_CMD}) directions tested in each.
+
+\textbf{Experiment 1 (1:1 — Direct):} A single exit node transfers a file directly to the cloud over WiFi, establishing a baseline with zero mesh hops. Confirms MQTT pipeline and exit-node election for the degenerate case.
+
+\textbf{Experiment 2 (2:1 — One Hop):} A sensor node transfers through one exit node (\texttt{S} $\to$ \texttt{X} via ESP-NOW/LoRa). Measures per-hop latency added by the ARQ relay stage. Downlink verifies \texttt{MESH\_CMD} routing from cloud through exit to sensor.
+
+\textbf{Experiment 3 (3:1 — Two Relay Hops):} Source traverses two hops (\texttt{S} $\to$ \texttt{R} $\to$ \texttt{X}), forcing multi-hop relay. Board~3 is physically positioned beyond Board~1's direct reach to ensure the route is genuinely two hops. Downlink command is routed through both relay and exit.
+
+\textbf{Experiment 4 (4:2 — Two Exit Nodes):} Source routes through a relay to two exit nodes simultaneously (\texttt{S} $\to$ \texttt{R} $\to$ \texttt{X1}, \texttt{X2}). Fragments are striped round-robin across both exits, and the cloud receives interleaved data on two separate MQTT topics. This validates parallel striping and verifies that downlink commands reach the correct target via either exit path.
+
+Physical NLOS conditions are approximated using walls, furniture, and partition screens within the lab to simulate forest signal attenuation.
 
 \subsection{Performance Benchmarks}
 
@@ -320,7 +330,7 @@ Table~\ref{tab:throughput} presents the per-component throughput analysis before
 
 The primary bottleneck shifted from software limitations (MQTT drain delay, small ARQ window) to physics (radio air-time sharing at relay nodes), indicating the software stack is no longer the limiting factor.
 
-Key optimizations included: enlarging the ARQ window from 8 to 32 fragments, reducing the MQTT processing interval from 500\,ms to 10\,ms, expanding the fragment queue from 8 to 64 entries, and enabling BLE Data Length Extension for larger link-layer PDUs.
+Key optimizations included: enlarging the ARQ window from 8 to 32 fragments, reducing the MQTT processing interval from 500\,ms to 10\,ms, expanding the fragment queue from 8 to 64 entries, and tuning the ESP-NOW transmission pipeline to reduce inter-packet gaps at relay nodes.
 
 \subsection{Transfer Time Performance}
 
@@ -357,10 +367,10 @@ Table~\ref{tab:scalability} presents the relationship between network size and t
     \toprule
     \textbf{Nodes} & \textbf{Hops} & \textbf{LoRa Range} & \textbf{3\,MB Time} & \textbf{Reliability} \\
     \midrule
-    2 & 1 & 200\,m & 2.0\,min & $>$98\% \\
-    4 & 3 & 600\,m & 2.6\,min & $>$95\% \\
-    6 & 5 & 1.0\,km & 2.8\,min & $\sim$91\% \\
-    9 & 8 & 1.6\,km & 3.0\,min & $\sim$82\% \\
+    2 & 1 & 100\,m & 2.0\,min & $>$98\% \\
+    4 & 3 & 300\,m & 2.6\,min & $>$95\% \\
+    6 & 5 & 500\,m & 2.8\,min & $\sim$91\% \\
+    9 & 8 & 800\,m & 3.0\,min & $\sim$82\% \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -402,7 +412,7 @@ Table~\ref{tab:comparison} compares FLP against LoRaWAN and DTN for the target u
 
 The primary remaining bottleneck is ESP-NOW radio air-time sharing at relay nodes. Since each ESP32-S3 has a single 2.4\,GHz radio that must be time-shared between receiving from upstream and transmitting to downstream, the effective per-hop throughput is halved at relay nodes ($\sim$34\,KB/s effective vs $\sim$81\,KB/s raw). This is a fundamental hardware constraint rather than a protocol limitation.
 
-The LoRa control plane uses unslotted ALOHA, limiting the maximum number of nodes in a single hearing area to approximately 14 before contention degrades performance. Larger deployments require network segmentation into clusters.
+The SX1280 LoRa control plane uses unslotted ALOHA. At SF7/BW800, airtime per 255-byte control packet is approximately 41\,ms. With a per-node control duty of one packet per 30\,s (0.14\% duty), and a maximum useful channel utilization of 18\% (1/2e for unslotted ALOHA), the practical limit is approximately 18\%/0.14\%\,$\approx$\,130 concurrent nodes in a single hearing area before contention degrades significantly, though the protocol hard limit of 16 neighbors per node and 4 exit nodes per transfer caps practical deployments to 50--60 nodes per cluster. Larger deployments require network segmentation into independent FLP clusters.
 
 % ===========================================================================
 \section{Conclusion}
@@ -415,7 +425,7 @@ Our implementation on commodity ESP32-S3 hardware demonstrates that a 3\,MB file
 
 FLP contributes to the broader field of IoT by demonstrating that commodity hardware, optimized at the software layer, can perform comparably to specialized LPWAN infrastructure at a fraction of the cost. The protocol's self-healing topology and delay-tolerant design make it suitable for real-world deployments in environmental monitoring, wildfire detection, and biodiversity data collection.
 
-Future work includes: (1) implementing LoRa TDMA scheduling to reduce control-plane collisions beyond 14 nodes, (2) field trials in Singapore's Central Catchment Nature Reserve with 15--25 nodes, (3) integrating BLE 5.0 Coded PHY for extended control signaling range, and (4) evaluating energy harvesting integration for truly autonomous long-term deployments.
+Future work includes: (1) implementing LoRa TDMA scheduling to reduce control-plane collisions in dense deployments, (2) field trials in Singapore's Central Catchment Nature Reserve with 15--25 nodes, (3) evaluating ESP-NOW Long Range (LR) mode for extended control signaling coverage within the 2.4\,GHz band, and (4) evaluating energy harvesting integration for truly autonomous long-term deployments.
 
 % ===========================================================================
 % References
