@@ -11,16 +11,39 @@ Full specification is in `docs.md`.
 ## Build & Flash
 
 ```bash
+source ~/esp/esp-idf-v5.5.3/export.sh   # Required before any idf.py command
 cd flp-node
-idf.py build              # Build firmware
-idf.py -p /dev/ttyACM0 flash monitor  # Flash and open serial monitor
-idf.py menuconfig         # Configure Kconfig options (GPIO pins, demo mode, OLED, WiFi)
+idf.py build                             # Build firmware
+idf.py -p /dev/ttyACM0 flash monitor    # Flash and open serial monitor
+idf.py menuconfig                        # Configure Kconfig options
 ```
 
-- ESP-IDF v5.5.2, target: esp32s3
+- ESP-IDF v5.5.3, target: esp32s3
 - Board config in `flp-node/sdkconfig.defaults`
 - Custom Kconfig options in `flp-node/main/Kconfig.projbuild`
 - After changing `sdkconfig.defaults`, run `idf.py fullclean && idf.py build` to regenerate sdkconfig
+
+**Flashing relay/sensor nodes** (WiFi disabled):
+```bash
+cp sdkconfig.defaults.relay sdkconfig.defaults
+rm -f sdkconfig && idf.py build && idf.py -p /dev/<port> flash monitor
+git checkout sdkconfig.defaults   # Restore after flashing relays
+```
+
+**Exit node WiFi config** — set in `sdkconfig.defaults` before building:
+```
+CONFIG_FLP_WIFI_SSID="<ssid>"
+CONFIG_FLP_WIFI_PASSWORD="<password>"
+CONFIG_FLP_MQTT_BROKER_URI="mqtt://<broker_ip>"
+```
+
+### Cloud Admin
+
+```bash
+cd cloud-admin
+pip install -r requirements.txt   # paho-mqtt>=2.0, flask>=3.0
+python mqtt_admin.py              # Start MQTT admin (fragment reassembly + web UI)
+```
 
 ## Repository Structure
 
@@ -35,9 +58,13 @@ idf.py menuconfig         # Configure Kconfig options (GPIO pins, demo mode, OLE
   - `components/diagnostics/` — Runtime diagnostics
   - `components/sdcard/` — SD card (TF slot) file reader via SPI
   - `main/` — app_main, Kconfig, demo button/auto-demo task
-- `cloud-admin/` — MQTT Admin (cloud-side reassembly)
+- `cloud-admin/` — MQTT Admin (cloud-side reassembly, Flask web UI)
 - `simulator/` — Protocol simulator
+- `paper/` — IEEE conference paper (LaTeX)
 - `docs.md` — Full protocol specification
+- `docs/performance-lab.md` — Lab throughput analysis
+- `docs/performance-forest.md` — Forest propagation and range projections
+- `TESTING.md` — Experiment guide (4 topologies, bidirectional tests)
 
 ## Architecture
 
@@ -89,3 +116,17 @@ Functional requirements use `[FR-MESH#]` and `[FR-MQTT#]` tags. Non-functional r
 - Deliver 1MB file over 3+ hops within 20 minutes (NFR-MESH1)
 - 3MB transfer across 3+ hops in deep forest conditions
 - Broadcast retry max 3 attempts (FR-MESH5)
+
+## Agent Usage
+
+| Task | Agent | Notes |
+|------|-------|-------|
+| Firmware development | `esp32-tdd-coder` | TDD-enforced; won't write code without tests |
+| Test generation from design docs | `esp32-tdd-test-writer` | Generates Unity test suites |
+| IEEE paper, reports | `document-writer` | LaTeX/pandoc document editing |
+| Code with unfamiliar ESP-IDF APIs | `docs-first-coder` | Researches docs before coding |
+| Post-implementation review | `code-checker` | Launch proactively after code changes |
+| General feature work, bug fixes | `builder-prompt` | Primary coding agent |
+| File/pattern search | `explore` | Read-only codebase navigation |
+
+**Skills**: `/flash` (build + flash), `/experiment` (guided topology test)
