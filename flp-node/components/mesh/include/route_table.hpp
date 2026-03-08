@@ -27,7 +27,7 @@ struct NeighborEntry
     bool has_internet;
 };
 
-// All RouteTable accesses occur on the single mesh_task — no mutex needed.
+/* All RouteTable accesses occur on the single mesh_task — no mutex needed. */
 class RouteTable
 {
   public:
@@ -193,9 +193,11 @@ class RouteTable
 
     size_t serialize(uint8_t *buf, size_t max_len) const
     {
-        // Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1,
-        // flags:1}*N] flags: bit0=espnow_reachable, bit1=lora_reachable,
-        // bit2=has_internet
+        /*
+         * Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1,
+         * flags:1}*N] flags: bit0=espnow_reachable, bit1=lora_reachable,
+         * bit2=has_internet
+         */
         size_t needed = 1 + count_ * 6;
         if (needed > max_len)
         {
@@ -205,7 +207,7 @@ class RouteTable
         for (uint8_t i = 0; i < count_; i++)
         {
             size_t off = 1 + i * 6;
-            memcpy(buf + off, &neighbors_[i].addr, 2); // little-endian on ESP32
+            memcpy(buf + off, &neighbors_[i].addr, 2); /* little-endian on ESP32 */
             buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
             buf[off + 3] = neighbors_[i].hop_count;
             buf[off + 4] = neighbors_[i].hops_to_internet;
@@ -250,4 +252,4 @@ class RouteTable
     uint8_t count_ = 0;
 };
 
-} // namespace flp
+} /* namespace flp */

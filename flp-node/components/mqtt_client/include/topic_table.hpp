@@ -36,7 +36,7 @@ class TopicTable
             return 0;
         }
 
-        // Check if topic already exists
+        /* Check if topic already exists */
         for (uint8_t i = 0; i < count_; i++)
         {
             if (entries_[i].registered &&
@@ -50,11 +50,11 @@ class TopicTable
             }
         }
 
-        // Add new entry if space available
+        /* Add new entry if space available */
         if (count_ >= MAX_TOPICS)
         {
             (void) xSemaphoreGive(mutex_);
-            return 0; // table full
+            return 0; /* table full */
         }
 
         uint16_t new_id = next_id_++;
@@ -104,4 +104,4 @@ class TopicTable
     mutable SemaphoreHandle_t mutex_ = nullptr;
 };
 
-} // namespace flp
+} /* namespace flp */

@@ -11,7 +11,7 @@
 namespace flp
 {
 
-// Callback for received MQTT messages
+/* Callback for received MQTT messages */
 using MqttRxCallback = void (*)(const char *topic,
                                 const uint8_t *data,
                                 size_t len);
@@ -24,7 +24,7 @@ struct MqttPublishItem
     int qos;
 };
 
-// Request to publish a file asynchronously (mesh task -> MQTT task)
+/* Request to publish a file asynchronously (mesh task -> MQTT task) */
 struct FilePublishRequest
 {
     const char *filename;
@@ -33,7 +33,7 @@ struct FilePublishRequest
     uint16_t src_node;
 };
 
-// Request to publish a single fragment (exit node -> MQTT)
+/* Request to publish a single fragment (exit node -> MQTT) */
 struct FragmentPublishRequest
 {
     uint32_t session_id;
@@ -44,13 +44,13 @@ struct FragmentPublishRequest
     char filename[20];
 };
 
-// Cloud NACK for retransmitting a file chunk
+/* Cloud NACK for retransmitting a file chunk */
 struct CloudNackItem
 {
     uint16_t seq;
 };
 
-// Inbound mesh command from cloud (MQTT → exit node → mesh)
+/* Inbound mesh command from cloud (MQTT → exit node → mesh) */
 struct MeshCmdItem
 {
     uint16_t target_addr;
@@ -74,17 +74,17 @@ class MqttClient
                     size_t len,
                     int qos = 1);
 
-    // Task 6: Queue reassembled file for async cloud upload (non-blocking)
+    /* Task 6: Queue reassembled file for async cloud upload (non-blocking) */
     void publish_file(const char *filename,
                       const uint8_t *data,
                       size_t size,
                       uint16_t src_node);
 
-    // Fragment-level publish for exit nodes (no reassembly needed)
+    /* Fragment-level publish for exit nodes (no reassembly needed) */
     void publish_fragment(uint32_t session_id, uint16_t seq, uint16_t src_node,
                           const uint8_t *data, size_t len, const char *filename);
 
-    // Publish complete transfer meta (called when exit node receives TRANSFER_AD)
+    /* Publish complete transfer meta (called when exit node receives TRANSFER_AD) */
     void publish_transfer_meta(uint32_t session_id, const char *filename,
                                uint16_t src_node, uint16_t exit_node,
                                uint32_t total_size, uint16_t chunk_count,
@@ -99,7 +99,7 @@ class MqttClient
         return connected_;
     }
 
-    // Drain one pending mesh command (returns true if item was available)
+    /* Drain one pending mesh command (returns true if item was available) */
     bool receive_cmd(MeshCmdItem &out);
 
     TopicTable &topic_table()
@@ -117,8 +117,8 @@ class MqttClient
     QueueHandle_t publish_queue_ = nullptr;
     QueueHandle_t file_publish_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
-    QueueHandle_t cmd_queue_ = nullptr; // inbound mesh commands from cloud
-    TaskHandle_t task_ = nullptr;       // MQTT task handle for notifications
+    QueueHandle_t cmd_queue_ = nullptr; /* inbound mesh commands from cloud */
+    TaskHandle_t task_ = nullptr; /* MQTT task handle for notifications */
     MqttRxCallback rx_callback_ = nullptr;
     std::atomic<bool> connected_{false};
     uint16_t node_addr_ = 0;
@@ -134,14 +134,14 @@ class MqttClient
     void process_nack_retransmit();
     void notify();
 
-    // Last published file data (retained for NACK retransmission)
+    /* Last published file data (retained for NACK retransmission) */
     const uint8_t *last_file_data_ = nullptr;
     size_t last_file_size_ = 0;
 
-    // Fragment publish queue (exit node mode)
+    /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;
     bool meta_published_ = false;
     uint32_t last_meta_session_id_ = 0;
 };
 
-} // namespace flp
+} /* namespace flp */

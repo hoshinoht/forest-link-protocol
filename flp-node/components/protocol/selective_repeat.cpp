@@ -19,7 +19,7 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
         TAG, "ARQ init: window=%u timeout=%lums", window_size_, timeout_ms_);
 }
 
-// --- Sender ---
+/* --- Sender --- */
 
 void SelectiveRepeat::reset_sender()
 {
@@ -58,7 +58,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
         next_seq_ = seq + 1;
     }
 
-    // Send via callback
+    /* Send via callback */
     if (send_cb_)
     {
         send_cb_(peer_addr_, PacketType::DATA, seq, data, len);
@@ -87,7 +87,7 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);
 
-    // Advance base while consecutive slots are acked
+    /* Advance base while consecutive slots are acked */
     while (base_seq_ < next_seq_)
     {
         uint8_t base_idx = base_seq_ % window_size_;
@@ -169,7 +169,7 @@ void SelectiveRepeat::tick()
     }
 }
 
-// --- Receiver ---
+/* --- Receiver --- */
 
 bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
                                     size_t fragment_size,
@@ -182,7 +182,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
     file_size_ = file_size;
     fragments_received_ = 0;
 
-    // Pre-allocation guard: verify PSRAM can hold the reassembly buffer
+    /* Pre-allocation guard: verify PSRAM can hold the reassembly buffer */
     size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     if (file_size > available)
     {
@@ -193,7 +193,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
-    // Try PSRAM first, fall back to regular heap
+    /* Try PSRAM first, fall back to regular heap */
     reassembly_buf_ =
         static_cast<uint8_t *>(heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM));
     if (!reassembly_buf_)
@@ -210,7 +210,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
-    // Bitmap: 1 bit per fragment, rounded up to bytes
+    /* Bitmap: 1 bit per fragment, rounded up to bytes */
     size_t bitmap_bytes = (total_fragments + 7) / 8;
     recv_bitmap_ = static_cast<uint8_t *>(calloc(1, bitmap_bytes));
     if (!recv_bitmap_)
@@ -221,7 +221,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
-    // Per-seq NACK cooldown timestamps
+    /* Per-seq NACK cooldown timestamps */
     nack_sent_ms_ = static_cast<uint32_t *>(
         calloc(total_fragments, sizeof(uint32_t)));
     if (!nack_sent_ms_)
@@ -261,10 +261,10 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
 
     bool is_parity = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
 
-    // Feed to FEC decoder before anything else so recovery can reduce NACKs
+    /* Feed to FEC decoder before anything else so recovery can reduce NACKs */
     bool recovered = fec_decoder_.ingest(seq, data, len, is_parity);
 
-    // If FEC recovered a missing fragment, insert it recursively
+    /* If FEC recovered a missing fragment, insert it recursively */
     if (recovered)
     {
         ESP_LOGI(TAG,
@@ -275,7 +275,7 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
                          fec_decoder_.recovered_len());
     }
 
-    // Check for duplicate
+    /* Check for duplicate */
     uint8_t byte_idx = seq / 8;
     uint8_t bit_mask = 1 << (seq % 8);
     if (recv_bitmap_[byte_idx] & bit_mask)
@@ -288,7 +288,7 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         return false;
     }
 
-    // Mark received and send ACK
+    /* Mark received and send ACK */
     recv_bitmap_[byte_idx] |= bit_mask;
     fragments_received_++;
 
@@ -297,7 +297,7 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         send_cb_(peer_addr_, PacketType::ACK, seq, nullptr, 0);
     }
 
-    // Parity fragments: ACK but do NOT store in reassembly buffer
+    /* Parity fragments: ACK but do NOT store in reassembly buffer */
     if (is_parity)
     {
         ESP_LOGD(TAG, "RX parity seq=%u (%u/%u)", seq,
@@ -305,12 +305,12 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
     }
     else
     {
-        // Map seq to data index (skip parity slots)
+        /* Map seq to data index (skip parity slots) */
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
         uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
         uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
 
-        // Store fragment at correct offset in reassembly buffer
+        /* Store fragment at correct offset in reassembly buffer */
         size_t offset = static_cast<size_t>(data_idx) * fragment_size_;
         size_t copy_len = len;
         if (offset + copy_len > file_size_)
@@ -327,7 +327,7 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
                  total_fragments_);
     }
 
-    // Advance expected_seq_ past consecutive received fragments
+    /* Advance expected_seq_ past consecutive received fragments */
     while (expected_seq_ < total_fragments_)
     {
         uint8_t ebi = expected_seq_ / 8;
@@ -339,8 +339,10 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         expected_seq_++;
     }
 
-    // NACK only the gap at the receive window front (bounded by window size)
-    // with a per-seq cooldown to avoid re-NACKing within timeout_ms_
+    /*
+     * NACK only the gap at the receive window front (bounded by window size)
+     * with a per-seq cooldown to avoid re-NACKing within timeout_ms_
+     */
     if (seq > expected_seq_)
     {
         uint32_t now = now_ms();
@@ -378,7 +380,7 @@ void SelectiveRepeat::cleanup_receiver()
 {
     if (reassembly_buf_)
     {
-        // Try heap_caps_free for PSRAM, but free() works for both
+        /* Try heap_caps_free for PSRAM, but free() works for both */
         free(reassembly_buf_);
         reassembly_buf_ = nullptr;
     }
@@ -398,4 +400,4 @@ void SelectiveRepeat::cleanup_receiver()
     receiver_active_ = false;
 }
 
-} // namespace flp
+} /* namespace flp */

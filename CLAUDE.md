@@ -20,6 +20,7 @@ idf.py menuconfig         # Configure Kconfig options (GPIO pins, demo mode, OLE
 - ESP-IDF v5.5.2, target: esp32s3
 - Board config in `flp-node/sdkconfig.defaults`
 - Custom Kconfig options in `flp-node/main/Kconfig.projbuild`
+- After changing `sdkconfig.defaults`, run `idf.py fullclean && idf.py build` to regenerate sdkconfig
 
 ## Repository Structure
 
@@ -32,6 +33,7 @@ idf.py menuconfig         # Configure Kconfig options (GPIO pins, demo mode, OLE
   - `components/uart_api/` — UART file ingest
   - `components/display/` — SSD1306 OLED driver
   - `components/diagnostics/` — Runtime diagnostics
+  - `components/sdcard/` — SD card (TF slot) file reader via SPI
   - `main/` — app_main, Kconfig, demo button/auto-demo task
 - `cloud-admin/` — MQTT Admin (cloud-side reassembly)
 - `simulator/` — Protocol simulator
@@ -60,10 +62,22 @@ Three communication layers with adaptive protocol selection:
 
 Functional requirements use `[FR-MESH#]` and `[FR-MQTT#]` tags. Non-functional requirements use `[NFR-MESH#]`. See `docs.md` for the full list.
 
+## SPI Bus Assignments
+
+- SPI2_HOST: SD card (CS=13, MOSI=11, SCK=14, MISO=2)
+- SPI3_HOST: LoRa SX1276 (CS=7, MOSI=6, SCK=5, MISO=3)
+
 ## Hardware
 
 - Board: LILYGO T3-S3 (ESP32-S3 + SX1276 LoRa)
+- PSRAM: 8MB octal, enabled via `CONFIG_SPIRAM=y` + `CONFIG_SPIRAM_MODE_OCT=y`
+- SD/TF card slot on SPI2 (no conflict with LoRa on SPI3)
 - GPIO 0 is the BOOT button; avoid using it for application logic
+
+## Component Dependency Notes
+
+- `flp_config.h` lives in `main/include/` — components needing it must `REQUIRES main` (e.g. `display`)
+- Avoid circular deps: if `main` depends on a component, that component cannot `REQUIRES main`. Use local constants instead.
 
 ## Demo Modes
 

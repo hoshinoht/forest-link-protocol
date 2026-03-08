@@ -55,7 +55,7 @@ void BufferPool::release(BufferSlab *slab)
 
     if (prev == 1)
     {
-        // Return to pool
+        /* Return to pool */
         int8_t idx = static_cast<int8_t>(slab - slabs_);
         int8_t t = top_.load(std::memory_order_acquire);
         int8_t new_top;
@@ -81,4 +81,4 @@ void BufferPool::add_ref(BufferSlab *slab)
     }
 }
 
-} // namespace flp
+} /* namespace flp */

@@ -10,18 +10,20 @@
 static const char *TAG = "espnow_xport";
 static const uint8_t ESPNOW_BCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// Singleton pointer for C callback trampolines
+/* Singleton pointer for C callback trampolines */
 static flp::EspNowTransport *s_instance = nullptr;
 
 namespace flp
 {
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+/* ── Helpers ────────────────────────────────────────────────────────────── */
 
 uint16_t EspNowTransport::addr_from_mac(const uint8_t *mac) const
 {
-    // Use lower 16 bits of MAC (bytes 4-5) as mesh address — matches
-    // MeshManager's derivation from esp_efuse_mac_get_default().
+    /*
+     * Use lower 16 bits of MAC (bytes 4-5) as mesh address — matches
+     * MeshManager's derivation from esp_efuse_mac_get_default().
+     */
     return static_cast<uint16_t>((mac[4] << 8) | mac[5]);
 }
 
@@ -42,7 +44,7 @@ void EspNowTransport::add_peer_if_new(const uint8_t *mac, int8_t rssi)
 {
     uint16_t addr = addr_from_mac(mac);
 
-    // Update existing peer RSSI
+    /* Update existing peer RSSI */
     for (uint8_t i = 0; i < ESPNOW_MAX_PEERS; i++)
     {
         if (peers_[i].active && peers_[i].addr == addr)
@@ -52,7 +54,7 @@ void EspNowTransport::add_peer_if_new(const uint8_t *mac, int8_t rssi)
         }
     }
 
-    // Find empty slot
+    /* Find empty slot */
     for (uint8_t i = 0; i < ESPNOW_MAX_PEERS; i++)
     {
         if (!peers_[i].active)
@@ -63,10 +65,10 @@ void EspNowTransport::add_peer_if_new(const uint8_t *mac, int8_t rssi)
             peers_[i].active = true;
             peer_count_++;
 
-            // Register with ESP-NOW (required before unicast send)
+            /* Register with ESP-NOW (required before unicast send) */
             esp_now_peer_info_t peer_info = {};
             memcpy(peer_info.peer_addr, mac, 6);
-            peer_info.channel = 0; // use current channel
+            peer_info.channel = 0; /* use current channel */
             peer_info.ifidx = WIFI_IF_STA;
             peer_info.encrypt = false;
             esp_err_t err = esp_now_add_peer(&peer_info);
@@ -95,7 +97,7 @@ void EspNowTransport::add_peer_if_new(const uint8_t *mac, int8_t rssi)
              addr);
 }
 
-// ── Init / Deinit ────────────────────────────────────────────────────────
+/* ── Init / Deinit ──────────────────────────────────────────────────────── */
 
 void EspNowTransport::init()
 {
@@ -106,12 +108,12 @@ void EspNowTransport::init()
 
     s_instance = this;
 
-    // Derive node address from base MAC
+    /* Derive node address from base MAC */
     uint8_t mac[6];
     esp_efuse_mac_get_default(mac);
     node_addr_ = static_cast<uint16_t>((mac[4] << 8) | mac[5]);
 
-    // WiFi must already be started (by main.cpp) before calling esp_now_init()
+    /* WiFi must already be started (by main.cpp) before calling esp_now_init() */
     esp_err_t ret = esp_now_init();
     if (ret != ESP_OK)
     {
@@ -119,11 +121,11 @@ void EspNowTransport::init()
         return;
     }
 
-    // Register callbacks
+    /* Register callbacks */
     esp_now_register_recv_cb(EspNowTransport::on_recv);
     esp_now_register_send_cb(EspNowTransport::on_send);
 
-    // Add broadcast peer (required for ESP-NOW broadcast send)
+    /* Add broadcast peer (required for ESP-NOW broadcast send) */
     esp_now_peer_info_t bcast_peer = {};
     memcpy(bcast_peer.peer_addr, ESPNOW_BCAST_MAC, 6);
     bcast_peer.channel = 0;
@@ -147,13 +149,13 @@ void EspNowTransport::update_broadcast_peer()
         return;
     }
 
-    // Remove existing broadcast peer (if any)
-    esp_now_del_peer(ESPNOW_BCAST_MAC); // Ignore errors
+    /* Remove existing broadcast peer (if any) */
+    esp_now_del_peer(ESPNOW_BCAST_MAC); /* Ignore errors */
 
-    // Re-add with current WiFi channel
+    /* Re-add with current WiFi channel */
     esp_now_peer_info_t bcast_peer = {};
     memcpy(bcast_peer.peer_addr, ESPNOW_BCAST_MAC, 6);
-    bcast_peer.channel = 0; // Use current channel
+    bcast_peer.channel = 0; /* Use current channel */
     bcast_peer.ifidx = WIFI_IF_STA;
     bcast_peer.encrypt = false;
     esp_err_t err = esp_now_add_peer(&bcast_peer);
@@ -181,7 +183,7 @@ void EspNowTransport::deinit()
     ESP_LOGI(TAG, "ESP-NOW transport deinitialized");
 }
 
-// ── Callbacks ────────────────────────────────────────────────────────────
+/* ── Callbacks ──────────────────────────────────────────────────────────── */
 
 void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
                               const uint8_t *data,
@@ -198,7 +200,7 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
         return;
     }
 
-    // Register peer lazily on first contact
+    /* Register peer lazily on first contact */
     int8_t rssi = (info->rx_ctrl) ? info->rx_ctrl->rssi : -90;
     s_instance->add_peer_if_new(info->src_addr, rssi);
 
@@ -214,7 +216,7 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
     slab->source = RxTransport::ESPNOW;
     slab->rssi = rssi;
 
-    // ESP-NOW recv callback runs in WiFi task context (not ISR)
+    /* ESP-NOW recv callback runs in WiFi task context (not ISR) */
     xQueueSend(s_instance->packet_queue_, &slab, 0);
 }
 
@@ -235,7 +237,7 @@ void EspNowTransport::on_send(const esp_now_send_info_t *info,
     }
 }
 
-// ── Send ─────────────────────────────────────────────────────────────────
+/* ── Send ───────────────────────────────────────────────────────────────── */
 
 int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
 {
@@ -248,7 +250,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         return -1;
     }
 
-    // Broadcast
+    /* Broadcast */
     if (peer_addr == 0xFFFF)
     {
         if (!esp_now_is_peer_exist(ESPNOW_BCAST_MAC))
@@ -267,7 +269,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         return 0;
     }
 
-    // Unicast — look up MAC
+    /* Unicast — look up MAC */
     uint8_t mac[6];
     if (!find_mac(peer_addr, mac))
     {
@@ -289,7 +291,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
     return 0;
 }
 
-// ── Peer RSSI ────────────────────────────────────────────────────────────
+/* ── Peer RSSI ──────────────────────────────────────────────────────────── */
 
 int8_t EspNowTransport::get_peer_rssi(uint16_t peer_addr) const
 {
@@ -300,7 +302,7 @@ int8_t EspNowTransport::get_peer_rssi(uint16_t peer_addr) const
             return peers_[i].rssi;
         }
     }
-    return -127; // not found
+    return -127; /* not found */
 }
 
-} // namespace flp
+} /* namespace flp */

@@ -102,6 +102,32 @@ menu "Forest Link Protocol"
         default 1
         depends on !FLP_DEMO_AUTO
 
+    menu "SD Card (TF Slot)"
+        config FLP_SD_ENABLED
+            bool "Enable SD card"
+            default y
+
+        config FLP_SD_CS
+            int "CS GPIO"
+            default 13
+            depends on FLP_SD_ENABLED
+
+        config FLP_SD_MOSI
+            int "MOSI GPIO"
+            default 11
+            depends on FLP_SD_ENABLED
+
+        config FLP_SD_SCK
+            int "SCK GPIO"
+            default 14
+            depends on FLP_SD_ENABLED
+
+        config FLP_SD_MISO
+            int "MISO GPIO"
+            default 2
+            depends on FLP_SD_ENABLED
+    endmenu
+
     menu "OLED Display (SSD1306)"
         config FLP_OLED_ENABLED
             bool "Enable OLED display"

@@ -1,11 +1,13 @@
 #pragma once
 
-// =============================================================================
-// transfer_engine.hpp — File transfer state machine
-//
-// Owns: ActiveTransfer, BroadcastRetry, exit-node election, SelectiveRepeat ARQ
-// Extracted from MeshManager to keep responsibilities focused.
-// =============================================================================
+/*
+ * =============================================================================
+ * transfer_engine.hpp — File transfer state machine
+ * 
+ * Owns: ActiveTransfer, BroadcastRetry, exit-node election, SelectiveRepeat ARQ
+ * Extracted from MeshManager to keep responsibilities focused.
+ * =============================================================================
+ */
 
 #include <array>
 #include <cstddef>
@@ -21,7 +23,7 @@
 namespace flp
 {
 
-// Exit node election candidate
+/* Exit node election candidate */
 struct ExitCandidate
 {
     uint16_t addr;
@@ -29,7 +31,7 @@ struct ExitCandidate
     uint8_t hops_to_gw;
 };
 
-// Active file transfer state (sender side)
+/* Active file transfer state (sender side) */
 struct ActiveTransfer
 {
     const uint8_t *data = nullptr;
@@ -46,7 +48,7 @@ struct ActiveTransfer
     uint32_t last_ack_ms[MAX_EXIT_NODES] = {};
 };
 
-// Async broadcast retry state
+/* Async broadcast retry state */
 struct BroadcastRetry
 {
     uint8_t payload[MAX_MTU];
@@ -60,14 +62,14 @@ struct BroadcastRetry
     bool active = false;
 };
 
-// Callback for sending packets (TransferEngine -> MeshManager)
+/* Callback for sending packets (TransferEngine -> MeshManager) */
 using SendPacketFn = std::function<void(uint16_t dst,
                                         PacketType type,
                                         const uint8_t *payload,
                                         size_t payload_len,
                                         uint16_t seq_num)>;
 
-// Callback for forwarding fragments to MQTT
+/* Callback for forwarding fragments to MQTT */
 using ForwardToMqttFn = std::function<void(uint32_t session_id,
                                             uint16_t seq,
                                             uint16_t src_node,
@@ -75,7 +77,7 @@ using ForwardToMqttFn = std::function<void(uint32_t session_id,
                                             size_t len,
                                             const char *filename)>;
 
-// Callback for publishing transfer meta to MQTT (exit node receives TRANSFER_AD)
+/* Callback for publishing transfer meta to MQTT (exit node receives TRANSFER_AD) */
 using ForwardMetaFn = std::function<void(uint32_t session_id,
                                           const char *filename,
                                           uint16_t src_node,
@@ -93,7 +95,7 @@ class TransferEngine
               uint16_t my_addr,
               SendPacketFn send_fn);
 
-    // Packet handlers (called by MeshManager dispatch)
+    /* Packet handlers (called by MeshManager dispatch) */
     void handle_transfer_ad(const PacketHeader &hdr,
                             const uint8_t *payload,
                             size_t payload_len,
@@ -107,18 +109,20 @@ class TransferEngine
     void handle_ack(uint16_t seq, uint16_t from_addr);
     void handle_nack(uint16_t seq, uint16_t from_addr);
 
-    // Start a file transfer (sender side)
-    // If has_internet && has_mqtt, uses local-exit fast path (no mesh).
+    /*
+     * Start a file transfer (sender side)
+     * If has_internet && has_mqtt, uses local-exit fast path (no mesh).
+     */
     void start_file_transfer(const char *filename,
                              const uint8_t *data,
                              size_t size,
                              bool has_internet = false,
                              bool has_mqtt = false);
 
-    // Periodic tick — call from MeshManager::run()
+    /* Periodic tick — call from MeshManager::run() */
     void tick(uint32_t now_ms);
 
-    // Access to transfer state for MQTT publish
+    /* Access to transfer state for MQTT publish */
     const char *current_filename() const { return transfer_.filename; }
     bool is_transfer_active() const { return transfer_.active; }
     uint8_t get_progress_pct() const
@@ -131,13 +135,13 @@ class TransferEngine
             (transfer_.next_fragment * 100) / transfer_.fragment_count);
     }
 
-    // Exit node status
+    /* Exit node status */
     bool is_exit_node() const { return is_exit_node_; }
 
-    // Set callback for forwarding fragments to MQTT
+    /* Set callback for forwarding fragments to MQTT */
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 
-    // Set callback for publishing transfer meta to MQTT (exit node)
+    /* Set callback for publishing transfer meta to MQTT (exit node) */
     void set_forward_meta(ForwardMetaFn fn) { forward_meta_fn_ = fn; }
 
   private:
@@ -177,9 +181,9 @@ class TransferEngine
     uint32_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
 
-    // Pending redistribution queue (fragments from dead exit nodes)
+    /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
     uint8_t redist_count_ = 0;
 };
 
-} // namespace flp
+} /* namespace flp */

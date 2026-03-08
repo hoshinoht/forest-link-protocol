@@ -12,7 +12,7 @@
 
 static const char *TAG = "mqtt";
 
-// Max data bytes per MQTT chunk (2-byte seq header + payload)
+/* Max data bytes per MQTT chunk (2-byte seq header + payload) */
 static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 static constexpr UBaseType_t MQTT_PUBLISH_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
@@ -36,7 +36,7 @@ void MqttClient::notify()
 
 void MqttClient::init()
 {
-    // Create publish queues
+    /* Create publish queues */
     publish_queue_ =
         xQueueCreate(MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem));
     file_publish_queue_ =
@@ -53,7 +53,7 @@ void MqttClient::init()
         return;
     }
 
-    // Configure and start ESP-IDF MQTT client
+    /* Configure and start ESP-IDF MQTT client */
     esp_mqtt_client_config_t mqtt_cfg = {};
     mqtt_cfg.broker.address.uri = CONFIG_FLP_MQTT_BROKER_URI;
 
@@ -62,7 +62,7 @@ void MqttClient::init()
         client_, MQTT_EVENT_ANY, mqtt_event_handler, this);
     esp_mqtt_client_start(client_);
 
-    // Register predefined topics
+    /* Register predefined topics */
     register_default_topics();
 
     ESP_LOGI(
@@ -73,22 +73,22 @@ void MqttClient::register_default_topics()
 {
     char topic_buf[64];
 
-    // Topic 1: flp/<node_id>/status (Node->Cloud, QoS 0)
+    /* Topic 1: flp/<node_id>/status (Node->Cloud, QoS 0) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/status", node_addr_);
     topic_table_.register_topic(topic_buf);
 
-    // Topic 2: flp/<node_id>/file/data (Node->Cloud, QoS 1)
+    /* Topic 2: flp/<node_id>/file/data (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/data", node_addr_);
     topic_table_.register_topic(topic_buf);
 
-    // Topic 3: flp/<node_id>/file/meta (Node->Cloud, QoS 1)
+    /* Topic 3: flp/<node_id>/file/meta (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/meta", node_addr_);
     topic_table_.register_topic(topic_buf);
 
-    // Topic 4: flp/admin/cmd (Cloud->Node, QoS 1)
+    /* Topic 4: flp/admin/cmd (Cloud->Node, QoS 1) */
     topic_table_.register_topic("flp/admin/cmd");
 
-    // Topic 5: flp/admin/ack (Cloud->Node, QoS 1)
+    /* Topic 5: flp/admin/ack (Cloud->Node, QoS 1) */
     topic_table_.register_topic("flp/admin/ack");
 }
 
@@ -115,10 +115,10 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT connected to broker");
             connected_ = true;
-            // Subscribe to admin topics
+            /* Subscribe to admin topics */
             esp_mqtt_client_subscribe(client_, "flp/admin/cmd", 1);
             esp_mqtt_client_subscribe(client_, "flp/admin/ack", 1);
-            notify(); // wake run() to drain queued items
+            notify(); /* wake run() to drain queued items */
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -134,7 +134,7 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                      event->topic,
                      event->data_len);
 
-            // Null-terminate topic for comparison and callback
+            /* Null-terminate topic for comparison and callback */
             char topic_buf[128];
             size_t tlen = (event->topic_len < sizeof(topic_buf) - 1)
                               ? static_cast<size_t>(event->topic_len)
@@ -145,13 +145,15 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             }
             topic_buf[tlen] = '\0';
 
-            // Admin command handler — binary format:
-            // [target:2LE][cmd_id:1][data:N]
+            /*
+             * Admin command handler — binary format:
+             * [target:2LE][cmd_id:1][data:N]
+             */
             if (strcmp(topic_buf, "flp/admin/cmd") == 0 && event->data &&
                 event->data_len >= 3)
             {
                 MeshCmdItem cmd = {};
-                memcpy(&cmd.target_addr, event->data, 2); // little-endian
+                memcpy(&cmd.target_addr, event->data, 2); /* little-endian */
                 cmd.cmd_id = static_cast<uint8_t>(event->data[2]);
                 cmd.data_len = static_cast<size_t>(event->data_len) - 3;
                 if (cmd.data_len > sizeof(cmd.data))
@@ -175,11 +177,11 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 }
             }
 
-            // Cloud NACK handler — parse {"type":"NACK","seq":N}
+            /* Cloud NACK handler — parse {"type":"NACK","seq":N} */
             if (strcmp(topic_buf, "flp/admin/ack") == 0 && event->data &&
                 event->data_len > 0)
             {
-                // Null-terminate data for safe string operations
+                /* Null-terminate data for safe string operations */
                 char ack_buf[256];
                 size_t alen = (event->data_len < sizeof(ack_buf) - 1)
                                   ? static_cast<size_t>(event->data_len)
@@ -247,7 +249,7 @@ int MqttClient::publish(uint16_t topic_id,
             client_, topic, (const char *) data, len, qos, 0);
     }
 
-    // Queue for later if not connected
+    /* Queue for later if not connected */
     if (len <= sizeof(MqttPublishItem::data))
     {
         MqttPublishItem item = {};
@@ -285,7 +287,7 @@ int MqttClient::publish_raw(const char *topic,
         client_, topic, (const char *) data, len, qos, 0);
 }
 
-// ── Task 6: Enqueue file for async cloud upload ──────────────────────────────
+/* ── Task 6: Enqueue file for async cloud upload ────────────────────────────── */
 
 void MqttClient::publish_file(const char *filename,
                               const uint8_t *data,
@@ -368,7 +370,7 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
         vTaskDelay(MQTT_CHUNK_PUBLISH_DELAY);
     }
 
-    // Retain file data pointer for NACK retransmission
+    /* Retain file data pointer for NACK retransmission */
     last_file_data_ = req.data;
     last_file_size_ = req.size;
 
@@ -409,7 +411,7 @@ void MqttClient::publish_transfer_meta(uint32_t session_id,
         esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
     }
 
-    // Mark meta as published so process_fragment_publish doesn't re-publish
+    /* Mark meta as published so process_fragment_publish doesn't re-publish */
     meta_published_ = true;
     last_meta_session_id_ = session_id;
 
@@ -469,7 +471,7 @@ void MqttClient::process_fragment_publish()
     FragmentPublishRequest req;
     while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
-        // Publish chunk: [2-byte seq_le][data]
+        /* Publish chunk: [2-byte seq_le][data] */
         char data_topic[64];
         snprintf(
             data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
@@ -484,7 +486,7 @@ void MqttClient::process_fragment_publish()
 
         if (msg_id < 0)
         {
-            // Outbox full — put fragment back and retry next tick
+            /* Outbox full — put fragment back and retry next tick */
             ESP_LOGW(TAG,
                      "MQTT outbox full, deferring seq=%u",
                      req.seq);
@@ -549,10 +551,12 @@ void MqttClient::run()
 
     while (true)
     {
-        // Block until a producer notifies us or the heartbeat interval elapses.
-        // Compute remaining time until next heartbeat so we never oversleep it.
-        // Floor of 1 tick prevents spin when heartbeat is due or notifications
-        // are pending (ulTaskNotifyTake returns immediately if count > 0).
+        /*
+         * Block until a producer notifies us or the heartbeat interval elapses.
+         * Compute remaining time until next heartbeat so we never oversleep it.
+         * Floor of 1 tick prevents spin when heartbeat is due or notifications
+         * are pending (ulTaskNotifyTake returns immediately if count > 0).
+         */
         TickType_t now = xTaskGetTickCount();
         TickType_t elapsed = now - last_status_tick;
         TickType_t wait =
@@ -563,7 +567,7 @@ void MqttClient::run()
         }
         ulTaskNotifyTake(pdTRUE, wait);
 
-        // Drain publish queue when connected
+        /* Drain publish queue when connected */
         if (connected_ && client_)
         {
             MqttPublishItem item;
@@ -582,7 +586,7 @@ void MqttClient::run()
             }
         }
 
-        // Process file publish requests (one per iteration to stay responsive)
+        /* Process file publish requests (one per iteration to stay responsive) */
         if (connected_ && client_)
         {
             FilePublishRequest freq;
@@ -592,13 +596,13 @@ void MqttClient::run()
             }
         }
 
-        // Process fragment publish requests (exit node mode)
+        /* Process fragment publish requests (exit node mode) */
         process_fragment_publish();
 
-        // Process cloud NACK retransmissions
+        /* Process cloud NACK retransmissions */
         process_nack_retransmit();
 
-        // Periodic status heartbeat
+        /* Periodic status heartbeat */
         now = xTaskGetTickCount();
         if ((now - last_status_tick) >= status_interval)
         {
@@ -606,7 +610,7 @@ void MqttClient::run()
             if (connected_)
             {
                 const char *status_topic =
-                    topic_table_.lookup(1); // topic ID 1 = status
+                    topic_table_.lookup(1); /* topic ID 1 = status */
                 if (status_topic)
                 {
                     const char *msg = "online";
@@ -617,8 +621,10 @@ void MqttClient::run()
             }
         }
 
-        // Yield for 1 tick to guarantee IDLE task runs and feeds the
-        // watchdog, even if notifications arrive every iteration.
+        /*
+         * Yield for 1 tick to guarantee IDLE task runs and feeds the
+         * watchdog, even if notifications arrive every iteration.
+         */
         vTaskDelay(MQTT_IDLE_YIELD_TICKS);
     }
 }
@@ -632,4 +638,4 @@ bool MqttClient::receive_cmd(MeshCmdItem &out)
     return xQueueReceive(cmd_queue_, &out, 0) == pdTRUE;
 }
 
-} // namespace flp
+} /* namespace flp */

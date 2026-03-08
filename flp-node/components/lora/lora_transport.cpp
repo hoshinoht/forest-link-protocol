@@ -6,21 +6,24 @@
 
 static const char *TAG = "lora_xport";
 
+static const int32_t BUSY_POLL_MAX_ITER = 1000;
+static const int32_t SX1276_SPI_CLOCK_HZ = 8000000;
+
 namespace flp
 {
 
-// ── SX1280 SPI helpers ──────────────────────────────────────────────────
+/* ── SX1280 SPI helpers ────────────────────────────────────────────────── */
 
 void LoraTransport::wait_busy()
 {
-    // BUSY typically clears in <1ms; calibration after reset can take ~3.5ms
-    for (int i = 0; i < 1000; i++)
+    /* BUSY typically clears in <1ms; calibration after reset can take ~3.5ms */
+    for (int32_t i = 0; i < BUSY_POLL_MAX_ITER; i++)
     {
         if (gpio_get_level(busy_pin_) == 0)
         {
             return;
         }
-        esp_rom_delay_us(10); // total max ~10ms
+        esp_rom_delay_us(10); /* total max ~10ms */
     }
     ESP_LOGW(TAG, "BUSY pin timeout");
 }
@@ -51,13 +54,13 @@ void LoraTransport::read_command(uint8_t cmd, uint8_t *result, size_t len)
 {
     wait_busy();
 
-    // [CMD][NOP][result0]...[resultN-1]
+    /* [CMD][NOP][result0]...[resultN-1] */
     uint8_t tx[16] = {};
     uint8_t rx[16] = {};
     tx[0] = cmd;
 
     spi_transaction_t t = {};
-    t.length = (2 + len) * 8; // cmd + NOP + result bytes
+    t.length = (2 + len) * 8; /* cmd + NOP + result bytes */
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
@@ -74,7 +77,7 @@ void LoraTransport::write_buffer(uint8_t offset,
 {
     wait_busy();
 
-    uint8_t tx[258]; // cmd + offset + 256 max
+    uint8_t tx[258]; /* cmd + offset + 256 max */
     tx[0] = sx1280::CMD_WRITE_BUFFER;
     tx[1] = offset;
     memcpy(&tx[2], data, len);
@@ -92,14 +95,14 @@ void LoraTransport::read_buffer(uint8_t offset, uint8_t *data, size_t len)
 {
     wait_busy();
 
-    // [CMD][offset][NOP][data0]...[dataN-1]
+    /* [CMD][offset][NOP][data0]...[dataN-1] */
     uint8_t tx[259] = {};
     uint8_t rx[259] = {};
     tx[0] = sx1280::CMD_READ_BUFFER;
     tx[1] = offset;
 
     spi_transaction_t t = {};
-    t.length = (3 + len) * 8; // cmd + offset + NOP + data
+    t.length = (3 + len) * 8; /* cmd + offset + NOP + data */
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
@@ -114,7 +117,7 @@ void LoraTransport::read_register(uint16_t addr, uint8_t *data, size_t len)
 {
     wait_busy();
 
-    // [CMD][addr15:8][addr7:0][NOP][data0]...[dataN-1]
+    /* [CMD][addr15:8][addr7:0][NOP][data0]...[dataN-1] */
     size_t total = 4 + len;
     uint8_t tx[16] = {};
     uint8_t rx[16] = {};
@@ -134,7 +137,7 @@ void LoraTransport::read_register(uint16_t addr, uint8_t *data, size_t len)
     memcpy(data, &rx[4], len);
 }
 
-// ── Chip control ────────────────────────────────────────────────────────
+/* ── Chip control ──────────────────────────────────────────────────────── */
 
 void LoraTransport::reset_chip()
 {
@@ -147,7 +150,7 @@ void LoraTransport::reset_chip()
 
 void LoraTransport::set_frequency(uint32_t freq_hz)
 {
-    // RF_freq = freq_hz * 2^18 / 52 MHz (SX1280 XTAL = 52 MHz)
+    /* RF_freq = freq_hz * 2^18 / 52 MHz (SX1280 XTAL = 52 MHz) */
     uint32_t rf_freq =
         (uint32_t) ((double) freq_hz / 52000000.0 * (1 << 18));
     uint8_t params[3] = {
@@ -160,7 +163,7 @@ void LoraTransport::set_frequency(uint32_t freq_hz)
 
 void LoraTransport::set_tx_power(int8_t dbm)
 {
-    // SX1280 TX power: -18 to +13 dBm
+    /* SX1280 TX power: -18 to +13 dBm */
     if (dbm < -18)
     {
         dbm = -18;
@@ -196,30 +199,30 @@ void LoraTransport::set_packet_params(uint8_t payload_len)
 
 void LoraTransport::enter_rx_continuous()
 {
-    // Max-length packet params for RX
+    /* Max-length packet params for RX */
     set_packet_params(LORA_MAX_PACKET);
 
-    // Route TxDone + RxDone + CrcError to DIO1
+    /* Route TxDone + RxDone + CrcError to DIO1 */
     uint16_t irq_mask =
         sx1280::IRQ_TX_DONE | sx1280::IRQ_RX_DONE | sx1280::IRQ_CRC_ERROR;
     uint8_t params[8] = {
-        (uint8_t) (irq_mask >> 8), (uint8_t) (irq_mask), // IRQ mask
-        (uint8_t) (irq_mask >> 8), (uint8_t) (irq_mask), // DIO1 mask
-        0x00, 0x00,                                       // DIO2 (unused)
-        0x00, 0x00,                                       // DIO3 (unused)
+        (uint8_t) (irq_mask >> 8), (uint8_t) (irq_mask), /* IRQ mask */
+        (uint8_t) (irq_mask >> 8), (uint8_t) (irq_mask), /* DIO1 mask */
+        0x00, 0x00, /* DIO2 (unused) */
+        0x00, 0x00, /* DIO3 (unused) */
     };
     write_command(sx1280::CMD_SET_DIO_IRQ_PARAMS, params, 8);
 
-    // Clear pending IRQs
+    /* Clear pending IRQs */
     uint8_t clr[2] = {0xFF, 0xFF};
     write_command(sx1280::CMD_CLR_IRQ_STATUS, clr, 2);
 
-    // Continuous RX (periodBaseCount = 0xFFFF)
+    /* Continuous RX (periodBaseCount = 0xFFFF) */
     uint8_t rx_params[3] = {0x00, 0xFF, 0xFF};
     write_command(sx1280::CMD_SET_RX, rx_params, 3);
 }
 
-// ── ISR and RX task ─────────────────────────────────────────────────────
+/* ── ISR and RX task ───────────────────────────────────────────────────── */
 
 void IRAM_ATTR LoraTransport::dio1_isr_handler(void *arg)
 {
@@ -237,12 +240,12 @@ void LoraTransport::rx_task_func(void *arg)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // Read 16-bit IRQ status
+        /* Read 16-bit IRQ status */
         uint8_t irq_raw[2];
         self->read_command(sx1280::CMD_GET_IRQ_STATUS, irq_raw, 2);
         uint16_t irq = (irq_raw[0] << 8) | irq_raw[1];
 
-        // Clear the flags we just read
+        /* Clear the flags we just read */
         uint8_t clr[2] = {irq_raw[0], irq_raw[1]};
         self->write_command(sx1280::CMD_CLR_IRQ_STATUS, clr, 2);
 
@@ -263,7 +266,7 @@ void LoraTransport::rx_task_func(void *arg)
                 continue;
             }
 
-            // GetRxBufferStatus → {payloadLen, rxStartOffset}
+            /* GetRxBufferStatus → {payloadLen, rxStartOffset} */
             uint8_t rx_status[2];
             self->read_command(
                 sx1280::CMD_GET_RX_BUFFER_STATUS, rx_status, 2);
@@ -286,7 +289,7 @@ void LoraTransport::rx_task_func(void *arg)
                 self->read_buffer(rx_start, slab->data, slab->len);
             }
 
-            // GetPacketStatus for LoRa → 5 bytes; [0]=rssiSync, [1]=snr
+            /* GetPacketStatus for LoRa → 5 bytes; [0]=rssiSync, [1]=snr */
             uint8_t pkt_status[5];
             self->read_command(
                 sx1280::CMD_GET_PACKET_STATUS, pkt_status, 5);
@@ -308,7 +311,7 @@ void LoraTransport::rx_task_func(void *arg)
     }
 }
 
-// ── Init / Deinit ───────────────────────────────────────────────────────
+/* ── Init / Deinit ─────────────────────────────────────────────────────── */
 
 void LoraTransport::init(uint8_t rx_task_priority)
 {
@@ -322,17 +325,17 @@ void LoraTransport::init(uint8_t rx_task_priority)
 
     cs_pin_ = (gpio_num_t) CONFIG_FLP_LORA_CS;
     rst_pin_ = (gpio_num_t) CONFIG_FLP_LORA_RST;
-    dio1_pin_ = (gpio_num_t) CONFIG_FLP_LORA_DIO0; // DIO1 on SX1280, same GPIO
+    dio1_pin_ = (gpio_num_t) CONFIG_FLP_LORA_DIO0; /* DIO1 on SX1280, same GPIO */
     busy_pin_ = (gpio_num_t) CONFIG_FLP_LORA_BUSY;
 
-    // Configure RST pin as output
+    /* Configure RST pin as output */
     gpio_config_t rst_cfg = {};
     rst_cfg.pin_bit_mask = 1ULL << rst_pin_;
     rst_cfg.mode = GPIO_MODE_OUTPUT;
     gpio_config(&rst_cfg);
     gpio_set_level(rst_pin_, 1);
 
-    // Configure BUSY pin as input
+    /* Configure BUSY pin as input */
     gpio_config_t busy_cfg = {};
     busy_cfg.pin_bit_mask = 1ULL << busy_pin_;
     busy_cfg.mode = GPIO_MODE_INPUT;
@@ -340,7 +343,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     busy_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&busy_cfg);
 
-    // Configure SPI bus
+    /* Configure SPI bus */
     spi_bus_config_t bus_cfg = {};
     bus_cfg.mosi_io_num = CONFIG_FLP_LORA_MOSI;
     bus_cfg.miso_io_num = CONFIG_FLP_LORA_MISO;
@@ -356,9 +359,9 @@ void LoraTransport::init(uint8_t rx_task_priority)
         return;
     }
 
-    // Add SX1280 device (SPI mode 0, 8 MHz)
+    /* Add SX1280 device (SPI mode 0, 8 MHz) */
     spi_device_interface_config_t dev_cfg = {};
-    dev_cfg.clock_speed_hz = 8 * 1000 * 1000;
+    dev_cfg.clock_speed_hz = SX1276_SPI_CLOCK_HZ;
     dev_cfg.mode = 0;
     dev_cfg.spics_io_num = cs_pin_;
     dev_cfg.queue_size = 1;
@@ -370,14 +373,14 @@ void LoraTransport::init(uint8_t rx_task_priority)
         return;
     }
 
-    // Reset and wait for chip ready
+    /* Reset and wait for chip ready */
     reset_chip();
 
-    // Enter standby
+    /* Enter standby */
     uint8_t stdby = sx1280::STDBY_RC;
     write_command(sx1280::CMD_SET_STANDBY, &stdby, 1);
 
-    // Verify chip: read firmware version at register 0x0153
+    /* Verify chip: read firmware version at register 0x0153 */
     uint8_t fw[2];
     read_register(0x0153, fw, 2);
     if (fw[0] == 0x00 || fw[0] == 0xFF)
@@ -388,29 +391,29 @@ void LoraTransport::init(uint8_t rx_task_priority)
     }
     ESP_LOGI(TAG, "SX1280 detected (FW: 0x%02X%02X)", fw[0], fw[1]);
 
-    // Set packet type: LoRa
+    /* Set packet type: LoRa */
     uint8_t pkt_type = sx1280::PACKET_TYPE_LORA;
     write_command(sx1280::CMD_SET_PACKET_TYPE, &pkt_type, 1);
 
-    // Frequency: 2450 MHz (2.4 GHz ISM band)
+    /* Frequency: 2450 MHz (2.4 GHz ISM band) */
     set_frequency(2450000000);
 
-    // Modulation: SF7, BW 800 kHz, CR 4/5
+    /* Modulation: SF7, BW 800 kHz, CR 4/5 */
     set_modulation_params(
         sx1280::LORA_SF7, sx1280::LORA_BW_800, sx1280::LORA_CR_4_5);
 
-    // TX power: 13 dBm (max for SX1280)
+    /* TX power: 13 dBm (max for SX1280) */
     set_tx_power(13);
 
-    // Buffer base addresses (half-duplex, share full 256-byte buffer)
+    /* Buffer base addresses (half-duplex, share full 256-byte buffer) */
     uint8_t buf_base[2] = {0x00, 0x00};
     write_command(sx1280::CMD_SET_BUFFER_BASE, buf_base, 2);
 
-    // Create RX task before enabling interrupts
+    /* Create RX task before enabling interrupts */
     xTaskCreate(
         rx_task_func, "lora_rx", 4096, this, rx_task_priority, &rx_task_);
 
-    // Configure DIO1 interrupt (posedge)
+    /* Configure DIO1 interrupt (posedge) */
     gpio_config_t dio1_cfg = {};
     dio1_cfg.pin_bit_mask = 1ULL << dio1_pin_;
     dio1_cfg.mode = GPIO_MODE_INPUT;
@@ -428,7 +431,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     }
     gpio_isr_handler_add(dio1_pin_, dio1_isr_handler, this);
 
-    // Enter continuous RX mode
+    /* Enter continuous RX mode */
     enter_rx_continuous();
 
     initialized_ = true;
@@ -442,11 +445,11 @@ void LoraTransport::deinit()
         return;
     }
 
-    // Put radio to sleep
+    /* Put radio to sleep */
     uint8_t sleep_cfg = 0x00;
     write_command(sx1280::CMD_SET_SLEEP, &sleep_cfg, 1);
 
-    // Remove ISR and delete RX task
+    /* Remove ISR and delete RX task */
     gpio_isr_handler_remove(dio1_pin_);
     if (rx_task_)
     {
@@ -454,7 +457,7 @@ void LoraTransport::deinit()
         rx_task_ = nullptr;
     }
 
-    // Free SPI
+    /* Free SPI */
     if (spi_)
     {
         spi_bus_remove_device(spi_);
@@ -477,7 +480,7 @@ void LoraTransport::deinit()
     ESP_LOGI(TAG, "LoRa transport deinitialized");
 }
 
-// ── Configure ───────────────────────────────────────────────────────────
+/* ── Configure ─────────────────────────────────────────────────────────── */
 
 void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
 {
@@ -486,7 +489,7 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
 
     set_frequency(freq_hz);
 
-    // Map SF number to SX1280 register value
+    /* Map SF number to SX1280 register value */
     uint8_t sf_val;
     if (sf <= 5)
     {
@@ -521,7 +524,7 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
         sf_val = sx1280::LORA_SF12;
     }
 
-    // Map BW in Hz to SX1280 register value (2.4 GHz bandwidths)
+    /* Map BW in Hz to SX1280 register value (2.4 GHz bandwidths) */
     uint8_t bw_val;
     if (bw_hz <= 200000)
     {
@@ -547,7 +550,7 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
     ESP_LOGI(TAG, "Configured: freq=%luHz SF=%u BW=%luHz", freq_hz, sf, bw_hz);
 }
 
-// ── Send ────────────────────────────────────────────────────────────────
+/* ── Send ──────────────────────────────────────────────────────────────── */
 
 int LoraTransport::send_raw(const uint8_t *data, size_t len)
 {
@@ -557,21 +560,21 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
         return -1;
     }
 
-    // Switch to standby
+    /* Switch to standby */
     uint8_t stdby = sx1280::STDBY_RC;
     write_command(sx1280::CMD_SET_STANDBY, &stdby, 1);
 
-    // Set packet params with actual payload length
+    /* Set packet params with actual payload length */
     set_packet_params((uint8_t) len);
 
-    // Write payload to buffer at offset 0
+    /* Write payload to buffer at offset 0 */
     write_buffer(0x00, data, len);
 
-    // Clear IRQ flags
+    /* Clear IRQ flags */
     uint8_t clr[2] = {0xFF, 0xFF};
     write_command(sx1280::CMD_CLR_IRQ_STATUS, clr, 2);
 
-    // Route TxDone to DIO1
+    /* Route TxDone to DIO1 */
     uint16_t irq_mask = sx1280::IRQ_TX_DONE;
     uint8_t irq_params[8] = {
         (uint8_t) (irq_mask >> 8), (uint8_t) (irq_mask),
@@ -581,14 +584,14 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
     };
     write_command(sx1280::CMD_SET_DIO_IRQ_PARAMS, irq_params, 8);
 
-    // Drain stale semaphore
+    /* Drain stale semaphore */
     xSemaphoreTake(tx_done_sem_, 0);
 
-    // Enter TX (periodBase=1ms, count=5000 → 5s hardware timeout)
+    /* Enter TX (periodBase=1ms, count=5000 → 5s hardware timeout) */
     uint8_t tx_params[3] = {0x02, 0x13, 0x88};
     write_command(sx1280::CMD_SET_TX, tx_params, 3);
 
-    // Wait for TxDone via ISR → semaphore
+    /* Wait for TxDone via ISR → semaphore */
     BaseType_t got = xSemaphoreTake(tx_done_sem_, pdMS_TO_TICKS(5000));
 
     if (got != pdTRUE)
@@ -599,11 +602,11 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
         return -1;
     }
 
-    // Return to RX
+    /* Return to RX */
     enter_rx_continuous();
 
     ESP_LOGD(TAG, "Sent %zu bytes", len);
     return 0;
 }
 
-} // namespace flp
+} /* namespace flp */

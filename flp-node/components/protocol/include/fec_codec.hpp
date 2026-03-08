@@ -19,7 +19,7 @@ class FecEncoder
 
     void ingest(const uint8_t *frag, size_t len)
     {
-        // XOR into accumulator
+        /* XOR into accumulator */
         if (len > parity_len_)
             parity_len_ = len;
         for (size_t i = 0; i < len; i++)
@@ -52,13 +52,13 @@ class FecDecoder
         recovered_len_ = 0;
     }
 
-    // Returns true if a fragment was recovered
+    /* Returns true if a fragment was recovered */
     bool ingest(uint16_t seq, const uint8_t *data, size_t len, bool is_parity)
     {
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
         uint8_t idx = seq % (FEC_GROUP_SIZE + 1);
 
-        // New group? Reset.
+        /* New group? Reset. */
         if (group != current_group_ || !active_)
         {
             reset();
@@ -78,7 +78,7 @@ class FecDecoder
             slot_count_++;
         }
 
-        // Try recovery: need exactly K of K+1
+        /* Try recovery: need exactly K of K+1 */
         if (slot_count_ == FEC_GROUP_SIZE)
         {
             return try_recover();
@@ -98,29 +98,29 @@ class FecDecoder
   private:
     bool try_recover()
     {
-        // Find the one missing slot
+        /* Find the one missing slot */
         int missing = -1;
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
         {
             if (!slots_[i].received)
             {
                 if (missing >= 0)
-                    return false; // more than one missing
+                    return false; /* more than one missing */
                 missing = i;
             }
         }
         if (missing < 0)
-            return false; // none missing (all received)
+            return false; /* none missing (all received) */
         if (static_cast<uint8_t>(missing) == FEC_GROUP_SIZE &&
             !has_parity_check())
         {
-            // Missing the parity — nothing to recover, all data is present
+            /* Missing the parity — nothing to recover, all data is present */
             return false;
         }
 
         missing_idx_ = missing;
 
-        // XOR all received slots to recover
+        /* XOR all received slots to recover */
         memset(recovered_buf_, 0, sizeof(recovered_buf_));
         recovered_len_ = 0;
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
@@ -140,7 +140,7 @@ class FecDecoder
 
     bool has_parity_check() const
     {
-        // Check if any slot is parity
+        /* Check if any slot is parity */
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
         {
             if (slots_[i].received && slots_[i].is_parity)
@@ -168,4 +168,4 @@ class FecDecoder
     bool active_ = false;
 };
 
-} // namespace flp
+} /* namespace flp */

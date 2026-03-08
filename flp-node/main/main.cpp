@@ -37,20 +37,22 @@ static constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
 static flp::OledDisplay oled_display;
 #endif
 
-// 8 KB payload — large enough to produce ~33 data fragments + FEC parity,
-// cycling through the ARQ sliding window multiple times.
+/*
+ * 8 KB payload — large enough to produce ~33 data fragments + FEC parity,
+ * cycling through the ARQ sliding window multiple times.
+ */
 static constexpr size_t DEMO_PAYLOAD_SIZE = 8192;
 static uint8_t DEMO_PAYLOAD[DEMO_PAYLOAD_SIZE];
 
 #if CONFIG_FLP_DEMO_AUTO
-// Auto demo mode: periodic transfer without button
+/* Auto demo mode: periodic transfer without button */
 static void auto_demo_task(void *arg)
 {
     auto *mgr = static_cast<flp::MeshManager *>(arg);
     const TickType_t interval =
         pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
 
-    // Wait for MQTT to be ready before starting demo transfers
+    /* Wait for MQTT to be ready before starting demo transfers */
     ESP_LOGI(TAG, "Auto demo: waiting for MQTT connection...");
     while (!mgr->is_mqtt_connected())
     {
@@ -75,7 +77,7 @@ static void auto_demo_task(void *arg)
     }
 }
 #else
-// Manual demo mode: button-triggered transfer
+/* Manual demo mode: button-triggered transfer */
 static TaskHandle_t s_button_task_handle = nullptr;
 static TickType_t s_last_button_press = 0;
 
@@ -124,7 +126,7 @@ static void wifi_event_handler(void *arg,
         ESP_LOGW(TAG, "WiFi disconnected, reconnecting...");
         esp_wifi_connect();
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        // Task 1: Wire WiFi status into MeshManager
+        /* Task 1: Wire WiFi status into MeshManager */
         mesh_manager.set_has_internet(false);
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
@@ -132,9 +134,9 @@ static void wifi_event_handler(void *arg,
         auto *event = static_cast<ip_event_got_ip_t *>(event_data);
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        // Task 1: Wire WiFi status into MeshManager
+        /* Task 1: Wire WiFi status into MeshManager */
         mesh_manager.set_has_internet(true);
-        // Update ESP-NOW broadcast peer after WiFi connects
+        /* Update ESP-NOW broadcast peer after WiFi connects */
         mesh_manager.update_espnow_broadcast_peer();
     }
 }
@@ -198,13 +200,13 @@ extern "C" void app_main()
 {
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
 
-    // Fill demo payload with repeating ASCII pattern for easy verification
+    /* Fill demo payload with repeating ASCII pattern for easy verification */
     for (size_t i = 0; i < DEMO_PAYLOAD_SIZE; i++)
     {
         DEMO_PAYLOAD[i] = static_cast<uint8_t>('A' + (i % 26));
     }
 
-    // Initialize NVS (required for WiFi + ESP-NOW)
+    /* Initialize NVS (required for WiFi + ESP-NOW) */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -215,7 +217,7 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(ret);
 
 #if CONFIG_FLP_WIFI_DISABLED
-    // Relay-only node: WiFi started in STA mode (no AP connect) for ESP-NOW
+    /* Relay-only node: WiFi started in STA mode (no AP connect) for ESP-NOW */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -224,14 +226,14 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Set fixed channel for relay nodes (must match exit node AP channel)
+    /* Set fixed channel for relay nodes (must match exit node AP channel) */
     ESP_ERROR_CHECK(
         esp_wifi_set_channel(CONFIG_FLP_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
     ESP_LOGI(TAG,
              "WiFi STA started (no AP) for ESP-NOW, ch=%d",
              CONFIG_FLP_ESPNOW_CHANNEL);
 #else
-    // Initialize WiFi station
+    /* Initialize WiFi station */
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -261,10 +263,12 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
 #endif
 
-    // ESP-NOW init is handled by EspNowTransport::init() called from
-    // MeshManager
+    /*
+     * ESP-NOW init is handled by EspNowTransport::init() called from
+     * MeshManager
+     */
 
-    // Init OLED early — it's local hardware, no network dependency
+    /* Init OLED early — it's local hardware, no network dependency */
 #if CONFIG_FLP_OLED_ENABLED
     oled_display.init(
         CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
@@ -276,13 +280,13 @@ extern "C" void app_main()
     mesh_manager.subscribe_topic("alert");
 
 #if !CONFIG_FLP_WIFI_DISABLED
-    // Task 6: Wire MQTT client to mesh manager for file upload bridge
+    /* Task 6: Wire MQTT client to mesh manager for file upload bridge */
     mqtt_client.set_node_addr(mesh_manager.get_addr());
     mqtt_client.init();
     mesh_manager.set_mqtt_client(&mqtt_client);
 #endif
 
-    // UART ingest API
+    /* UART ingest API */
     uart_ingest.init(UART_NUM_2,
                      CONFIG_FLP_UART_TX_PIN,
                      CONFIG_FLP_UART_RX_PIN,
@@ -310,7 +314,7 @@ extern "C" void app_main()
                 nullptr);
 
 #if CONFIG_FLP_DEMO_AUTO
-    // Auto demo mode: periodic transfer task
+    /* Auto demo mode: periodic transfer task */
     xTaskCreate(auto_demo_task,
                 "auto_demo",
                 FLP_BUTTON_TASK_STACK,
@@ -321,7 +325,7 @@ extern "C" void app_main()
              "Auto demo enabled: transfer every %d seconds",
              CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
 #else
-    // Demo button (GPIO ISR + lightweight handler task)
+    /* Demo button (GPIO ISR + lightweight handler task) */
     xTaskCreate(button_task,
                 "button_task",
                 FLP_BUTTON_TASK_STACK,
@@ -337,7 +341,7 @@ extern "C" void app_main()
     btn_cfg.intr_type = GPIO_INTR_NEGEDGE;
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
 
-    // ISR service already installed by LoraTransport::init()
+    /* ISR service already installed by LoraTransport::init() */
     esp_err_t isr_ret = gpio_install_isr_service(0);
     if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE)
     {

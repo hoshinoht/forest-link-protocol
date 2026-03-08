@@ -13,4 +13,5 @@ idf_component_register(
         protocol
         uart_api
         display
+        sdcard
 )
