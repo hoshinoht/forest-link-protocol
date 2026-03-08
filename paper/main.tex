@@ -38,7 +38,7 @@
   Kenny Leck\IEEEauthorrefmark{1},
   Chia Wei Sheng\IEEEauthorrefmark{1}}
   \IEEEauthorblockA{\IEEEauthorrefmark{1}Singapore Institute of Technology\\
-  CSC2106: IoT Protocols and Networks --- Group GP01\\
+  CSC2106: IoT Protocols and Networks, Group GP01\\
   \{2401280, 2402091, 2403543, 2400953\}@sit.singaporetech.edu.sg}
 }
 
@@ -47,7 +47,7 @@
 % ===========================================================================
 \begin{abstract}
 % ===========================================================================
-This paper presents the design and implementation of Forest Link Protocol (FLP), a novel application-layer mesh protocol for IoT sensor deployments in environments where internet connectivity is intermittent and signal attenuation is high. Unlike standard IoT solutions that rely on continuous cloud connectivity or specialized LPWAN hardware, FLP utilizes commodity ESP32-S3 microcontrollers with dual-transport communication---ESP-NOW for short-range, high-bandwidth mesh relay and LoRa for long-range control signaling---to establish a self-healing, leader-electing tree topology. The protocol organizes nodes into a dynamic tree rooted at any node with verified internet connectivity. Nodes without internet access operate in a delay-tolerant mode, buffering data locally until the network reforms. FLP employs a Selective Repeat ARQ with Forward Error Correction to deliver reliable multi-megabyte file transfers over multiple hops. Our implementation on the LILYGO T3-S3 platform demonstrates that a 3\,MB file can be transferred over three hops in under three minutes in dense forest conditions, meeting the target requirement with significant margin.
+This paper presents the design and implementation of Forest Link Protocol (FLP), a novel application-layer mesh protocol for IoT sensor deployments in environments where internet connectivity is intermittent and signal attenuation is high. Unlike standard IoT solutions that rely on continuous cloud connectivity or specialized LPWAN hardware, FLP utilizes commodity ESP32-S3 microcontrollers with dual-transport communication (ESP-NOW for short-range, high-bandwidth mesh relay and LoRa for long-range control signaling) to establish a self-healing, leader-electing tree topology. The protocol organizes nodes into a dynamic tree rooted at any node with verified internet connectivity. Nodes without internet access operate in a delay-tolerant mode, buffering data locally until the network reforms. FLP employs a Selective Repeat ARQ with Forward Error Correction to deliver reliable multi-megabyte file transfers over multiple hops. Our implementation on the LILYGO T3-S3 platform demonstrates that a 3\,MB file can be transferred over three hops in under three minutes in dense forest conditions, meeting the target requirement with significant margin.
 \end{abstract}
 
 % ===========================================================================
@@ -66,10 +66,10 @@ The primary issue we identified is the ``Green Wall'' effect, where dense and wa
 This results in disconnected or brittle networks that fail to deliver critical environmental data when signal quality fluctuates. Specific technical challenges include:
 
 \begin{itemize}
-  \item \textbf{Signal Attenuation} --- 2.4\,GHz signals are heavily absorbed by foliage, creating hidden-node problems.
-  \item \textbf{Transient Backhaul} --- The internet gateway is often a single point of failure (e.g., a solar-powered 4G modem) that may sleep or fail without warning.
-  \item \textbf{The Bandwidth Gap} --- LoRaWAN duty cycles severely limit payload size, making transfer of rich sensor datasets impractical.
-  \item \textbf{The Reliability Gap} --- Standard TCP/IP meshes suffer from management collapse in forests; if the WiFi link drops, the entire protocol state fails.
+  \item \textbf{Signal Attenuation}:2.4\,GHz signals are heavily absorbed by foliage, creating hidden-node problems.
+  \item \textbf{Transient Backhaul}:The internet gateway is often a single point of failure (e.g., a solar-powered 4G modem) that may sleep or fail without warning.
+  \item \textbf{The Bandwidth Gap}:LoRaWAN duty cycles severely limit payload size, making transfer of rich sensor datasets impractical.
+  \item \textbf{The Reliability Gap}:Standard TCP/IP meshes suffer from management collapse in forests; if the WiFi link drops, the entire protocol state fails.
 \end{itemize}
 
 \subsection{Relevance and Importance}
@@ -81,10 +81,10 @@ This research is vital for the Smart Forestry and Environmental Conservation ind
 The overarching goal is to implement and validate the Forest Link Protocol, focusing on:
 
 \begin{enumerate}
-  \item \textbf{Adaptive Protocol Selection} --- Developing an intelligent system that dynamically chooses communication strategy based on real-time topology, hop count, and RSSI measurements.
-  \item \textbf{Self-Healing Topology} --- Implementing an implicit leader election mechanism that allows any node with internet connectivity to assume the root role automatically.
-  \item \textbf{Delay Tolerant Networking} --- Ensuring that nodes without internet access buffer data locally and flush it to the cloud seamlessly upon reconnection.
-  \item \textbf{Efficient Data Transport} --- Utilizing Selective Repeat ARQ with FEC parity to minimize retransmission overhead over lossy links.
+  \item \textbf{Adaptive Protocol Selection}:Developing an intelligent system that dynamically chooses communication strategy based on real-time topology, hop count, and RSSI measurements.
+  \item \textbf{Self-Healing Topology}:Implementing an implicit leader election mechanism that allows any node with internet connectivity to assume the root role automatically.
+  \item \textbf{Delay Tolerant Networking}:Ensuring that nodes without internet access buffer data locally and flush it to the cloud seamlessly upon reconnection.
+  \item \textbf{Efficient Data Transport}:Utilizing Selective Repeat ARQ with FEC parity to minimize retransmission overhead over lossy links.
 \end{enumerate}
 
 % ===========================================================================
@@ -94,7 +94,7 @@ The overarching goal is to implement and validate the Forest Link Protocol, focu
 
 \subsection{Current State of Knowledge}
 
-The field of IoT mesh networking in constrained and remote environments has seen significant development across several protocol families. Low-Power Wide-Area Networks (LPWANs) still represent the dominant paradigm for remote IoT deployments, with LoRaWAN emerging as the most widely adopted standard across the four major LPWAN candidates---LoRa, NB-IoT, Sigfox, and LTE-M---in terms of global network operators and country coverage~\cite{maurya2025lorawan}.
+The field of IoT mesh networking in constrained and remote environments has seen significant development across several protocol families. Low-Power Wide-Area Networks (LPWANs) still represent the dominant paradigm for remote IoT deployments, with LoRaWAN emerging as the most widely adopted standard across the four major LPWAN candidates (LoRa, NB-IoT, Sigfox, and LTE-M) in terms of global network operators and country coverage~\cite{maurya2025lorawan}.
 
 For short-range mesh deployments, IEEE~802.15.4-based protocols such as Zigbee and Thread are widely studied. Delay Tolerant Networking (DTN) has been researched since the early 2000s via the Bundle Protocol (RFC~5050 and successors), which still remains the backbone of DTN, providing the store-carry-forward abstraction. Recent work emphasizes BPv7 (updated Bundle Protocol) for improved efficiency, extensibility, and security~\cite{elewaily2024dtn}.
 
@@ -126,9 +126,9 @@ LoRaWAN struggles with payload and duty cycle limits, while DTN faces adoption a
 FLP employs a three-layer communication architecture with adaptive protocol selection, as shown in Fig.~\ref{fig:architecture}:
 
 \begin{enumerate}
-  \item \textbf{ESP-NOW (Short-Range Mesh)} --- High-bandwidth (\(\sim\)34\,KB/s per hop), short-range (30--50\,m in forest) inter-node communication for bulk data relay.
-  \item \textbf{LoRa (Long-Range Control)} --- Extended range (200--500\,m in forest), lower bandwidth (617\,B/s at SF7) for broadcast discovery, route advertisements, and transfer coordination.
-  \item \textbf{WiFi + MQTT (External Gateway)} --- Opportunistic cloud connectivity via MQTT for data exfiltration when a node detects internet access.
+  \item \textbf{ESP-NOW (Short-Range Mesh)}:High-bandwidth (\(\sim\)34\,KB/s per hop), short-range (30--50\,m in forest) inter-node communication for bulk data relay.
+  \item \textbf{LoRa (Long-Range Control)}:Extended range (200--500\,m in forest), lower bandwidth (617\,B/s at SF7) for broadcast discovery, route advertisements, and transfer coordination.
+  \item \textbf{WiFi + MQTT (External Gateway)}:Opportunistic cloud connectivity via MQTT for data exfiltration when a node detects internet access.
 \end{enumerate}
 
 \begin{figure}[htbp]
@@ -273,9 +273,9 @@ The firmware is organized into independent ESP-IDF components: \texttt{espnow/} 
 The FLP system is deployed in a multi-layered mesh configuration consisting of Sensor Nodes (origin nodes), Relay Nodes (extenders), and Cloud Gateways (data exit points). Deployment in a dense forest presents the ``Green Wall'' effect where moisture-heavy foliage attenuates 2.4\,GHz signals. FLP mitigates this through:
 
 \begin{enumerate}
-  \item \textbf{Adaptive Protocol Selection} --- FLP uses LoRa as a control plane to discover other nodes. Once a neighbor is identified, FLP escalates to ESP-NOW for high-speed file transfers. If the ESP-NOW RSSI drops below a threshold, FLP falls back to LoRa.
-  \item \textbf{Network Resilience} --- To prevent management collapse observed in TCP/IP meshes, FLP uses Opportunistic Exit Node Election, where nodes with internet access advertise their state and sensor nodes broadcast an ``intent'' packet via LoRa to locate these exit nodes dynamically.
-  \item \textbf{Priority Scheduling} --- A dual-priority FreeRTOS queue ensures that control packets (ACK, NACK, route updates) are processed before bulk data fragments, preventing ARQ timeouts under heavy transfer load.
+  \item \textbf{Adaptive Protocol Selection}:FLP uses LoRa as a control plane to discover other nodes. Once a neighbor is identified, FLP escalates to ESP-NOW for high-speed file transfers. If the ESP-NOW RSSI drops below a threshold, FLP falls back to LoRa.
+  \item \textbf{Network Resilience}:To prevent management collapse observed in TCP/IP meshes, FLP uses Opportunistic Exit Node Election, where nodes with internet access advertise their state and sensor nodes broadcast an ``intent'' packet via LoRa to locate these exit nodes dynamically.
+  \item \textbf{Priority Scheduling}:A dual-priority FreeRTOS queue ensures that control packets (ACK, NACK, route updates) are processed before bulk data fragments, preventing ARQ timeouts under heavy transfer load.
 \end{enumerate}
 
 \subsection{Testing Process}
@@ -343,7 +343,7 @@ Table~\ref{tab:transfer_time} shows the projected 3\,MB file transfer times acro
   \end{tabular}
 \end{table}
 
-All scenarios meet the NFR-MESH1 target of delivering data within 20 minutes, with dense forest conditions achieving transfer times of approximately 1.5--2 minutes---well within the requirement.
+All scenarios meet the NFR-MESH1 target of delivering data within 20 minutes, with dense forest conditions achieving transfer times of approximately 1.5--2 minutes, well within the requirement.
 
 \subsection{Scalability}
 
