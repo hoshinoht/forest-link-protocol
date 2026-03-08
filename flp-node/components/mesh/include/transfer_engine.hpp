@@ -117,7 +117,8 @@ class TransferEngine
                              const uint8_t *data,
                              size_t size,
                              bool has_internet = false,
-                             bool has_mqtt = false);
+                             bool has_mqtt = false,
+                             uint8_t hops_to_internet = 0xFF);
 
     /* Periodic tick — call from MeshManager::run() */
     void tick(uint32_t now_ms);
@@ -158,6 +159,7 @@ class TransferEngine
     int8_t arq_index_for_peer(uint16_t addr) const;
 
     static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 10000;
+    uint32_t election_timeout_ms_ = 3000; /* Step 6: adaptive election window */
 
     SelectiveRepeat arq_[MAX_EXIT_NODES];
     ActiveTransfer transfer_ = {};

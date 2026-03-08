@@ -3,14 +3,14 @@
 /*
  * =============================================================================
  * mesh_manager.hpp — Role 2: ESP32 Mesh Brain
- * 
+ *
  * Implements:
  * FR-MESH4  — Parse intent packets, reply as exit node if we have MQTT
  * FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
  * FR-MESH7  — Intent broadcast retry, max 3 attempts
  * FR-MESH8  — Route packet to self (consume) or relay forward
  * NFR-MESH2 — Interrupt-driven via FreeRTOS queue (no polling)
- * 
+ *
  * Calls into (does NOT implement):
  * EspNowTransport::send()    — Role 3
  * LoraTransport::send()      — Role 4
@@ -135,12 +135,17 @@ class MeshManager
     void handle_mesh_cmd(const PacketHeader &hdr,
                          const uint8_t *payload,
                          size_t payload_len);
+    void handle_route_error(const PacketHeader &hdr,
+                            const uint8_t *payload,
+                            size_t payload_len);
     void forward_packet(BufferSlab *slab, const PacketHeader &hdr);
     void send_discovery();
     void send_raw(Transport transport,
                   const uint8_t *data,
                   size_t len,
                   uint16_t peer_addr);
+    void send_route_error(uint16_t dead_addr, uint16_t inet_origin,
+                          uint16_t last_seq);
 
     /*
      * Generic relay: publishes via MQTT if exit node, else routes
@@ -158,7 +163,10 @@ class MeshManager
     TransferEngine transfer_engine_;
     BufferPool buffer_pool_;
 
-    QueueHandle_t packet_queue_ = nullptr;
+    /* Step 8: Dual-priority queues */
+    QueueHandle_t hi_pri_queue_ = nullptr;
+    QueueHandle_t lo_pri_queue_ = nullptr;
+    QueueHandle_t packet_queue_ = nullptr; /* kept for get_packet_queue() compat */
     EventGroupHandle_t events_ = nullptr;
     uint16_t my_addr_ = 0;
     uint32_t discovery_timer_ms_ = 0;
@@ -167,6 +175,9 @@ class MeshManager
     uint32_t topo_metrics_timer_ms_ = 0;
     std::atomic<bool> has_internet_{false};
     uint8_t lora_rx_priority_ = 5;
+
+    /* Step 1d: DSDV sequence number for internet route */
+    uint16_t my_inet_seq_ = 0;
 
     /* Heap monitor */
     HeapMonitor heap_monitor_;
@@ -180,9 +191,8 @@ class MeshManager
     uint8_t subscribed_topic_count_ = 0;
 
     /*
-     * Fix 4: Forwarding dedup cache — prevents broadcast storm by dropping
-     * packets we've already forwarded. Ring buffer of recently-seen
-     * (src, dst, type, seq) tuples.
+     * Step 4: Enlarged dedup cache with timestamps.
+     * Prevents broadcast storm by dropping packets we've already forwarded.
      */
     struct SeenEntry
     {
@@ -190,23 +200,37 @@ class MeshManager
         uint16_t dst;
         uint8_t type;
         uint16_t seq;
+        uint32_t time_ms;
     };
-    static constexpr uint8_t SEEN_CACHE_SIZE = 32;
+    static constexpr uint8_t SEEN_CACHE_SIZE = 64;
     SeenEntry seen_cache_[SEEN_CACHE_SIZE] = {};
     uint8_t seen_idx_ = 0;
 
     bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq)
     {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++)
         {
             if (seen_cache_[i].src == src && seen_cache_[i].dst == dst &&
-                seen_cache_[i].type == type && seen_cache_[i].seq == seq)
+                seen_cache_[i].type == type && seen_cache_[i].seq == seq &&
+                (now - seen_cache_[i].time_ms) < 10000)
             {
                 return true;
             }
         }
-        seen_cache_[seen_idx_] = {src, dst, type, seq};
-        seen_idx_ = (seen_idx_ + 1) % SEEN_CACHE_SIZE;
+        /* Prefer overwriting expired entries over round-robin */
+        uint8_t slot = seen_idx_;
+        for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++)
+        {
+            if ((now - seen_cache_[i].time_ms) > 10000)
+            {
+                slot = i;
+                break;
+            }
+        }
+        seen_cache_[slot] = {src, dst, type, seq, now};
+        if (slot == seen_idx_)
+            seen_idx_ = (seen_idx_ + 1) % SEEN_CACHE_SIZE;
         return false;
     }
 };

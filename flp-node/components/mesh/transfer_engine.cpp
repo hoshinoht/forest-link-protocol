@@ -217,7 +217,8 @@ void TransferEngine::start_file_transfer(const char *filename,
                                          const uint8_t *data,
                                          size_t size,
                                          bool has_internet,
-                                         bool has_mqtt)
+                                         bool has_mqtt,
+                                         uint8_t hops_to_internet)
 {
     if (transfer_.active)
     {
@@ -297,10 +298,20 @@ void TransferEngine::start_file_transfer(const char *filename,
     ad.crc32 = esp_rom_crc32_le(0, data, size);
     strncpy(ad.filename, filename, sizeof(ad.filename) - 1);
 
-    /* Start election */
+    /* Start election with adaptive timeout (Step 6) */
     candidate_count_ = 0;
     election_active_ = true;
     election_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+    static constexpr uint32_t BASE_ELECTION_MS = 3000;
+    static constexpr uint32_t PER_HOP_ELECTION_MS = 1000;
+    static constexpr uint32_t MAX_ELECTION_MS = 8000;
+    election_timeout_ms_ = BASE_ELECTION_MS +
+        (hops_to_internet * PER_HOP_ELECTION_MS);
+    if (election_timeout_ms_ > MAX_ELECTION_MS)
+    {
+        election_timeout_ms_ = MAX_ELECTION_MS;
+    }
 
     /*
      * Fix 1: Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
@@ -339,7 +350,7 @@ void TransferEngine::tick(uint32_t now_ms)
 void TransferEngine::election_timeout_tick(uint32_t now_ms)
 {
     if (!election_active_ ||
-        (now_ms - election_start_ms_ <= ELECTION_TIMEOUT_MS))
+        (now_ms - election_start_ms_ <= election_timeout_ms_))
     {
         return;
     }

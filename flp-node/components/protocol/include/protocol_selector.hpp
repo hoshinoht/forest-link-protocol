@@ -52,6 +52,9 @@ class ProtocolSelector
     /* Task 7: Report TX outcome for feedback loop */
     void report_tx_result(Transport t, bool success, uint32_t latency_ms);
 
+    /* Step 7: ADR — expose LoRa success rate for SF adaptation */
+    float lora_success_rate() const { return lora_metrics_.success_rate(); }
+
     size_t serialize_metrics(uint8_t *buf, size_t max_len) const
     {
         /* Format: [{tx:4, fail:4, latency:4, retx:4, rx:4, duty:4}*2] = 48 bytes */

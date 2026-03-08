@@ -29,6 +29,7 @@ enum class PacketType : uint8_t
     PARITY = 0x06,
     TRANSFER_AD = 0x20, /* file transfer advertisement */
     TRANSFER_ACK = 0x21, /* exit node response to transfer ad */
+    ROUTE_ERROR = 0x13, /* link failure notification */
     MESH_PUB = 0x30, /* uplink relay: node → exit → MQTT */
     MESH_CMD = 0x31, /* downlink relay: MQTT → exit → node */
 };
@@ -98,10 +99,19 @@ static constexpr size_t ESPNOW_MAX_PAYLOAD = 250 - PACKET_HEADER_SIZE; /* 242 by
 
 struct __attribute__((packed)) DiscoveryPayload
 {
-    uint8_t flags; /* bit 0: has_internet */
+    uint8_t flags;           /* bit 0: has_internet, bits 4-6: (sf - 5) encoding */
     uint8_t hops_to_internet;
     int8_t rssi;
-    uint8_t wifi_channel; /* ESP-NOW channel (0 = unknown) */
+    uint8_t wifi_channel;    /* ESP-NOW channel (0 = unknown) */
+    uint16_t inet_seq;       /* monotonic sequence from originating exit node */
+    uint16_t inet_origin;    /* address of the exit node this route comes from */
+};
+
+struct __attribute__((packed)) RouteErrorPayload
+{
+    uint16_t dead_addr;      /* the neighbor that went unreachable */
+    uint16_t inet_origin;    /* which exit node's route is affected */
+    uint16_t last_known_seq; /* last known good seq for that origin */
 };
 
 struct __attribute__((packed)) TransferAdPayload

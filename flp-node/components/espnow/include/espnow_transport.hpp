@@ -28,6 +28,10 @@ class EspNowTransport : public ITransport
         buffer_pool_ = p;
     }
 
+    /* Step 8: Dual-priority queue support */
+    void set_hi_pri_queue(QueueHandle_t q) { hi_pri_queue_ = q; }
+    void set_lo_pri_queue(QueueHandle_t q) { lo_pri_queue_ = q; }
+
     void init() override;
     void deinit() override;
 
@@ -62,6 +66,8 @@ class EspNowTransport : public ITransport
     BufferPool *buffer_pool_ = nullptr;
     uint16_t node_addr_ = 0;
     bool initialized_ = false;
+    QueueHandle_t hi_pri_queue_ = nullptr;
+    QueueHandle_t lo_pri_queue_ = nullptr;
 
     void add_peer_if_new(const uint8_t *mac, int8_t rssi);
     uint16_t addr_from_mac(const uint8_t *mac) const;
