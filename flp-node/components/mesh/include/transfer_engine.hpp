@@ -41,7 +41,7 @@ struct ActiveTransfer
     uint16_t next_fragment = 0;
     uint16_t exit_nodes[MAX_EXIT_NODES] = {};
     uint8_t exit_node_count = 0;
-    uint32_t session_id = 0;
+    uint16_t session_id = 0;
     char filename[20] = {};
     bool active = false;
     bool exit_node_alive[MAX_EXIT_NODES] = {true, true, true, true};
@@ -70,7 +70,7 @@ using SendPacketFn = std::function<void(uint16_t dst,
                                         uint16_t seq_num)>;
 
 /* Callback for forwarding fragments to MQTT */
-using ForwardToMqttFn = std::function<void(uint32_t session_id,
+using ForwardToMqttFn = std::function<void(uint16_t session_id,
                                             uint16_t seq,
                                             uint16_t src_node,
                                             const uint8_t *data,
@@ -78,7 +78,7 @@ using ForwardToMqttFn = std::function<void(uint32_t session_id,
                                             const char *filename)>;
 
 /* Callback for publishing transfer meta to MQTT (exit node receives TRANSFER_AD) */
-using ForwardMetaFn = std::function<void(uint32_t session_id,
+using ForwardMetaFn = std::function<void(uint16_t session_id,
                                           const char *filename,
                                           uint16_t src_node,
                                           uint32_t total_size,
@@ -180,8 +180,18 @@ class TransferEngine
     ForwardMetaFn forward_meta_fn_;
     bool is_exit_node_ = false;
     bool local_exit_ = false;
-    uint32_t active_session_id_ = 0;
+    uint16_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
+
+    /* Deferred meta: exit node stores ad info until fragment 0 delivers filename */
+    struct PendingMeta
+    {
+        uint32_t file_size;
+        uint16_t fragment_count;
+        uint16_t fragment_size;
+        uint16_t crc16;
+        bool waiting; /* true = waiting for frag 0 with filename */
+    } pending_meta_ = {};
 
     /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};

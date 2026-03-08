@@ -36,7 +36,7 @@ struct FilePublishRequest
 /* Request to publish a single fragment (exit node -> MQTT) */
 struct FragmentPublishRequest
 {
-    uint32_t session_id;
+    uint16_t session_id;
     uint16_t seq;
     uint16_t src_node;
     uint8_t data[512];
@@ -81,11 +81,11 @@ class MqttClient
                       uint16_t src_node);
 
     /* Fragment-level publish for exit nodes (no reassembly needed) */
-    void publish_fragment(uint32_t session_id, uint16_t seq, uint16_t src_node,
+    void publish_fragment(uint16_t session_id, uint16_t seq, uint16_t src_node,
                           const uint8_t *data, size_t len, const char *filename);
 
-    /* Publish complete transfer meta (called when exit node receives TRANSFER_AD) */
-    void publish_transfer_meta(uint32_t session_id, const char *filename,
+    /* Publish complete transfer meta (called when exit node receives fragment 0) */
+    void publish_transfer_meta(uint16_t session_id, const char *filename,
                                uint16_t src_node, uint16_t exit_node,
                                uint32_t total_size, uint16_t chunk_count,
                                uint16_t fragment_size, uint32_t crc32);
@@ -141,7 +141,7 @@ class MqttClient
     /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;
     bool meta_published_ = false;
-    uint32_t last_meta_session_id_ = 0;
+    uint16_t last_meta_session_id_ = 0;
 };
 
 } /* namespace flp */

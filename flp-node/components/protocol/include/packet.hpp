@@ -99,13 +99,13 @@ static constexpr size_t ESPNOW_MAX_PAYLOAD = 250 - PACKET_HEADER_SIZE; /* 242 by
 
 struct __attribute__((packed)) DiscoveryPayload
 {
-    uint8_t flags;           /* bit 0: has_internet, bits 4-6: (sf - 5) encoding */
+    uint8_t flags;           /* bit 0: has_internet, bits 1-4: wifi_channel, bits 5-7: SF encoding */
     uint8_t hops_to_internet;
     int8_t rssi;
-    uint8_t wifi_channel;    /* ESP-NOW channel (0 = unknown) */
     uint16_t inet_seq;       /* monotonic sequence from originating exit node */
     uint16_t inet_origin;    /* address of the exit node this route comes from */
 };
+static_assert(sizeof(DiscoveryPayload) == 7, "DiscoveryPayload must be 7 bytes");
 
 struct __attribute__((packed)) RouteErrorPayload
 {
@@ -116,21 +116,21 @@ struct __attribute__((packed)) RouteErrorPayload
 
 struct __attribute__((packed)) TransferAdPayload
 {
-    uint32_t session_id;
+    uint16_t session_id;
     uint32_t file_size;
-    uint16_t fragment_count;
-    uint16_t fragment_size;
-    uint32_t crc32;
-    char filename[20];
+    uint8_t fragment_size_d8; /* actual = val * 8 */
+    uint16_t crc16;
 };
+static_assert(sizeof(TransferAdPayload) == 9, "TransferAdPayload must be 9 bytes");
 
 struct __attribute__((packed)) TransferAckPayload
 {
-    uint32_t session_id;
+    uint16_t session_id;
     uint16_t exit_node_addr;
     int8_t rssi_to_gw;
     uint8_t hops_to_gw;
 };
+static_assert(sizeof(TransferAckPayload) == 6, "TransferAckPayload must be 6 bytes");
 
 /* Unified inbound packet used across transports and mesh manager */
 enum class RxTransport : uint8_t

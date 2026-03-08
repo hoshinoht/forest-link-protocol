@@ -483,6 +483,9 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         rx_transport = "LoRa";
     }
 
+    /* Extract wifi channel from flags bits 1-4 */
+    uint8_t disc_wifi_ch = (disc.flags >> 1) & 0x0F;
+
     ESP_LOGI(TAG,
              "Discovery from 0x%04X via %s: inet=%u hops_inet=%u rssi=%d "
              "ch=%u seq=%u origin=0x%04X",
@@ -491,7 +494,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
              (disc.flags & kDiscoveryInternetFlag) != 0U,
              disc.hops_to_internet,
              disc.rssi,
-             disc.wifi_channel,
+             disc_wifi_ch,
              disc.inet_seq,
              disc.inet_origin);
 
@@ -505,18 +508,18 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
      * and we're not connected to an AP (relay node or disconnected exit),
      * switch to match so ESP-NOW can reach the mesh.
      */
-    if (disc.wifi_channel > 0 && !has_internet_)
+    if (disc_wifi_ch > 0 && !has_internet_)
     {
         uint8_t cur_ch = 0;
         wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&cur_ch, &sec);
-        if (cur_ch != disc.wifi_channel)
+        if (cur_ch != disc_wifi_ch)
         {
-            esp_wifi_set_channel(disc.wifi_channel, WIFI_SECOND_CHAN_NONE);
+            esp_wifi_set_channel(disc_wifi_ch, WIFI_SECOND_CHAN_NONE);
             ESP_LOGI(TAG,
                      "ESP-NOW channel synced: %u -> %u",
                      cur_ch,
-                     disc.wifi_channel);
+                     disc_wifi_ch);
         }
     }
 
@@ -539,11 +542,11 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             compute_hops_to_internet(route_table_, has_internet_);
         resp.rssi = 0;
 
-        /* Include current WiFi channel so the peer can sync */
+        /* Pack WiFi channel into flags bits 1-4 */
         uint8_t resp_ch = 0;
         wifi_second_chan_t resp_sec = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&resp_ch, &resp_sec);
-        resp.wifi_channel = resp_ch;
+        resp.flags |= (resp_ch & 0x0F) << 1;
 
         /* Step 1d: Populate sequence info */
         if (has_internet_)
@@ -558,10 +561,10 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             resp.inet_origin = best.origin;
         }
 
-        /* Step 7c: Encode current SF in flags bits 4-6 */
+        /* Step 7c: Encode current SF in flags bits 5-7 */
         uint8_t sf_enc =
             static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
-        resp.flags |= (sf_enc << 4);
+        resp.flags |= (sf_enc << 5);
 
         send_packet(hdr.src_addr,
                     PacketType::DISCOVERY,
@@ -676,11 +679,11 @@ void MeshManager::send_discovery()
         compute_hops_to_internet(route_table_, has_internet_);
     disc.rssi = 0;
 
-    /* Include current WiFi channel so relay nodes can auto-sync for ESP-NOW */
+    /* Pack WiFi channel into flags bits 1-4 */
     uint8_t ch = 0;
     wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&ch, &sec);
-    disc.wifi_channel = ch;
+    disc.flags |= (ch & 0x0F) << 1;
 
     /* Step 1d: Populate DSDV sequence info */
     if (has_internet_)
@@ -695,10 +698,10 @@ void MeshManager::send_discovery()
         disc.inet_origin = best.origin;
     }
 
-    /* Step 7c: Encode current SF in flags bits 4-6 */
+    /* Step 7c: Encode current SF in flags bits 5-7 */
     uint8_t sf_enc =
         static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
-    disc.flags |= (sf_enc << 4);
+    disc.flags |= (sf_enc << 5);
 
     /* Build raw packet for direct transport control */
     uint8_t buf[MAX_MTU];
@@ -729,7 +732,7 @@ void MeshManager::send_discovery()
     ESP_LOGD(TAG,
              "Sent discovery broadcast (hops_to_inet=%u ch=%u seq=%u)",
              disc.hops_to_internet,
-             disc.wifi_channel,
+             ch,
              disc.inet_seq);
 }
 
