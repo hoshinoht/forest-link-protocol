@@ -378,7 +378,7 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
         TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
 }
 
-void MqttClient::publish_transfer_meta(uint32_t session_id,
+void MqttClient::publish_transfer_meta(uint16_t session_id,
                                        const char *filename,
                                        uint16_t src_node,
                                        uint16_t exit_node,
@@ -393,7 +393,7 @@ void MqttClient::publish_transfer_meta(uint32_t session_id,
     char meta_json[256];
     int meta_len = snprintf(meta_json,
                             sizeof(meta_json),
-                            "{\"session_id\":%" PRIu32 ",\"filename\":\"%s\","
+                            "{\"session_id\":%u,\"filename\":\"%s\","
                             "\"src_node\":\"0x%04X\",\"exit_node\":\"0x%04X\","
                             "\"total_size\":%" PRIu32 ",\"chunk_count\":%u,"
                             "\"fragment_size\":%u,\"crc32\":%" PRIu32 "}",
@@ -416,7 +416,7 @@ void MqttClient::publish_transfer_meta(uint32_t session_id,
     last_meta_session_id_ = session_id;
 
     ESP_LOGI(TAG,
-             "Published transfer meta: session=%" PRIu32
+             "Published transfer meta: session=%u"
              " file=%s size=%" PRIu32 " chunks=%u crc=%" PRIu32,
              session_id,
              filename,
@@ -425,7 +425,7 @@ void MqttClient::publish_transfer_meta(uint32_t session_id,
              crc32);
 }
 
-void MqttClient::publish_fragment(uint32_t session_id,
+void MqttClient::publish_fragment(uint16_t session_id,
                                   uint16_t seq,
                                   uint16_t src_node,
                                   const uint8_t *data,

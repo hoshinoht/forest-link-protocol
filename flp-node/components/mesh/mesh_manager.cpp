@@ -1,7 +1,7 @@
 /*
  * =============================================================================
  * mesh_manager.cpp — Role 2: ESP32 Mesh Brain
- * 
+ *
  * FR-MESH4  — Parse intent, reply as exit node if we have MQTT
  * FR-MESH6  — Adaptive protocol selection (ESP-NOW vs LoRa)
  * FR-MESH7  — Intent broadcast retry, max 3 attempts
@@ -38,6 +38,7 @@ constexpr uint32_t kQueueWaitMs = 100;
 constexpr uint32_t kDiscoveryIntervalMs = 10000;
 constexpr uint32_t kPruneIntervalMs = 5000;
 constexpr uint32_t kNeighborStaleTimeoutMs = 30000;
+constexpr uint32_t kEarlyStaleTimeoutMs = 15000;
 constexpr uint32_t kBiasIntervalMs = 10000;
 constexpr uint32_t kTelemetryIntervalMs = 30000;
 constexpr uint8_t kDiscoveryInternetFlag = 0x01;
@@ -60,6 +61,7 @@ const char *rx_transport_name(RxTransport source)
     }
 }
 
+/* Step 1f: compute hops_to_internet with sequence info */
 uint8_t compute_hops_to_internet(const RouteTable &route_table,
                                  bool has_internet)
 {
@@ -108,18 +110,27 @@ void MeshManager::init()
     /* Init buffer pool */
     buffer_pool_.init();
 
-    /* Create unified inbound packet queue (16 slots, pointer-based) */
-    packet_queue_ = xQueueCreate(kQueueDepth, sizeof(BufferSlab *));
-    assert(packet_queue_);
+    /* Step 8: Create dual-priority queues */
+    hi_pri_queue_ = xQueueCreate(kQueueDepth, sizeof(BufferSlab *));
+    lo_pri_queue_ = xQueueCreate(kQueueDepth, sizeof(BufferSlab *));
+    assert(hi_pri_queue_);
+    assert(lo_pri_queue_);
+
+    /* Legacy single queue kept for get_packet_queue() compatibility */
+    packet_queue_ = hi_pri_queue_;
 
     /* Create event group */
     events_ = xEventGroupCreate();
     assert(events_);
 
-    /* Pass unified queue and buffer pool to transports before init */
-    espnow_.set_packet_queue(packet_queue_);
+    /* Pass dual queues and buffer pool to transports */
+    espnow_.set_packet_queue(hi_pri_queue_); /* fallback */
+    espnow_.set_hi_pri_queue(hi_pri_queue_);
+    espnow_.set_lo_pri_queue(lo_pri_queue_);
     espnow_.set_buffer_pool(&buffer_pool_);
-    lora_.set_packet_queue(packet_queue_);
+    lora_.set_packet_queue(hi_pri_queue_); /* fallback */
+    lora_.set_hi_pri_queue(hi_pri_queue_);
+    lora_.set_lo_pri_queue(lo_pri_queue_);
     lora_.set_buffer_pool(&buffer_pool_);
 
     /* Init transports (WiFi must already be started for ESP-NOW) */
@@ -194,20 +205,42 @@ void MeshManager::run()
     while (true)
     {
         /*
-         * NFR-MESH2: Single blocking receive on unified queue — transports
-         * post BufferSlab* items directly, no polling indirection.
-         * Timeout drives periodic tasks (discovery, prune, ARQ tick).
+         * Step 8: Drain high-priority queue first, then low-priority.
+         * NFR-MESH2: Interrupt-driven via FreeRTOS queues, no polling.
          */
         BufferSlab *slab = nullptr;
-        for (uint8_t drain = 0; drain < kMaxQueueDrainPerLoop; drain++)
+        uint8_t drain = 0;
+
+        /* Always drain high-priority queue first */
+        while (drain < kMaxQueueDrainPerLoop)
         {
-            TickType_t wait = (drain == 0) ? pdMS_TO_TICKS(kQueueWaitMs) : 0;
-            if (xQueueReceive(packet_queue_, &slab, wait) != pdTRUE)
+            TickType_t wait = (drain == 0) ? pdMS_TO_TICKS(10) : 0;
+            if (xQueueReceive(hi_pri_queue_, &slab, wait) == pdTRUE)
+            {
+                process_slab(slab);
+                buffer_pool_.release(slab);
+                drain++;
+            }
+            else
             {
                 break;
             }
-            process_slab(slab);
-            buffer_pool_.release(slab);
+        }
+
+        /* Then drain low-priority queue */
+        while (drain < kMaxQueueDrainPerLoop)
+        {
+            TickType_t wait = (drain == 0) ? pdMS_TO_TICKS(kQueueWaitMs) : 0;
+            if (xQueueReceive(lo_pri_queue_, &slab, wait) == pdTRUE)
+            {
+                process_slab(slab);
+                buffer_pool_.release(slab);
+                drain++;
+            }
+            else
+            {
+                break;
+            }
         }
 
         /* Periodic tasks */
@@ -223,18 +256,49 @@ void MeshManager::run()
         /*
          * Prune stale neighbors (30s timeout) — only every 5 seconds to
          * avoid O(n) scan on every loop iteration.
+         * Step 2c: Also detect early stale (15s) for route error.
          */
         if (now - prune_timer_ms_ > kPruneIntervalMs)
         {
+            /* Step 2c: Detect early stale neighbors and send ROUTE_ERROR */
+            route_table_.detect_early_stale(kEarlyStaleTimeoutMs,
+                [this](uint16_t dead_addr, uint16_t inet_origin, uint16_t seq) {
+                    send_route_error(dead_addr, inet_origin, seq);
+                });
+
             route_table_.prune_stale(kNeighborStaleTimeoutMs);
             prune_timer_ms_ = now;
         }
 
-        /* Recalculate protocol bias every 10s */
+        /* Recalculate protocol bias every 10s + Step 7: ADR */
         if (now - bias_timer_ms_ > kBiasIntervalMs)
         {
             protocol_selector_.recalculate_bias();
             heap_monitor_.periodic_check();
+
+            /* Step 7: ADR-inspired adaptive spreading factor */
+            uint8_t target_sf = 7;
+            float lora_success = protocol_selector_.lora_success_rate();
+            if (lora_success < 0.3f && route_table_.get_count() < 2)
+            {
+                target_sf = 10;
+            }
+            else if (lora_success < 0.6f)
+            {
+                target_sf = 9;
+            }
+            else if (lora_success > 0.9f && route_table_.get_count() >= 3)
+            {
+                target_sf = 7;
+            }
+
+            if (target_sf != lora_.get_spreading_factor())
+            {
+                lora_.set_spreading_factor(target_sf);
+                ESP_LOGI(TAG, "ADR: SF changed to %u (success=%.0f%%, neighbors=%u)",
+                         target_sf, lora_success * 100, route_table_.get_count());
+            }
+
             bias_timer_ms_ = now;
         }
 
@@ -353,6 +417,9 @@ void MeshManager::process_slab(BufferSlab *slab)
             case PacketType::MESH_CMD:
                 handle_mesh_cmd(hdr, payload, payload_len);
                 break;
+            case PacketType::ROUTE_ERROR:
+                handle_route_error(hdr, payload, payload_len);
+                break;
             default:
                 ESP_LOGD(TAG,
                          "Unhandled packet type 0x%02X",
@@ -391,7 +458,7 @@ void MeshManager::process_slab(BufferSlab *slab)
     }
 }
 
-/* -- Task 3: Discovery with hops_to_internet tracking ------------------------- */
+/* -- Task 3: Discovery with DSDV sequence-numbered distance vector ------------ */
 
 void MeshManager::handle_discovery(const PacketHeader &hdr,
                                    RxTransport source,
@@ -416,14 +483,20 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         rx_transport = "LoRa";
     }
 
+    /* Extract wifi channel from flags bits 1-4 */
+    uint8_t disc_wifi_ch = (disc.flags >> 1) & 0x0F;
+
     ESP_LOGI(TAG,
-             "Discovery from 0x%04X via %s: inet=%u hops_inet=%u rssi=%d ch=%u",
+             "Discovery from 0x%04X via %s: inet=%u hops_inet=%u rssi=%d "
+             "ch=%u seq=%u origin=0x%04X",
              hdr.src_addr,
              rx_transport,
              (disc.flags & kDiscoveryInternetFlag) != 0U,
              disc.hops_to_internet,
              disc.rssi,
-             disc.wifi_channel);
+             disc_wifi_ch,
+             disc.inet_seq,
+             disc.inet_origin);
 
     if ((disc.flags & kDiscoveryInternetFlag) != 0U)
     {
@@ -435,28 +508,27 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
      * and we're not connected to an AP (relay node or disconnected exit),
      * switch to match so ESP-NOW can reach the mesh.
      */
-    if (disc.wifi_channel > 0 && !has_internet_)
+    if (disc_wifi_ch > 0 && !has_internet_)
     {
         uint8_t cur_ch = 0;
         wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&cur_ch, &sec);
-        if (cur_ch != disc.wifi_channel)
+        if (cur_ch != disc_wifi_ch)
         {
-            esp_wifi_set_channel(disc.wifi_channel, WIFI_SECOND_CHAN_NONE);
+            esp_wifi_set_channel(disc_wifi_ch, WIFI_SECOND_CHAN_NONE);
             ESP_LOGI(TAG,
                      "ESP-NOW channel synced: %u -> %u",
                      cur_ch,
-                     disc.wifi_channel);
+                     disc_wifi_ch);
         }
     }
 
     /*
-     * Store hops_to_internet from the discovery payload.
-     * process_slab already called update_neighbor with the correct
-     * transport/RSSI/hops from the BufferSlab, so we must not call
-     * update_neighbor again with hardcoded values that would overwrite them.
+     * Step 1e: Use DSDV sequence-numbered update instead of plain
+     * set_hops_to_internet. Only accept if sequence check passes.
      */
-    route_table_.set_hops_to_internet(hdr.src_addr, disc.hops_to_internet);
+    route_table_.update_inet_route(
+        hdr.src_addr, disc.hops_to_internet, disc.inet_seq, disc.inet_origin);
 
     /*
      * Respond to discovery requests only. Unicast discovery packets are already
@@ -470,11 +542,29 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             compute_hops_to_internet(route_table_, has_internet_);
         resp.rssi = 0;
 
-        /* Include our current channel so the peer can sync */
+        /* Pack WiFi channel into flags bits 1-4 */
         uint8_t resp_ch = 0;
         wifi_second_chan_t resp_sec = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&resp_ch, &resp_sec);
-        resp.wifi_channel = resp_ch;
+        resp.flags |= (resp_ch & 0x0F) << 1;
+
+        /* Step 1d: Populate sequence info */
+        if (has_internet_)
+        {
+            resp.inet_seq = my_inet_seq_;
+            resp.inet_origin = my_addr_;
+        }
+        else
+        {
+            auto best = route_table_.best_inet_route();
+            resp.inet_seq = best.seq;
+            resp.inet_origin = best.origin;
+        }
+
+        /* Step 7c: Encode current SF in flags bits 5-7 */
+        uint8_t sf_enc =
+            static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
+        resp.flags |= (sf_enc << 5);
 
         send_packet(hdr.src_addr,
                     PacketType::DISCOVERY,
@@ -483,10 +573,71 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
     }
 }
 
+/* -- Step 2: Route Error Propagation ------------------------------------------ */
+
+void MeshManager::send_route_error(uint16_t dead_addr, uint16_t inet_origin,
+                                   uint16_t last_seq)
+{
+    RouteErrorPayload rerr = {};
+    rerr.dead_addr = dead_addr;
+    rerr.inet_origin = inet_origin;
+    rerr.last_known_seq = last_seq;
+
+    ESP_LOGI(TAG, "Sending ROUTE_ERROR: dead=0x%04X origin=0x%04X seq=%u",
+             dead_addr, inet_origin, last_seq);
+
+    send_packet(BROADCAST_ADDR,
+                PacketType::ROUTE_ERROR,
+                reinterpret_cast<const uint8_t *>(&rerr),
+                sizeof(rerr));
+}
+
+void MeshManager::handle_route_error(const PacketHeader &hdr,
+                                     const uint8_t *payload,
+                                     size_t payload_len)
+{
+    if (payload_len < sizeof(RouteErrorPayload))
+    {
+        return;
+    }
+
+    RouteErrorPayload rerr;
+    memcpy(&rerr, payload, sizeof(rerr));
+
+    ESP_LOGI(TAG, "ROUTE_ERROR from 0x%04X: dead=0x%04X origin=0x%04X",
+             hdr.src_addr, rerr.dead_addr, rerr.inet_origin);
+
+    /* Check if our best route uses the dead address */
+    if (route_table_.invalidate_route_via(rerr.dead_addr))
+    {
+        /* We depend on this path — rebroadcast the error */
+        send_route_error(rerr.dead_addr, rerr.inet_origin, rerr.last_known_seq);
+    }
+}
+
 /* -- Forwarding --------------------------------------------------------------- */
 
 void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 {
+    /* Step 5b: Congestion-aware forwarding */
+    UBaseType_t hi_spaces = uxQueueSpacesAvailable(hi_pri_queue_);
+    UBaseType_t lo_spaces = uxQueueSpacesAvailable(lo_pri_queue_);
+    bool congested = (hi_spaces + lo_spaces) < 8;
+
+    if (congested)
+    {
+        PacketType t = hdr.type();
+        bool high_priority = (t == PacketType::ACK || t == PacketType::NACK ||
+                              t == PacketType::ROUTE_ERROR ||
+                              t == PacketType::TRANSFER_ACK);
+        if (!high_priority)
+        {
+            ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X",
+                     static_cast<uint8_t>(t), hdr.src_addr);
+            return;
+        }
+    }
+
     uint16_t next = route_table_.next_hop(hdr.dst_addr);
     if (next == BROADCAST_ADDR)
     {
@@ -518,7 +669,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
     send_raw(t, slab->data, slab->len, next);
 }
 
-/* -- Task 3: Discovery broadcast with computed hops_to_internet --------------- */
+/* -- Task 3: Discovery broadcast with DSDV + smart transport selection -------- */
 
 void MeshManager::send_discovery()
 {
@@ -528,27 +679,61 @@ void MeshManager::send_discovery()
         compute_hops_to_internet(route_table_, has_internet_);
     disc.rssi = 0;
 
-    /* Include current WiFi channel so relay nodes can auto-sync for ESP-NOW */
+    /* Pack WiFi channel into flags bits 1-4 */
     uint8_t ch = 0;
     wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&ch, &sec);
-    disc.wifi_channel = ch;
+    disc.flags |= (ch & 0x0F) << 1;
+
+    /* Step 1d: Populate DSDV sequence info */
+    if (has_internet_)
+    {
+        disc.inet_seq = ++my_inet_seq_;
+        disc.inet_origin = my_addr_;
+    }
+    else
+    {
+        auto best = route_table_.best_inet_route();
+        disc.inet_seq = best.seq;
+        disc.inet_origin = best.origin;
+    }
+
+    /* Step 7c: Encode current SF in flags bits 5-7 */
+    uint8_t sf_enc =
+        static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
+    disc.flags |= (sf_enc << 5);
+
+    /* Build raw packet for direct transport control */
+    uint8_t buf[MAX_MTU];
+    PacketHeader hdr = {};
+    hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
+    hdr.src_addr = my_addr_;
+    hdr.dst_addr = BROADCAST_ADDR;
+    hdr.set_ttl_hops(DEFAULT_TTL, 0);
+    hdr.seq_num = 0;
+    memcpy(buf, &hdr, PACKET_HEADER_SIZE);
+    memcpy(buf + PACKET_HEADER_SIZE, &disc, sizeof(disc));
+    size_t total = PACKET_HEADER_SIZE + sizeof(disc);
 
     /*
-     * Single send — discovery is already periodic (every 10s), so retrying
-     * here would block the main loop for up to 3.5s unnecessarily.
-     * send_broadcast_with_retry is reserved for infrequent TRANSFER_AD
-     * broadcasts where the extra reliability is worth the delay.
+     * Step 5a: Smart discovery transport selection.
+     * Always broadcast on ESP-NOW (fast, low cost).
+     * Only broadcast on LoRa if we have no ESP-NOW neighbors
+     * OR if we haven't heard from any neighbor in 20s (bootstrap).
      */
-    send_packet(BROADCAST_ADDR,
-                PacketType::DISCOVERY,
-                reinterpret_cast<const uint8_t *>(&disc),
-                sizeof(disc));
+    send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
+
+    if (route_table_.get_espnow_neighbor_count() == 0 ||
+        route_table_.oldest_contact_age_ms() > 20000)
+    {
+        send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
+    }
 
     ESP_LOGD(TAG,
-             "Sent discovery broadcast (hops_to_inet=%u ch=%u)",
+             "Sent discovery broadcast (hops_to_inet=%u ch=%u seq=%u)",
              disc.hops_to_internet,
-             disc.wifi_channel);
+             ch,
+             disc.inet_seq);
 }
 
 /* -- Mesh relay layer --------------------------------------------------------- */
@@ -820,7 +1005,7 @@ void MeshManager::start_file_transfer(const char *filename,
 {
     bool mqtt_ready = mqtt_client_ && mqtt_client_->is_connected();
     transfer_engine_.start_file_transfer(
-        filename, data, size, has_internet_, mqtt_ready);
+        filename, data, size, has_internet_, mqtt_ready, get_hops_to_internet());
 }
 
 /* -- send_packet / send_raw --------------------------------------------------- */
@@ -896,4 +1081,10 @@ void MeshManager::send_raw(Transport transport,
 
     uint32_t latency = static_cast<uint32_t>(esp_timer_get_time() / 1000) - t0;
     protocol_selector_.report_tx_result(transport, rc == 0, latency);
+
+    /* Step 3d: Report link TX result for ETX calculation */
+    if (peer_addr != BROADCAST_ADDR)
+    {
+        route_table_.report_link_tx(peer_addr, rc == 0);
+    }
 }

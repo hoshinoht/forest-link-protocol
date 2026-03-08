@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <cstring>
-
 #include "esp_timer.h"
 #include "packet.hpp"
 
@@ -25,6 +24,12 @@ struct NeighborEntry
     bool espnow_reachable;
     bool lora_reachable;
     bool has_internet;
+    uint16_t inet_seq;       /* sequence number of the internet route */
+    uint16_t inet_origin;    /* which exit node this route comes from */
+    uint16_t tx_count;       /* packets sent to this neighbor */
+    uint16_t tx_success;     /* successful transmissions */
+    uint16_t etx_x100;      /* ETX * 100 (fixed-point, e.g. 150 = 1.5 ETX) */
+    bool early_stale_sent;   /* true if we already sent ROUTE_ERROR for this neighbor */
 };
 
 /* All RouteTable accesses occur on the single mesh_task — no mutex needed. */
@@ -54,6 +59,7 @@ class RouteTable
                 neighbors_[i].last_seen_ms = now;
                 neighbors_[i].espnow_reachable = espnow;
                 neighbors_[i].lora_reachable = lora;
+                neighbors_[i].early_stale_sent = false;
                 if (hops_to_inet != ROUTE_HOPS_UNKNOWN)
                 {
                     neighbors_[i].hops_to_internet = hops_to_inet;
@@ -62,10 +68,19 @@ class RouteTable
             }
         }
 
+        NeighborEntry entry = {};
+        entry.addr = addr;
+        entry.rssi = rssi;
+        entry.hop_count = hops;
+        entry.hops_to_internet = hops_to_inet;
+        entry.last_seen_ms = now;
+        entry.espnow_reachable = espnow;
+        entry.lora_reachable = lora;
+        entry.etx_x100 = 100; /* default ETX = 1.0 */
+
         if (count_ < MAX_NEIGHBORS)
         {
-            neighbors_[count_] = {
-                addr, rssi, hops, hops_to_inet, now, espnow, lora, false};
+            neighbors_[count_] = entry;
             count_++;
         }
         else
@@ -81,11 +96,58 @@ class RouteTable
                     oldest_idx = i;
                 }
             }
-            neighbors_[oldest_idx] = {
-                addr, rssi, hops, hops_to_inet, now, espnow, lora, false};
+            neighbors_[oldest_idx] = entry;
         }
     }
 
+    /* Step 1c: DSDV sequence-numbered route update */
+    bool update_inet_route(uint16_t neighbor_addr, uint8_t hops_inet,
+                           uint16_t seq, uint16_t origin)
+    {
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr != neighbor_addr)
+            {
+                continue;
+            }
+            /* Higher seq from same origin: accept unconditionally */
+            if (origin == neighbors_[i].inet_origin && seq > neighbors_[i].inet_seq)
+            {
+                neighbors_[i].hops_to_internet = hops_inet;
+                neighbors_[i].inet_seq = seq;
+                neighbors_[i].inet_origin = origin;
+                return true;
+            }
+            /* Same seq: accept only if lower hop count */
+            if (origin == neighbors_[i].inet_origin && seq == neighbors_[i].inet_seq)
+            {
+                if (hops_inet < neighbors_[i].hops_to_internet)
+                {
+                    neighbors_[i].hops_to_internet = hops_inet;
+                    return true;
+                }
+                return false;
+            }
+            /* Different origin: accept if better route */
+            if (origin != neighbors_[i].inet_origin)
+            {
+                if (seq > neighbors_[i].inet_seq ||
+                    hops_inet < neighbors_[i].hops_to_internet)
+                {
+                    neighbors_[i].hops_to_internet = hops_inet;
+                    neighbors_[i].inet_seq = seq;
+                    neighbors_[i].inet_origin = origin;
+                    return true;
+                }
+                return false;
+            }
+            /* seq < current: stale, reject */
+            return false;
+        }
+        return false;
+    }
+
+    /* Step 3c: ETX-weighted composite cost routing */
     uint16_t next_hop(uint16_t dst_addr) const
     {
         for (uint8_t i = 0; i < count_; i++)
@@ -97,21 +159,141 @@ class RouteTable
         }
 
         uint16_t best_addr = BROADCAST_ADDR;
-        uint8_t best_hops_inet = ROUTE_HOPS_UNKNOWN;
-        int8_t best_rssi = ROUTE_RSSI_INVALID;
+        uint32_t best_cost = UINT32_MAX;
         for (uint8_t i = 0; i < count_; i++)
         {
-            uint8_t h = neighbors_[i].hops_to_internet;
-            int8_t r = neighbors_[i].rssi;
-            if (h < best_hops_inet || (h == best_hops_inet && r > best_rssi))
+            if (neighbors_[i].hops_to_internet >= ROUTE_HOPS_UNKNOWN)
             {
-                best_hops_inet = h;
-                best_rssi = r;
+                continue;
+            }
+            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
+                          + neighbors_[i].etx_x100;
+            if (cost < best_cost)
+            {
+                best_cost = cost;
                 best_addr = neighbors_[i].addr;
             }
         }
 
         return best_addr;
+    }
+
+    /* Step 3b: Report TX outcome for ETX calculation */
+    void report_link_tx(uint16_t addr, bool success)
+    {
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == addr)
+            {
+                neighbors_[i].tx_count++;
+                if (success)
+                {
+                    neighbors_[i].tx_success++;
+                }
+                uint16_t succ = neighbors_[i].tx_success > 0
+                                    ? neighbors_[i].tx_success
+                                    : 1;
+                neighbors_[i].etx_x100 =
+                    static_cast<uint16_t>((neighbors_[i].tx_count * 100) / succ);
+                if (neighbors_[i].etx_x100 > 1000)
+                {
+                    neighbors_[i].etx_x100 = 1000;
+                }
+                return;
+            }
+        }
+    }
+
+    /* Step 2c: Detect early stale neighbors for route error propagation */
+    template <typename Callback>
+    void detect_early_stale(uint32_t early_ms, Callback cb)
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].early_stale_sent)
+            {
+                continue;
+            }
+            if ((now - neighbors_[i].last_seen_ms) > early_ms)
+            {
+                neighbors_[i].early_stale_sent = true;
+                cb(neighbors_[i].addr,
+                   neighbors_[i].inet_origin,
+                   neighbors_[i].inet_seq);
+            }
+        }
+    }
+
+    /* Step 1f: Get best inet route info (hops, seq, origin) */
+    struct InetRouteInfo
+    {
+        uint8_t hops;
+        uint16_t seq;
+        uint16_t origin;
+    };
+
+    InetRouteInfo best_inet_route() const
+    {
+        InetRouteInfo best = {ROUTE_HOPS_UNKNOWN, 0, 0};
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].hops_to_internet < best.hops)
+            {
+                best.hops = neighbors_[i].hops_to_internet;
+                best.seq = neighbors_[i].inet_seq;
+                best.origin = neighbors_[i].inet_origin;
+            }
+        }
+        return best;
+    }
+
+    /* Step 2e: Invalidate routes through a dead neighbor */
+    bool invalidate_route_via(uint16_t dead_addr)
+    {
+        bool affected = false;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == dead_addr)
+            {
+                neighbors_[i].hops_to_internet = ROUTE_HOPS_UNKNOWN;
+                affected = true;
+            }
+        }
+        return affected;
+    }
+
+    /* Step 5a: Count ESP-NOW reachable neighbors */
+    uint8_t get_espnow_neighbor_count() const
+    {
+        uint8_t count = 0;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].espnow_reachable)
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /* Step 5a: Age of oldest contact (ms since last heard from any neighbor) */
+    uint32_t oldest_contact_age_ms() const
+    {
+        if (count_ == 0)
+        {
+            return UINT32_MAX;
+        }
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        uint32_t newest = 0;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].last_seen_ms > newest)
+            {
+                newest = neighbors_[i].last_seen_ms;
+            }
+        }
+        return now - newest;
     }
 
     void prune_stale(uint32_t max_age_ms)

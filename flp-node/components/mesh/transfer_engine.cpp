@@ -17,7 +17,6 @@ using namespace flp;
 
 static const char *TAG = "xfer_eng";
 static constexpr uint32_t FAST_ARQ_TIMEOUT_MS = 700;
-static constexpr uint32_t ELECTION_TIMEOUT_MS = 3000;
 static constexpr uint32_t BROADCAST_INITIAL_BACKOFF_MS = 500;
 
 constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
@@ -41,10 +40,6 @@ void TransferEngine::init(EventGroupHandle_t events,
                    const uint8_t *data,
                    size_t len)
             {
-                /*
-                 * Route through mesh — send_fn_ handles header construction,
-                 * route table lookup, transport selection, and next-hop relay.
-                 */
                 send_fn_(dst, type, data, len, seq);
             });
     }
@@ -67,18 +62,19 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
     TransferAdPayload ad;
     memcpy(&ad, payload, sizeof(ad));
 
-    ESP_LOGI(TAG,
-             "Transfer ad from 0x%04X: file=%s size=%" PRIu32
-             " frags=%u session=%" PRIu32,
-             hdr.src_addr,
-             ad.filename,
-             ad.file_size,
-             ad.fragment_count,
-             ad.session_id);
+    uint16_t frag_size = static_cast<uint16_t>(ad.fragment_size_d8) * 8;
+    uint16_t frag_count = (frag_size > 0)
+        ? static_cast<uint16_t>((ad.file_size + frag_size - 1) / frag_size)
+        : 0;
 
-    /* Store the filename so handle_data can use it for MQTT publish */
-    strncpy(transfer_.filename, ad.filename, sizeof(transfer_.filename) - 1);
-    transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
+    ESP_LOGI(TAG,
+             "Transfer ad from 0x%04X: size=%" PRIu32
+             " frag_size=%u frags=%u session=%u",
+             hdr.src_addr,
+             ad.file_size,
+             frag_size,
+             frag_count,
+             ad.session_id);
 
     /* If we have internet, respond as exit node candidate */
     if (has_internet)
@@ -103,20 +99,19 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         /* Set up ACK path: arq_[0] for sending ACKs back to source */
         arq_[0].set_peer_addr(hdr.src_addr);
 
-        /* Publish complete transfer meta to MQTT (Fix 5) */
-        if (forward_meta_fn_)
-        {
-            forward_meta_fn_(ad.session_id,
-                             ad.filename,
-                             hdr.src_addr,
-                             ad.file_size,
-                             ad.fragment_count,
-                             ad.fragment_size,
-                             ad.crc32);
-        }
+        /*
+         * Defer meta publication until fragment 0 arrives with filename.
+         * Store ad info for later.
+         */
+        pending_meta_.file_size = ad.file_size;
+        pending_meta_.fragment_count = frag_count;
+        pending_meta_.fragment_size = frag_size;
+        pending_meta_.crc16 = ad.crc16;
+        pending_meta_.waiting = true;
+        transfer_.filename[0] = '\0'; /* will be filled by frag 0 */
 
         ESP_LOGI(TAG,
-                 "Exit node mode: session=%" PRIu32 " source=0x%04X",
+                 "Exit node mode: session=%u source=0x%04X (awaiting filename)",
                  active_session_id_,
                  source_addr_);
     }
@@ -161,14 +156,52 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
         /* Send ACK back to source — routed through mesh */
         send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
 
+        const uint8_t *fwd_data = payload;
+        size_t fwd_len = payload_len;
+
+        /*
+         * Fragment 0 carries filename prefix: [len:1][filename:N][data...]
+         * Extract filename and publish deferred meta.
+         */
+        if (hdr.seq_num == 0 && pending_meta_.waiting && payload_len >= 2)
+        {
+            uint8_t name_len = payload[0];
+            if (name_len > 0 && (1U + name_len) <= payload_len &&
+                name_len < sizeof(transfer_.filename))
+            {
+                memcpy(transfer_.filename, payload + 1, name_len);
+                transfer_.filename[name_len] = '\0';
+
+                /* Advance past filename prefix for MQTT forwarding */
+                fwd_data = payload + 1 + name_len;
+                fwd_len = payload_len - 1 - name_len;
+
+                /* Now publish the deferred transfer meta */
+                if (forward_meta_fn_)
+                {
+                    forward_meta_fn_(active_session_id_,
+                                     transfer_.filename,
+                                     source_addr_,
+                                     pending_meta_.file_size,
+                                     pending_meta_.fragment_count,
+                                     pending_meta_.fragment_size,
+                                     static_cast<uint32_t>(pending_meta_.crc16));
+                }
+                pending_meta_.waiting = false;
+
+                ESP_LOGI(TAG, "Extracted filename from frag 0: %s",
+                         transfer_.filename);
+            }
+        }
+
         /* Forward fragment to MQTT */
         if (forward_to_mqtt_fn_)
         {
             forward_to_mqtt_fn_(active_session_id_,
                                 hdr.seq_num,
                                 source_addr_,
-                                payload,
-                                payload_len,
+                                fwd_data,
+                                fwd_len,
                                 transfer_.filename);
         }
         return;
@@ -217,7 +250,8 @@ void TransferEngine::start_file_transfer(const char *filename,
                                          const uint8_t *data,
                                          size_t size,
                                          bool has_internet,
-                                         bool has_mqtt)
+                                         bool has_mqtt,
+                                         uint8_t hops_to_internet)
 {
     if (transfer_.active)
     {
@@ -228,10 +262,10 @@ void TransferEngine::start_file_transfer(const char *filename,
     fec_encoder_.reset();
 
     /*
-     * Use payload size that is safe for both LoRa and ESP-NOW so the
-     * adaptive selector can choose ESP-NOW fast path without drops.
+     * Align fragment size to multiples of 8 for compact d8 encoding.
+     * ESPNOW_MAX_PAYLOAD = 242, aligned down to 240.
      */
-    size_t frag_payload = ESPNOW_MAX_PAYLOAD;
+    size_t frag_payload = (ESPNOW_MAX_PAYLOAD / 8) * 8;
 
     transfer_.data = data;
     transfer_.size = size;
@@ -240,7 +274,8 @@ void TransferEngine::start_file_transfer(const char *filename,
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
     transfer_.next_fragment = 0;
     transfer_.active = true;
-    transfer_.session_id = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    transfer_.session_id =
+        static_cast<uint16_t>(esp_timer_get_time() / 1000);
     strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
 
@@ -253,7 +288,7 @@ void TransferEngine::start_file_transfer(const char *filename,
 
         ESP_LOGI(TAG,
                  "Local-exit transfer: %s (%zu bytes, %u fragments, "
-                 "session=%" PRIu32 ")",
+                 "session=%u)",
                  filename,
                  size,
                  transfer_.fragment_count,
@@ -281,31 +316,38 @@ void TransferEngine::start_file_transfer(const char *filename,
 
     ESP_LOGI(
         TAG,
-        "Starting file transfer: %s (%zu bytes, %u fragments, session=%" PRIu32
-        ")",
+        "Starting file transfer: %s (%zu bytes, %u fragments, session=%u)",
         filename,
         size,
         transfer_.fragment_count,
         transfer_.session_id);
 
-    /* Broadcast TRANSFER_AD with retry */
+    /* Build compact TRANSFER_AD (no filename, no fragment_count) */
     TransferAdPayload ad = {};
     ad.session_id = transfer_.session_id;
     ad.file_size = static_cast<uint32_t>(size);
-    ad.fragment_count = transfer_.fragment_count;
-    ad.fragment_size = transfer_.fragment_size;
-    ad.crc32 = esp_rom_crc32_le(0, data, size);
-    strncpy(ad.filename, filename, sizeof(ad.filename) - 1);
+    ad.fragment_size_d8 = static_cast<uint8_t>(transfer_.fragment_size / 8);
+    ad.crc16 = static_cast<uint16_t>(
+        esp_rom_crc32_le(0, data, size) & 0xFFFF);
 
-    /* Start election */
+    /* Start election with adaptive timeout */
     candidate_count_ = 0;
     election_active_ = true;
     election_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
+    static constexpr uint32_t BASE_ELECTION_MS = 3000;
+    static constexpr uint32_t PER_HOP_ELECTION_MS = 1000;
+    static constexpr uint32_t MAX_ELECTION_MS = 8000;
+    election_timeout_ms_ = BASE_ELECTION_MS +
+        (hops_to_internet * PER_HOP_ELECTION_MS);
+    if (election_timeout_ms_ > MAX_ELECTION_MS)
+    {
+        election_timeout_ms_ = MAX_ELECTION_MS;
+    }
+
     /*
-     * Fix 1: Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
-     * BROADCAST_ADDR is excluded from forwarding in process_slab, meaning
-     * exit nodes >1 hop away would never see the ad.
+     * Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
+     * BROADCAST_ADDR is excluded from forwarding in process_slab.
      */
     send_broadcast_with_retry(PacketType::TRANSFER_AD,
                               reinterpret_cast<const uint8_t *>(&ad),
@@ -339,7 +381,7 @@ void TransferEngine::tick(uint32_t now_ms)
 void TransferEngine::election_timeout_tick(uint32_t now_ms)
 {
     if (!election_active_ ||
-        (now_ms - election_start_ms_ <= ELECTION_TIMEOUT_MS))
+        (now_ms - election_start_ms_ <= election_timeout_ms_))
     {
         return;
     }
@@ -386,7 +428,6 @@ void TransferEngine::transfer_tick()
     /* Local-exit fast path: publish fragments directly to MQTT, no ARQ */
     if (local_exit_)
     {
-        /* Pace: publish up to 4 fragments per tick to avoid starving other tasks */
         constexpr uint8_t kLocalExitBatchSize = 2;
         uint8_t sent = 0;
         while (transfer_.next_fragment < transfer_.fragment_count &&
@@ -452,7 +493,6 @@ void TransferEngine::transfer_tick()
         for (uint8_t r = 0; r < redist_count_; r++)
         {
             uint16_t seq = redist_pending_[r];
-            /* Pick a surviving ARQ */
             uint8_t target = 0;
             uint8_t rr = seq % alive_count;
             uint8_t cnt = 0;
@@ -482,7 +522,6 @@ void TransferEngine::transfer_tick()
             }
             else
             {
-                /* Still can't fit, keep in queue */
                 redist_pending_[new_count++] = seq;
             }
         }
@@ -490,8 +529,8 @@ void TransferEngine::transfer_tick()
     }
 
     /*
-     * Round-robin fragment assignment across alive exit nodes
-     * Sequence layout: every (FEC_GROUP_SIZE+1)th seq is a parity slot
+     * Round-robin fragment assignment across alive exit nodes.
+     * Fragment 0 carries a filename prefix: [len:1][filename:N][data...]
      */
     while (transfer_.next_fragment < transfer_.fragment_count)
     {
@@ -499,7 +538,6 @@ void TransferEngine::transfer_tick()
         uint8_t arq_idx = transfer_.next_fragment % transfer_.exit_node_count;
         if (!transfer_.exit_node_alive[arq_idx])
         {
-            /* Find next alive node */
             bool found = false;
             for (uint8_t j = 1; j < transfer_.exit_node_count; j++)
             {
@@ -526,7 +564,6 @@ void TransferEngine::transfer_tick()
 
         if (is_parity_slot)
         {
-            /* Send parity fragment */
             int ret = arq_[arq_idx].send_fragment(
                 seq, fec_encoder_.parity_data(), fec_encoder_.parity_len());
             if (ret < 0)
@@ -546,7 +583,6 @@ void TransferEngine::transfer_tick()
                 static_cast<size_t>(data_idx) * transfer_.fragment_size;
             if (offset >= transfer_.size)
             {
-                /* Past end of file data — skip (tail parity will follow) */
                 transfer_.next_fragment++;
                 continue;
             }
@@ -555,21 +591,40 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
-            int ret = arq_[arq_idx].send_fragment(
-                seq, transfer_.data + offset, frag_len);
-            if (ret < 0)
-            {
-                break;
-            }
-
-            /* Ingest into FEC encoder */
-            fec_encoder_.ingest(transfer_.data + offset, frag_len);
-
             /*
-             * If this was the last data fragment and the group is not
-             * complete, the next seq should be a parity slot emitted by
-             * the tail-flush logic below
+             * Fragment 0 (seq=0): prepend filename so exit node
+             * can publish transfer meta after receiving it.
              */
+            if (seq == 0)
+            {
+                uint8_t name_len = static_cast<uint8_t>(
+                    strnlen(transfer_.filename, sizeof(transfer_.filename) - 1));
+                uint8_t frag0_buf[MAX_MTU];
+                frag0_buf[0] = name_len;
+                memcpy(frag0_buf + 1, transfer_.filename, name_len);
+                memcpy(frag0_buf + 1 + name_len,
+                       transfer_.data + offset, frag_len);
+                size_t total_len = 1 + name_len + frag_len;
+
+                int ret = arq_[arq_idx].send_fragment(
+                    seq, frag0_buf, total_len);
+                if (ret < 0)
+                {
+                    break;
+                }
+                /* Ingest only the actual data into FEC */
+                fec_encoder_.ingest(transfer_.data + offset, frag_len);
+            }
+            else
+            {
+                int ret = arq_[arq_idx].send_fragment(
+                    seq, transfer_.data + offset, frag_len);
+                if (ret < 0)
+                {
+                    break;
+                }
+                fec_encoder_.ingest(transfer_.data + offset, frag_len);
+            }
         }
 
         transfer_.next_fragment++;
@@ -619,7 +674,6 @@ void TransferEngine::exit_node_health_tick(uint32_t now_ms)
             continue;
         }
 
-        /* Check if this ARQ has unacked in-flight fragments */
         bool has_pending = arq_[i].get_base_seq() < arq_[i].get_next_seq();
         if (!has_pending)
         {
@@ -642,12 +696,10 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 {
     transfer_.exit_node_alive[dead_idx] = false;
 
-    /* Collect unacked fragment sequences from the dead ARQ's window */
     uint16_t base = arq_[dead_idx].get_base_seq();
     uint16_t next = arq_[dead_idx].get_next_seq();
     arq_[dead_idx].reset_sender();
 
-    /* Count surviving exit nodes */
     uint8_t alive_count = 0;
     uint8_t first_alive = 0;
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
@@ -668,15 +720,9 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
         return;
     }
 
-    /*
-     * Re-enqueue unacked fragments by resending them through surviving ARQs.
-     * The fragments between base and next were in the dead ARQ's window but
-     * never ACKed. We re-send them via surviving exit nodes.
-     */
     uint16_t redistributed = 0;
     for (uint16_t seq = base; seq < next; seq++)
     {
-        /* Pick a surviving ARQ via round-robin among alive nodes */
         uint8_t target = first_alive;
         uint8_t rr = seq % alive_count;
         uint8_t count = 0;
@@ -693,7 +739,6 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
             }
         }
 
-        /* Compute fragment data offset */
         size_t offset = static_cast<size_t>(seq) * transfer_.fragment_size;
         size_t remain = transfer_.size - offset;
         size_t frag_len = (remain < transfer_.fragment_size)
@@ -708,7 +753,6 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
         else if (redist_count_ <
                  sizeof(redist_pending_) / sizeof(redist_pending_[0]))
         {
-            /* Queue for retry on next tick */
             redist_pending_[redist_count_++] = seq;
         }
         else

@@ -299,7 +299,25 @@ void LoraTransport::rx_task_func(void *arg)
 
             ESP_LOGD(TAG, "RX %zu bytes, RSSI=%d", slab->len, slab->rssi);
 
-            if (self->packet_queue_)
+            /* Step 8: Route to priority queue based on packet type */
+            if (self->hi_pri_queue_ && self->lo_pri_queue_ &&
+                slab->len >= 1)
+            {
+                PacketType ptype = static_cast<PacketType>(slab->data[0] & 0x3F);
+                bool is_high_pri =
+                    (ptype == PacketType::ACK || ptype == PacketType::NACK ||
+                     ptype == PacketType::DISCOVERY ||
+                     ptype == PacketType::ROUTE_ERROR ||
+                     ptype == PacketType::TRANSFER_ACK ||
+                     ptype == PacketType::ROUTE_REPLY);
+                QueueHandle_t target =
+                    is_high_pri ? self->hi_pri_queue_ : self->lo_pri_queue_;
+                if (xQueueSend(target, &slab, 0) != pdTRUE)
+                {
+                    self->buffer_pool_->release(slab);
+                }
+            }
+            else if (self->packet_queue_)
             {
                 xQueueSend(self->packet_queue_, &slab, 0);
             }
@@ -478,6 +496,30 @@ void LoraTransport::deinit()
 
     initialized_ = false;
     ESP_LOGI(TAG, "LoRa transport deinitialized");
+}
+
+/* ── Step 7: Adaptive Spreading Factor ─────────────────────────────────── */
+
+void LoraTransport::set_spreading_factor(uint8_t sf)
+{
+    /* Clamp to SF7-SF10: SF<7 has poor range, SF>10 is too slow for mesh */
+    if (sf < 7)
+    {
+        sf = 7;
+    }
+    else if (sf > 10)
+    {
+        sf = 10;
+    }
+
+    if (sf == current_sf_)
+    {
+        return;
+    }
+
+    current_sf_ = sf;
+    configure(2450000000, sf, 800000);
+    ESP_LOGI(TAG, "SF changed to %u", sf);
 }
 
 /* ── Configure ─────────────────────────────────────────────────────────── */

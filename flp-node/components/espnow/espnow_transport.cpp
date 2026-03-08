@@ -216,8 +216,28 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
     slab->source = RxTransport::ESPNOW;
     slab->rssi = rssi;
 
-    /* ESP-NOW recv callback runs in WiFi task context (not ISR) */
-    xQueueSend(s_instance->packet_queue_, &slab, 0);
+    /* Step 8: Route to priority queue based on packet type */
+    if (s_instance->hi_pri_queue_ && s_instance->lo_pri_queue_ &&
+        slab->len >= 1)
+    {
+        PacketType ptype = static_cast<PacketType>(slab->data[0] & 0x3F);
+        bool is_high_pri =
+            (ptype == PacketType::ACK || ptype == PacketType::NACK ||
+             ptype == PacketType::DISCOVERY ||
+             ptype == PacketType::ROUTE_ERROR ||
+             ptype == PacketType::TRANSFER_ACK ||
+             ptype == PacketType::ROUTE_REPLY);
+        QueueHandle_t target =
+            is_high_pri ? s_instance->hi_pri_queue_ : s_instance->lo_pri_queue_;
+        if (xQueueSend(target, &slab, 0) != pdTRUE)
+        {
+            s_instance->buffer_pool_->release(slab);
+        }
+    }
+    else
+    {
+        xQueueSend(s_instance->packet_queue_, &slab, 0);
+    }
 }
 
 void EspNowTransport::on_send(const esp_now_send_info_t *info,

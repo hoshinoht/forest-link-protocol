@@ -113,6 +113,14 @@ class LoraTransport : public ITransport
 
     void configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz);
 
+    /* Step 7: ADR — adaptive spreading factor */
+    void set_spreading_factor(uint8_t sf);
+    uint8_t get_spreading_factor() const { return current_sf_; }
+
+    /* Step 8: Dual-priority queue support */
+    void set_hi_pri_queue(QueueHandle_t q) { hi_pri_queue_ = q; }
+    void set_lo_pri_queue(QueueHandle_t q) { lo_pri_queue_ = q; }
+
   private:
     /* SX1280 command-based SPI helpers */
     void write_command(uint8_t cmd, const uint8_t *params, size_t len);
@@ -143,6 +151,9 @@ class LoraTransport : public ITransport
     TaskHandle_t rx_task_ = nullptr;
     SemaphoreHandle_t tx_done_sem_ = nullptr;
     bool initialized_ = false;
+    uint8_t current_sf_ = 7;
+    QueueHandle_t hi_pri_queue_ = nullptr;
+    QueueHandle_t lo_pri_queue_ = nullptr;
 };
 
 } /* namespace flp */

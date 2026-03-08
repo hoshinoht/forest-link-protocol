@@ -49,6 +49,7 @@ class OledDisplay
     bool dimmed_ = false;
     int scroll_offset_ = 0;
     bool transfer_was_active_ = false;
+    bool show_complete_ = false;
     int64_t transfer_done_us_ = 0;
 };
 
