@@ -243,6 +243,24 @@ void MeshManager::run()
             }
         }
 
+        /*
+         * Fix 1: Drain deferred ESP-NOW peer registrations here in the mesh
+         * task — NOT inside on_recv (WiFi driver task) to avoid deadlock on
+         * ESP-NOW internal locks.
+         */
+        espnow_.drain_pending_peers();
+
+        /*
+         * Fix 7: Drain deferred ESP-NOW broadcast peer update requested by
+         * the WiFi event callback. The actual del/add peer calls must happen
+         * here (mesh task) — not inside the WiFi event loop task.
+         */
+        if (espnow_peer_update_pending_.exchange(false,
+                                                 std::memory_order_acq_rel))
+        {
+            espnow_.update_broadcast_peer();
+        }
+
         /* Periodic tasks */
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
@@ -275,6 +293,16 @@ void MeshManager::run()
         {
             protocol_selector_.recalculate_bias();
             heap_monitor_.periodic_check();
+
+            /* Fix 12: Log buffer pool exhaustion count (safe to log here —
+             * mesh task context, not WiFi driver task). */
+            uint32_t exhaustions = buffer_pool_.get_exhaustion_count();
+            if (exhaustions > 0)
+            {
+                ESP_LOGW(TAG,
+                         "Buffer pool exhausted %lu time(s) total",
+                         exhaustions);
+            }
 
             /* Step 7: ADR-inspired adaptive spreading factor */
             uint8_t target_sf = 7;
@@ -510,16 +538,25 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
      */
     if (disc_wifi_ch > 0 && !has_internet_)
     {
-        uint8_t cur_ch = 0;
-        wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
-        esp_wifi_get_channel(&cur_ch, &sec);
-        if (cur_ch != disc_wifi_ch)
+        /*
+         * Fix 2: Only call esp_wifi_set_channel() when the channel actually
+         * differs from what we last set. Redundant calls during active
+         * ESP-NOW operation can corrupt peer channel state.
+         * current_channel_ is initialised to 0; query the driver on first use.
+         */
+        if (current_channel_ == 0)
+        {
+            wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+            esp_wifi_get_channel(&current_channel_, &sec);
+        }
+        if (current_channel_ != disc_wifi_ch)
         {
             esp_wifi_set_channel(disc_wifi_ch, WIFI_SECOND_CHAN_NONE);
             ESP_LOGI(TAG,
                      "ESP-NOW channel synced: %u -> %u",
-                     cur_ch,
+                     current_channel_,
                      disc_wifi_ch);
+            current_channel_ = disc_wifi_ch;
         }
     }
 
@@ -1067,7 +1104,9 @@ void MeshManager::send_raw(Transport transport,
                            size_t len,
                            uint16_t peer_addr)
 {
-    uint32_t t0 = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    /* Fix 9: use int64_t to avoid truncation of esp_timer_get_time() µs
+     * values before the subtraction; cast to ms only for the final result. */
+    int64_t t0_us = esp_timer_get_time();
     int rc;
 
     if (transport == Transport::ESPNOW)
@@ -1079,7 +1118,8 @@ void MeshManager::send_raw(Transport transport,
         rc = lora_.send(peer_addr, data, len);
     }
 
-    uint32_t latency = static_cast<uint32_t>(esp_timer_get_time() / 1000) - t0;
+    uint32_t latency = static_cast<uint32_t>(
+        (esp_timer_get_time() - t0_us) / 1000);
     protocol_selector_.report_tx_result(transport, rc == 0, latency);
 
     /* Step 3d: Report link TX result for ETX calculation */

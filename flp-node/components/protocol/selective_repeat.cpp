@@ -216,7 +216,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
     if (!recv_bitmap_)
     {
         ESP_LOGE(TAG, "Failed to allocate bitmap (%zu bytes)", bitmap_bytes);
-        free(reassembly_buf_);
+        heap_caps_free(reassembly_buf_);
         reassembly_buf_ = nullptr;
         return false;
     }
@@ -229,7 +229,7 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         ESP_LOGE(TAG, "Failed to allocate NACK cooldown array");
         free(recv_bitmap_);
         recv_bitmap_ = nullptr;
-        free(reassembly_buf_);
+        heap_caps_free(reassembly_buf_);
         reassembly_buf_ = nullptr;
         return false;
     }
@@ -264,20 +264,73 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
     /* Feed to FEC decoder before anything else so recovery can reduce NACKs */
     bool recovered = fec_decoder_.ingest(seq, data, len, is_parity);
 
-    /* If FEC recovered a missing fragment, insert it recursively */
+    /*
+     * Fix 11: Process the recovered fragment inline instead of calling
+     * receive_fragment() recursively to avoid unbounded stack growth.
+     * A recovered fragment is always a data fragment (never a parity slot),
+     * so we skip the FEC-ingest step for it and go straight to the
+     * bitmap/reassembly logic below by temporarily substituting seq/data/len.
+     */
     if (recovered)
     {
-        ESP_LOGI(TAG,
-                 "FEC recovered seq=%u from group",
-                 fec_decoder_.recovered_seq());
-        receive_fragment(fec_decoder_.recovered_seq(),
-                         fec_decoder_.recovered_data(),
-                         fec_decoder_.recovered_len());
+        uint16_t rec_seq = fec_decoder_.recovered_seq();
+        const uint8_t *rec_data = fec_decoder_.recovered_data();
+        size_t rec_len = fec_decoder_.recovered_len();
+
+        ESP_LOGI(TAG, "FEC recovered seq=%u from group", rec_seq);
+
+        /* Validate range */
+        if (rec_seq < total_fragments_)
+        {
+            size_t bmap_bytes = (total_fragments_ + 7) / 8;
+            uint16_t rbi = rec_seq / 8;
+            uint8_t rbm = 1 << (rec_seq % 8);
+            if (rbi < bmap_bytes && !(recv_bitmap_[rbi] & rbm))
+            {
+                recv_bitmap_[rbi] |= rbm;
+                fragments_received_++;
+
+                if (send_cb_)
+                {
+                    send_cb_(peer_addr_, PacketType::ACK, rec_seq, nullptr, 0);
+                }
+
+                /* Store in reassembly buffer */
+                uint16_t rgroup = rec_seq / (FEC_GROUP_SIZE + 1);
+                uint16_t ridx_in_group = rec_seq % (FEC_GROUP_SIZE + 1);
+                uint16_t rdata_idx = rgroup * FEC_GROUP_SIZE + ridx_in_group;
+                size_t rmax_data = (fragment_size_ > 0)
+                                       ? (file_size_ / fragment_size_)
+                                       : 0;
+                if (rdata_idx < rmax_data)
+                {
+                    size_t roffset = static_cast<size_t>(rdata_idx) *
+                                     fragment_size_;
+                    size_t rcopy = rec_len;
+                    if (roffset + rcopy > file_size_)
+                    {
+                        rcopy = file_size_ - roffset;
+                    }
+                    memcpy(reassembly_buf_ + roffset, rec_data, rcopy);
+                }
+            }
+        }
     }
 
     /* Check for duplicate */
-    uint8_t byte_idx = seq / 8;
+    size_t bitmap_bytes = (total_fragments_ + 7) / 8;
+    uint16_t byte_idx = seq / 8;
     uint8_t bit_mask = 1 << (seq % 8);
+    if (byte_idx >= bitmap_bytes)
+    {
+        ESP_LOGE(TAG,
+                 "RX frag seq=%u byte_idx=%u exceeds bitmap size %zu, "
+                 "dropping",
+                 seq,
+                 byte_idx,
+                 bitmap_bytes);
+        return false;
+    }
     if (recv_bitmap_[byte_idx] & bit_mask)
     {
         ESP_LOGD(TAG, "Duplicate frag seq=%u, sending ACK", seq);
@@ -309,6 +362,24 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
         uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
         uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
+
+        /* Guard: data_idx must be within the data-only region.
+         * total_fragments_ counts all slots (data + parity); the reassembly
+         * buffer covers only data positions. An out-of-range data_idx would
+         * cause unsigned underflow in the file_size_ - offset subtraction. */
+        size_t max_data_fragments = (fragment_size_ > 0)
+                                        ? (file_size_ / fragment_size_)
+                                        : 0;
+        if (data_idx >= max_data_fragments)
+        {
+            ESP_LOGE(TAG,
+                     "RX frag seq=%u data_idx=%u out of range (max=%zu), "
+                     "dropping",
+                     seq,
+                     data_idx,
+                     max_data_fragments);
+            return false;
+        }
 
         /* Store fragment at correct offset in reassembly buffer */
         size_t offset = static_cast<size_t>(data_idx) * fragment_size_;
@@ -380,8 +451,7 @@ void SelectiveRepeat::cleanup_receiver()
 {
     if (reassembly_buf_)
     {
-        /* Try heap_caps_free for PSRAM, but free() works for both */
-        free(reassembly_buf_);
+        heap_caps_free(reassembly_buf_);
         reassembly_buf_ = nullptr;
     }
     if (recv_bitmap_)

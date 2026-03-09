@@ -34,7 +34,11 @@ BufferSlab *BufferPool::acquire()
             return &slabs_[idx];
         }
     }
-    ESP_LOGW(TAG, "Pool exhausted, no slabs available");
+    /* Fix 12: Do not call ESP_LOGW here — acquire() is called from the ESP-NOW
+     * receive callback (WiFi driver task), and ESP_LOGW takes a logging mutex
+     * which can cause priority inversion. Increment the atomic counter instead;
+     * the mesh task logs it periodically via get_exhaustion_count(). */
+    pool_exhaustion_count_.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
 }
 
@@ -45,13 +49,15 @@ void BufferPool::release(BufferSlab *slab)
         return;
     }
 
-    uint8_t prev = slab->refcount.fetch_sub(1, std::memory_order_acq_rel);
-    if (prev == 0)
+    /* Load before fetch_sub: if already 0, do not decrement (would wrap to 255
+     * on uint8_t, causing the slab to escape the freelist undetected). */
+    if (slab->refcount.load(std::memory_order_acquire) == 0)
     {
-        slab->refcount.store(0, std::memory_order_relaxed);
         ESP_LOGW(TAG, "release called on slab with refcount=0");
         return;
     }
+
+    uint8_t prev = slab->refcount.fetch_sub(1, std::memory_order_acq_rel);
 
     if (prev == 1)
     {

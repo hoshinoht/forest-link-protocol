@@ -28,7 +28,19 @@ class BufferPool
     void release(BufferSlab *slab);
     void add_ref(BufferSlab *slab);
 
+    /*
+     * Fix 12: Exposes exhaustion count for periodic logging from the mesh
+     * task. Calling ESP_LOGW inside acquire() (which runs from the ESP-NOW
+     * receive callback / WiFi task) causes priority inversion via the log
+     * mutex. Instead the count is incremented atomically and logged elsewhere.
+     */
+    uint32_t get_exhaustion_count() const
+    {
+        return pool_exhaustion_count_.load(std::memory_order_relaxed);
+    }
+
   private:
+    std::atomic<uint32_t> pool_exhaustion_count_{0};
     BufferSlab slabs_[POOL_SIZE];
     int8_t freelist_[POOL_SIZE];
     std::atomic<int8_t> top_{-1};
