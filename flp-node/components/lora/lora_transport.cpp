@@ -7,7 +7,7 @@
 static const char *TAG = "lora_xport";
 
 static const int32_t BUSY_POLL_MAX_ITER = 1000;
-static const int32_t SX1276_SPI_CLOCK_HZ = 8000000;
+static const int32_t SX1280_SPI_CLOCK_HZ = 8000000;
 
 namespace flp
 {
@@ -45,7 +45,11 @@ void LoraTransport::write_command(uint8_t cmd,
     t.length = (1 + len) * 8;
     t.tx_buffer = tx;
 
-    xSemaphoreTake(spi_mutex_, portMAX_DELAY);
+    if (xSemaphoreTake(spi_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "spi_mutex_ timeout, aborting SPI transaction");
+        return;
+    }
     spi_device_transmit(spi_, &t);
     xSemaphoreGive(spi_mutex_);
 }
@@ -64,7 +68,11 @@ void LoraTransport::read_command(uint8_t cmd, uint8_t *result, size_t len)
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
-    xSemaphoreTake(spi_mutex_, portMAX_DELAY);
+    if (xSemaphoreTake(spi_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "spi_mutex_ timeout, aborting SPI transaction");
+        return;
+    }
     spi_device_transmit(spi_, &t);
     xSemaphoreGive(spi_mutex_);
 
@@ -86,7 +94,11 @@ void LoraTransport::write_buffer(uint8_t offset,
     t.length = (2 + len) * 8;
     t.tx_buffer = tx;
 
-    xSemaphoreTake(spi_mutex_, portMAX_DELAY);
+    if (xSemaphoreTake(spi_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "spi_mutex_ timeout, aborting SPI transaction");
+        return;
+    }
     spi_device_transmit(spi_, &t);
     xSemaphoreGive(spi_mutex_);
 }
@@ -106,7 +118,11 @@ void LoraTransport::read_buffer(uint8_t offset, uint8_t *data, size_t len)
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
-    xSemaphoreTake(spi_mutex_, portMAX_DELAY);
+    if (xSemaphoreTake(spi_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "spi_mutex_ timeout, aborting SPI transaction");
+        return;
+    }
     spi_device_transmit(spi_, &t);
     xSemaphoreGive(spi_mutex_);
 
@@ -130,7 +146,11 @@ void LoraTransport::read_register(uint16_t addr, uint8_t *data, size_t len)
     t.tx_buffer = tx;
     t.rx_buffer = rx;
 
-    xSemaphoreTake(spi_mutex_, portMAX_DELAY);
+    if (xSemaphoreTake(spi_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "spi_mutex_ timeout, aborting SPI transaction");
+        return;
+    }
     spi_device_transmit(spi_, &t);
     xSemaphoreGive(spi_mutex_);
 
@@ -238,7 +258,26 @@ void LoraTransport::rx_task_func(void *arg)
 
     while (true)
     {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Fix 8: Use a bounded timeout so the task recovers if the radio
+         * stops asserting DIO1 (e.g. after a TX timeout or chip lockup). */
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) == 0)
+        {
+            /* Timeout — no IRQ in 5 s. Log and loop; radio may recover. */
+            ESP_LOGW(TAG, "DIO1 IRQ timeout, radio may have hung");
+            continue;
+        }
+
+        /*
+         * Fix 4: Take radio_op_mutex_ before touching any radio state so
+         * that send_raw() (called from the mesh task) cannot interleave
+         * its multi-step TX sequence with RX processing here.
+         */
+        if (self->radio_op_mutex_ &&
+            xSemaphoreTake(self->radio_op_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+        {
+            ESP_LOGE(TAG, "radio_op_mutex_ timeout in RX task, skipping IRQ");
+            continue;
+        }
 
         /* Read 16-bit IRQ status */
         uint8_t irq_raw[2];
@@ -251,6 +290,10 @@ void LoraTransport::rx_task_func(void *arg)
 
         if (irq & sx1280::IRQ_TX_DONE)
         {
+            if (self->radio_op_mutex_)
+            {
+                xSemaphoreGive(self->radio_op_mutex_);
+            }
             if (self->tx_done_sem_)
             {
                 xSemaphoreGive(self->tx_done_sem_);
@@ -263,6 +306,10 @@ void LoraTransport::rx_task_func(void *arg)
             if (irq & sx1280::IRQ_CRC_ERROR)
             {
                 ESP_LOGW(TAG, "CRC error, dropping packet");
+                if (self->radio_op_mutex_)
+                {
+                    xSemaphoreGive(self->radio_op_mutex_);
+                }
                 continue;
             }
 
@@ -278,6 +325,10 @@ void LoraTransport::rx_task_func(void *arg)
             if (!slab)
             {
                 ESP_LOGW(TAG, "Buffer pool exhausted, dropping LoRa RX");
+                if (self->radio_op_mutex_)
+                {
+                    xSemaphoreGive(self->radio_op_mutex_);
+                }
                 continue;
             }
 
@@ -296,6 +347,11 @@ void LoraTransport::rx_task_func(void *arg)
             int rssi = -(int) pkt_status[0] / 2;
             slab->rssi =
                 static_cast<int8_t>(rssi < -128 ? -128 : rssi);
+
+            if (self->radio_op_mutex_)
+            {
+                xSemaphoreGive(self->radio_op_mutex_);
+            }
 
             ESP_LOGD(TAG, "RX %zu bytes, RSSI=%d", slab->len, slab->rssi);
 
@@ -326,6 +382,14 @@ void LoraTransport::rx_task_func(void *arg)
                 self->buffer_pool_->release(slab);
             }
         }
+        else
+        {
+            /* Unhandled IRQ flags — release the mutex */
+            if (self->radio_op_mutex_)
+            {
+                xSemaphoreGive(self->radio_op_mutex_);
+            }
+        }
     }
 }
 
@@ -339,6 +403,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     }
 
     spi_mutex_ = xSemaphoreCreateMutex();
+    radio_op_mutex_ = xSemaphoreCreateMutex();
     tx_done_sem_ = xSemaphoreCreateBinary();
 
     cs_pin_ = (gpio_num_t) CONFIG_FLP_LORA_CS;
@@ -379,7 +444,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
 
     /* Add SX1280 device (SPI mode 0, 8 MHz) */
     spi_device_interface_config_t dev_cfg = {};
-    dev_cfg.clock_speed_hz = SX1276_SPI_CLOCK_HZ;
+    dev_cfg.clock_speed_hz = SX1280_SPI_CLOCK_HZ;
     dev_cfg.mode = 0;
     dev_cfg.spics_io_num = cs_pin_;
     dev_cfg.queue_size = 1;
@@ -493,6 +558,11 @@ void LoraTransport::deinit()
         vSemaphoreDelete(spi_mutex_);
         spi_mutex_ = nullptr;
     }
+    if (radio_op_mutex_)
+    {
+        vSemaphoreDelete(radio_op_mutex_);
+        radio_op_mutex_ = nullptr;
+    }
 
     initialized_ = false;
     ESP_LOGI(TAG, "LoRa transport deinitialized");
@@ -602,6 +672,18 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
         return -1;
     }
 
+    /*
+     * Fix 4: Hold radio_op_mutex_ for the entire multi-step TX sequence so
+     * the RX task cannot issue write_command(CMD_CLR_IRQ_STATUS) while we
+     * are between CMD_SET_STANDBY and CMD_SET_TX.
+     */
+    if (radio_op_mutex_ &&
+        xSemaphoreTake(radio_op_mutex_, pdMS_TO_TICKS(200)) != pdTRUE)
+    {
+        ESP_LOGE(TAG, "radio_op_mutex_ timeout in send_raw, dropping TX");
+        return ESP_ERR_TIMEOUT;
+    }
+
     /* Switch to standby */
     uint8_t stdby = sx1280::STDBY_RC;
     write_command(sx1280::CMD_SET_STANDBY, &stdby, 1);
@@ -632,6 +714,17 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
     /* Enter TX (periodBase=1ms, count=5000 → 5s hardware timeout) */
     uint8_t tx_params[3] = {0x02, 0x13, 0x88};
     write_command(sx1280::CMD_SET_TX, tx_params, 3);
+
+    /*
+     * Release radio_op_mutex_ now: the RX task will re-acquire it when
+     * DIO1 fires for IRQ_TX_DONE and will give tx_done_sem_ after clearing
+     * the IRQ. We must not hold the mutex while blocking on tx_done_sem_ or
+     * the RX task would deadlock trying to take it.
+     */
+    if (radio_op_mutex_)
+    {
+        xSemaphoreGive(radio_op_mutex_);
+    }
 
     /* Wait for TxDone via ISR → semaphore */
     BaseType_t got = xSemaphoreTake(tx_done_sem_, pdMS_TO_TICKS(5000));

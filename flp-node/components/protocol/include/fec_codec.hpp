@@ -55,6 +55,10 @@ class FecDecoder
     /* Returns true if a fragment was recovered */
     bool ingest(uint16_t seq, const uint8_t *data, size_t len, bool is_parity)
     {
+        /* Guard: reject oversized payloads before any buffer access */
+        if (len > MAX_MTU)
+            return false;
+
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
         uint8_t idx = seq % (FEC_GROUP_SIZE + 1);
 

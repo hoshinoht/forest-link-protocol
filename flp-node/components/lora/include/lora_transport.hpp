@@ -148,6 +148,13 @@ class LoraTransport : public ITransport
     QueueHandle_t packet_queue_ = nullptr; /* shared MeshManager queue */
     BufferPool *buffer_pool_ = nullptr;
     SemaphoreHandle_t spi_mutex_ = nullptr;
+    /*
+     * Fix 4: radio_op_mutex_ guards the full multi-step TX sequence
+     * (standby → write buffer → set_tx → wait TxDone) and the RX processing
+     * path so they cannot interleave. spi_mutex_ still protects individual
+     * SPI transactions; radio_op_mutex_ protects the higher-level radio state.
+     */
+    SemaphoreHandle_t radio_op_mutex_ = nullptr;
     TaskHandle_t rx_task_ = nullptr;
     SemaphoreHandle_t tx_done_sem_ = nullptr;
     bool initialized_ = false;

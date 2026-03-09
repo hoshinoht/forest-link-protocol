@@ -31,6 +31,8 @@ static flp::UartIngest uart_ingest;
 static flp::MqttClient mqtt_client;
 static EventGroupHandle_t s_wifi_event_group;
 static constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
+/* Fix 13: event bit set when MQTT first connects, waited on by auto_demo_task */
+static constexpr EventBits_t MQTT_CONNECTED_BIT = BIT1;
 #endif
 
 #if CONFIG_FLP_OLED_ENABLED
@@ -52,12 +54,15 @@ static void auto_demo_task(void *arg)
     const TickType_t interval =
         pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
 
-    /* Wait for MQTT to be ready before starting demo transfers */
+    /* Fix 13: Wait for MQTT connection via event group instead of polling.
+     * s_wifi_event_group / MQTT_CONNECTED_BIT are set by MqttClient on
+     * MQTT_EVENT_CONNECTED, so this task blocks without burning CPU. */
     ESP_LOGI(TAG, "Auto demo: waiting for MQTT connection...");
-    while (!mgr->is_mqtt_connected())
-    {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    xEventGroupWaitBits(s_wifi_event_group,
+                        MQTT_CONNECTED_BIT,
+                        pdFALSE,  /* do not clear the bit */
+                        pdTRUE,
+                        portMAX_DELAY);
     ESP_LOGI(TAG, "Auto demo: MQTT connected, starting transfers");
 
     while (true)
@@ -136,8 +141,12 @@ static void wifi_event_handler(void *arg,
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         /* Task 1: Wire WiFi status into MeshManager */
         mesh_manager.set_has_internet(true);
-        /* Update ESP-NOW broadcast peer after WiFi connects */
-        mesh_manager.update_espnow_broadcast_peer();
+        /*
+         * Fix 7: Do not call update_espnow_broadcast_peer() directly here —
+         * this runs in the WiFi event loop task which may hold WiFi driver
+         * internals. Schedule the update for the mesh task instead.
+         */
+        mesh_manager.request_espnow_peer_update();
     }
 }
 #endif
@@ -282,6 +291,10 @@ extern "C" void app_main()
 #if !CONFIG_FLP_WIFI_DISABLED
     /* Task 6: Wire MQTT client to mesh manager for file upload bridge */
     mqtt_client.set_node_addr(mesh_manager.get_addr());
+    /* Fix 13: Register event group so auto_demo_task can wait for MQTT
+     * instead of polling. Must be called before mqtt_client.init(). */
+    mqtt_client.set_connected_event_group(s_wifi_event_group,
+                                          MQTT_CONNECTED_BIT);
     mqtt_client.init();
     mesh_manager.set_mqtt_client(&mqtt_client);
 #endif

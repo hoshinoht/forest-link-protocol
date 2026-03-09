@@ -8,6 +8,13 @@
 namespace flp
 {
 
+/* RFC 1982 serial number arithmetic: returns true if 'a' is strictly newer
+ * than 'b' using the half-window rule for uint16_t (serial space 2^16). */
+static inline bool seq_newer(uint16_t a, uint16_t b)
+{
+    return static_cast<int16_t>(a - b) > 0;
+}
+
 inline constexpr uint8_t ROUTE_HOPS_UNKNOWN = 0xFF;
 inline constexpr int8_t ROUTE_RSSI_INVALID = -127;
 inline constexpr uint8_t ROUTE_FLAG_ESPNOW = 0x01;
@@ -111,7 +118,7 @@ class RouteTable
                 continue;
             }
             /* Higher seq from same origin: accept unconditionally */
-            if (origin == neighbors_[i].inet_origin && seq > neighbors_[i].inet_seq)
+            if (origin == neighbors_[i].inet_origin && seq_newer(seq, neighbors_[i].inet_seq))
             {
                 neighbors_[i].hops_to_internet = hops_inet;
                 neighbors_[i].inet_seq = seq;
@@ -131,7 +138,7 @@ class RouteTable
             /* Different origin: accept if better route */
             if (origin != neighbors_[i].inet_origin)
             {
-                if (seq > neighbors_[i].inet_seq ||
+                if (seq_newer(seq, neighbors_[i].inet_seq) ||
                     hops_inet < neighbors_[i].hops_to_internet)
                 {
                     neighbors_[i].hops_to_internet = hops_inet;

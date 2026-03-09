@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
@@ -94,6 +95,17 @@ class MqttClient
     {
         rx_callback_ = cb;
     }
+
+    /*
+     * Fix 13: Register an event group bit to be set when MQTT first connects.
+     * Allows waiters (e.g. auto_demo_task) to block on the event group instead
+     * of polling is_connected() with vTaskDelay.
+     */
+    void set_connected_event_group(EventGroupHandle_t eg, EventBits_t bit)
+    {
+        connected_event_group_ = eg;
+        connected_event_bit_ = bit;
+    }
     bool is_connected() const
     {
         return connected_;
@@ -137,6 +149,10 @@ class MqttClient
     /* Last published file data (retained for NACK retransmission) */
     const uint8_t *last_file_data_ = nullptr;
     size_t last_file_size_ = 0;
+
+    /* Fix 13: optional event group signalled on first MQTT connect */
+    EventGroupHandle_t connected_event_group_ = nullptr;
+    EventBits_t connected_event_bit_ = 0;
 
     /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;

@@ -16,11 +16,11 @@ namespace flp
 struct FragmentSlot
 {
     uint8_t data[MAX_MTU];
-    size_t len;
-    uint32_t send_time_ms;
-    bool acked;
-    bool sent;
-    uint8_t retries;
+    size_t len = 0;
+    uint32_t send_time_ms = 0;
+    bool acked = false;
+    bool sent = false;
+    uint8_t retries = 0;
 };
 
 /* Callback for sending packets (ACK, NACK, retransmit data) */

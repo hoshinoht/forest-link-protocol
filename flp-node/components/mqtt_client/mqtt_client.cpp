@@ -21,7 +21,7 @@ static constexpr UBaseType_t MQTT_NACK_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_CMD_QUEUE_DEPTH = 8;
 static constexpr TickType_t MQTT_HEARTBEAT_INTERVAL = pdMS_TO_TICKS(30000);
 static constexpr TickType_t MQTT_IDLE_YIELD_TICKS = 1;
-static constexpr TickType_t MQTT_CHUNK_PUBLISH_DELAY = pdMS_TO_TICKS(50);
+static constexpr TickType_t MQTT_CHUNK_PUBLISH_DELAY = pdMS_TO_TICKS(10);
 
 namespace flp
 {
@@ -118,6 +118,12 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             /* Subscribe to admin topics */
             esp_mqtt_client_subscribe(client_, "flp/admin/cmd", 1);
             esp_mqtt_client_subscribe(client_, "flp/admin/ack", 1);
+            /* Fix 13: unblock any task waiting for first MQTT connection */
+            if (connected_event_group_)
+            {
+                xEventGroupSetBits(connected_event_group_,
+                                   connected_event_bit_);
+            }
             notify(); /* wake run() to drain queued items */
             break;
 

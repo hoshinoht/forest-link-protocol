@@ -54,6 +54,19 @@ class MeshManager
 
     /* Task 1: WiFi status wiring */
     void set_has_internet(bool v);
+
+    /*
+     * Fix 7: Schedule an ESP-NOW broadcast peer update to be executed from
+     * the mesh task — NOT directly from the WiFi event callback which runs
+     * on the event loop task and may hold WiFi driver internals.
+     * Set this flag and let run() drain it safely.
+     */
+    void request_espnow_peer_update()
+    {
+        espnow_peer_update_pending_.store(true, std::memory_order_relaxed);
+    }
+
+    /* Direct call — only safe from the mesh task or during init */
     void update_espnow_broadcast_peer();
 
     /* Task 5: File transfer API */
@@ -178,6 +191,12 @@ class MeshManager
 
     /* Step 1d: DSDV sequence number for internet route */
     uint16_t my_inet_seq_ = 0;
+
+    /* Fix 2: track current WiFi channel to avoid redundant set_channel calls */
+    uint8_t current_channel_ = 0;
+
+    /* Fix 7: deferred ESP-NOW peer update flag (set from WiFi event task) */
+    std::atomic<bool> espnow_peer_update_pending_{false};
 
     /* Heap monitor */
     HeapMonitor heap_monitor_;

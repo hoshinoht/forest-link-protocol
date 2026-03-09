@@ -108,6 +108,15 @@ void EspNowTransport::init()
 
     s_instance = this;
 
+    /* Create deferred peer registration queue before registering callbacks */
+    pending_peer_queue_ = xQueueCreate(ESPNOW_PENDING_PEER_QUEUE_DEPTH,
+                                       sizeof(PendingPeer));
+    if (!pending_peer_queue_)
+    {
+        ESP_LOGE(TAG, "Failed to create pending peer queue");
+        return;
+    }
+
     /* Derive node address from base MAC */
     uint8_t mac[6];
     esp_efuse_mac_get_default(mac);
@@ -170,6 +179,19 @@ void EspNowTransport::update_broadcast_peer()
     }
 }
 
+void EspNowTransport::drain_pending_peers()
+{
+    if (!pending_peer_queue_)
+    {
+        return;
+    }
+    PendingPeer pending;
+    while (xQueueReceive(pending_peer_queue_, &pending, 0) == pdTRUE)
+    {
+        add_peer_if_new(pending.mac, pending.rssi);
+    }
+}
+
 void EspNowTransport::deinit()
 {
     if (!initialized_)
@@ -178,6 +200,11 @@ void EspNowTransport::deinit()
     }
 
     esp_now_deinit();
+    if (pending_peer_queue_)
+    {
+        vQueueDelete(pending_peer_queue_);
+        pending_peer_queue_ = nullptr;
+    }
     s_instance = nullptr;
     initialized_ = false;
     ESP_LOGI(TAG, "ESP-NOW transport deinitialized");
@@ -200,9 +227,25 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
         return;
     }
 
-    /* Register peer lazily on first contact */
+    /*
+     * Do NOT call add_peer_if_new() here — on_recv runs in the WiFi driver
+     * task which already holds ESP-NOW internal locks. Calling esp_now_add_peer
+     * from this context would attempt to re-acquire the same lock → deadlock.
+     *
+     * Instead, enqueue the source MAC into pending_peer_queue_ so that
+     * drain_pending_peers() (called from the mesh task) can register the peer
+     * safely outside the WiFi driver task context.
+     */
     int8_t rssi = (info->rx_ctrl) ? info->rx_ctrl->rssi : -90;
-    s_instance->add_peer_if_new(info->src_addr, rssi);
+    if (s_instance->pending_peer_queue_)
+    {
+        PendingPeer pending = {};
+        memcpy(pending.mac, info->src_addr, 6);
+        pending.rssi = rssi;
+        /* Non-blocking: if the queue is full the peer will be re-registered
+         * the next time a packet from it is received. */
+        xQueueSendFromISR(s_instance->pending_peer_queue_, &pending, nullptr);
+    }
 
     BufferSlab *slab = s_instance->buffer_pool_->acquire();
     if (!slab)
