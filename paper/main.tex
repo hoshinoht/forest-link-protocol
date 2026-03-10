@@ -408,6 +408,31 @@ Table~\ref{tab:comparison} compares FLP against LoRaWAN and DTN for the target u
   \end{tabular}
 \end{table}
 
+\subsection{Mitigation of Challenges}
+
+Several significant engineering challenges emerged during development, each requiring iterative redesign informed by empirical testing.
+
+\textbf{1) BLE-to-ESP-NOW Transport Pivot.}
+The initial FLP implementation used Bluetooth Low Energy (NimBLE GATT) as the short-range mesh transport. BLE imposed a 4-peer connection limit, required scan/connect handshakes that added seconds of latency per link, and suffered from connection interval scheduling overhead that capped effective throughput at $\sim$8\,KB/s. Address mismatches between the BLE stack and mesh layer caused silent routing failures. After extensive tuning (MTU negotiation to 512\,B, Data Length Extension, reduced connection intervals from 30--50\,ms to 7.5--15\,ms), BLE throughput remained fundamentally limited by its connection-oriented design. The transport was replaced entirely with ESP-NOW, which is connectionless, supports 20 peers, and achieved 34\,KB/s effective throughput---a 4.3$\times$ improvement with substantially simpler code.
+
+\textbf{2) Routing Loop Elimination.}
+The original hop-count-only routing suffered from count-to-infinity loops after gateway failures: when an exit node went offline, stale routes persisted for up to 30\,s, causing packets to cycle between nodes. This was resolved by adopting DSDV sequence-numbered distance vectors with a monotonic \texttt{inet\_seq} from each exit node. Routes are only accepted if the sequence number is strictly newer, or equal with lower cost, eliminating stale-route loops entirely. Additionally, \texttt{ROUTE\_ERROR} packets were introduced to proactively invalidate routes within seconds of neighbor loss (15\,s timeout), rather than relying on passive expiry.
+
+\textbf{3) NACK Storm Suppression.}
+Under lossy conditions, the Selective Repeat ARQ generated $O(n^2)$ NACKs: every missing fragment in the receive window triggered a retransmission request on each ARQ cycle, flooding the reverse path and worsening congestion. This was mitigated by restricting NACKs to gaps at the receive window front only, with a per-sequence cooldown timer that prevents re-NACKing a fragment until its expected round-trip time has elapsed.
+
+\textbf{4) Software Pipeline Bottlenecks.}
+Initial 3\,MB transfers over three hops took over 20 minutes---failing the NFR-MESH1 target. Profiling revealed three serial bottlenecks: the ARQ window (8 fragments) underutilized the link, the MQTT processing loop (500\,ms interval) drained fragments slower than they arrived, and the fragment queue (8 entries) overflowed during bursts. Enlarging the ARQ window to 32 fragments, reducing MQTT processing to 10\,ms, and expanding the queue to 64 entries collectively improved the pipeline from 6.6\,KB/s to 79\,KB/s (12$\times$), shifting the bottleneck from software to radio physics.
+
+\textbf{5) Single Exit Node Bottleneck.}
+Early designs funneled all fragments through one exit node, creating a throughput ceiling at the exit's MQTT publish rate and a single point of failure. This was replaced with multi-exit exfiltration: the source selects up to four exit nodes and stripes fragments round-robin across them. Dead exit nodes are detected via ACK timeout, and their pending fragments are redistributed to surviving exits. Cloud-side deduplication by session ID ensures correctness despite fragments arriving on separate MQTT topics.
+
+\textbf{6) LoRa Control-Plane Overhead.}
+The original \texttt{TRANSFER\_AD} packet was 36 bytes, consuming excessive LoRa airtime and limiting election responsiveness. Bit-packing optimizations compressed it to 9 bytes (session ID, file size encoded as \texttt{fragment\_size\_d8}, CRC-16), with the filename deferred to DATA fragment~0. Similarly, \texttt{DISCOVERY} was compressed from 8 to 7 bytes by packing WiFi channel and spreading factor into flag bits. These reductions cut control-plane airtime by 60--75\%, improving election and route advertisement responsiveness.
+
+\textbf{7) FreeRTOS Concurrency Hazards.}
+Several subtle concurrency bugs manifested only under heavy transfer load: calling \texttt{esp\_now\_add\_peer()} from the ESP-NOW receive callback caused WiFi driver lock re-entrancy deadlocks; an unguarded \texttt{esp\_wifi\_set\_channel()} disrupted in-flight ESP-NOW transmissions; and a non-atomic \texttt{connected\_} flag in the MQTT client caused data races between tasks. These were resolved through deferred peer registration via a queue, channel-change guards, atomic flags, and bounded mutex timeouts (200\,ms) to prevent permanent deadlocks on radio lockup.
+
 \subsection{Bottlenecks and Limitations}
 
 The primary remaining bottleneck is ESP-NOW radio air-time sharing at relay nodes. Since each ESP32-S3 has a single 2.4\,GHz radio that must be time-shared between receiving from upstream and transmitting to downstream, the effective per-hop throughput is halved at relay nodes ($\sim$34\,KB/s effective vs $\sim$81\,KB/s raw). This is a fundamental hardware constraint rather than a protocol limitation.
