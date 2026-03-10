@@ -7,15 +7,22 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_private/wifi.h"
 #include "flp_config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "mesh_manager.hpp"
+#include "esp_heap_caps.h"
+#include "esp_psram.h"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
 #if !CONFIG_FLP_WIFI_DISABLED
 #include "mqtt_client.hpp"
+#endif
+
+#if CONFIG_FLP_SD_ENABLED
+#include "sdcard.hpp"
 #endif
 
 #if CONFIG_FLP_OLED_ENABLED
@@ -39,12 +46,19 @@ static constexpr EventBits_t MQTT_CONNECTED_BIT = BIT1;
 static flp::OledDisplay oled_display;
 #endif
 
-/*
- * 8 KB payload — large enough to produce ~33 data fragments + FEC parity,
- * cycling through the ARQ sliding window multiple times.
- */
-static constexpr size_t DEMO_PAYLOAD_SIZE = 8192;
-static uint8_t DEMO_PAYLOAD[DEMO_PAYLOAD_SIZE];
+/* Demo transfer: callback + size (streaming from SD or in-memory fallback) */
+static flp::ReadChunkFn s_demo_read_chunk;
+static size_t s_demo_size = 0;
+
+/* Fallback: 8 KB synthetic pattern if SD card is unavailable */
+static constexpr size_t FALLBACK_PAYLOAD_SIZE = 8192;
+static uint8_t s_fallback_payload[FALLBACK_PAYLOAD_SIZE];
+
+/* SD card status for deferred logging (early boot logs lost to USB reconnect) */
+#if CONFIG_FLP_SD_ENABLED
+static const char *s_sd_status = "not attempted";
+static esp_err_t s_sd_err = ESP_OK;
+#endif
 
 #if CONFIG_FLP_DEMO_AUTO
 /* Auto demo mode: periodic transfer without button */
@@ -75,9 +89,8 @@ static void auto_demo_task(void *arg)
         }
         ESP_LOGI(TAG,
                  "Auto demo transfer: demo.txt (%u bytes)",
-                 DEMO_PAYLOAD_SIZE);
-        mgr->start_file_transfer(
-            "demo.txt", DEMO_PAYLOAD, DEMO_PAYLOAD_SIZE);
+                 (unsigned) s_demo_size);
+        mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
         vTaskDelay(interval);
     }
 }
@@ -107,10 +120,10 @@ static void button_task(void *arg)
         }
         s_last_button_press = now;
 
-        ESP_LOGI(
-            TAG, "Demo transfer: demo.txt (%u bytes)", DEMO_PAYLOAD_SIZE);
-        mgr->start_file_transfer(
-            "demo.txt", DEMO_PAYLOAD, DEMO_PAYLOAD_SIZE);
+        ESP_LOGI(TAG,
+                 "Demo transfer: demo.txt (%u bytes)",
+                 (unsigned) s_demo_size);
+        mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
     }
 }
 #endif
@@ -209,11 +222,15 @@ extern "C" void app_main()
 {
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
 
-    /* Fill demo payload with repeating ASCII pattern for easy verification */
-    for (size_t i = 0; i < DEMO_PAYLOAD_SIZE; i++)
-    {
-        DEMO_PAYLOAD[i] = static_cast<uint8_t>('A' + (i % 26));
-    }
+    /* PSRAM / heap diagnostics */
+#if CONFIG_SPIRAM
+    ESP_LOGI(TAG, "PSRAM size: %d bytes, free: %d bytes",
+             esp_psram_get_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#endif
+    ESP_LOGI(TAG, "Internal free heap: %zu bytes",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    ESP_LOGI(TAG, "Total free heap: %zu bytes",
+             esp_get_free_heap_size());
 
     /* Initialize NVS (required for WiFi + ESP-NOW) */
     esp_err_t ret = nvs_flash_init();
@@ -232,6 +249,7 @@ extern "C" void app_main()
 
     wifi_init_config_t relay_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&relay_cfg));
+    esp_wifi_internal_set_log_level(WIFI_LOG_ERROR);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -250,6 +268,7 @@ extern "C" void app_main()
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    esp_wifi_internal_set_log_level(WIFI_LOG_ERROR);
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
@@ -270,12 +289,86 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
+
+    /*
+     * Add PSRAM to heap AFTER WiFi init to avoid heap corruption during
+     * PHY calibration (known issue on ESP32-S3 chip rev v0.2).
+     * With CONFIG_SPIRAM_USE_MEMMAP, PSRAM is mapped but not in heap.
+     */
+#if CONFIG_SPIRAM
+    if (esp_psram_is_initialized())
+    {
+        size_t psram_size = esp_psram_get_size();
+        /* PSRAM is mapped starting at SOC_EXTRAM_DATA_LOW on ESP32-S3 */
+        esp_err_t ps_err = heap_caps_add_region(
+            SOC_EXTRAM_DATA_LOW,
+            SOC_EXTRAM_DATA_LOW + psram_size);
+        if (ps_err == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Added %u KB PSRAM to heap (post-WiFi)",
+                     (unsigned)(psram_size / 1024));
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Failed to add PSRAM to heap: %s",
+                     esp_err_to_name(ps_err));
+        }
+    }
+#endif
 #endif
 
     /*
      * ESP-NOW init is handled by EspNowTransport::init() called from
      * MeshManager
      */
+
+    /* SD card init — after WiFi to avoid VFS/SPI conflicts */
+#if CONFIG_FLP_SD_ENABLED
+    s_sd_err = flp::sdcard_init();
+    if (s_sd_err == ESP_OK)
+    {
+        size_t file_size = 0;
+        FILE *f = flp::sdcard_open("/sdcard/demo.txt", &file_size);
+        if (f != nullptr)
+        {
+            s_demo_size = file_size;
+            s_demo_read_chunk = [f](uint8_t *buf,
+                                    size_t offset,
+                                    size_t len) -> size_t
+            {
+                if (fseek(f, static_cast<long>(offset), SEEK_SET) != 0)
+                {
+                    return 0;
+                }
+                return fread(buf, 1, len, f);
+            };
+            s_sd_status = "OK";
+            ESP_LOGI(TAG,
+                     "Loaded demo.txt from SD card: %u bytes (streaming)",
+                     (unsigned) s_demo_size);
+        }
+        else
+        {
+            s_sd_status = "file not found";
+            ESP_LOGW(TAG, "demo.txt not found on SD card, using fallback");
+        }
+    }
+    else
+    {
+        s_sd_status = "mount failed";
+        ESP_LOGW(TAG, "SD card init failed, using fallback payload");
+    }
+#endif
+    if (!s_demo_read_chunk)
+    {
+        for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
+        {
+            s_fallback_payload[i] = static_cast<uint8_t>('A' + (i % 26));
+        }
+        s_demo_size = FALLBACK_PAYLOAD_SIZE;
+        s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
+            s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
+    }
 
     /* Init OLED early — it's local hardware, no network dependency */
 #if CONFIG_FLP_OLED_ENABLED
@@ -387,5 +480,24 @@ extern "C" void app_main()
              CONFIG_FLP_UART_TX_PIN,
              CONFIG_FLP_UART_RX_PIN,
              CONFIG_FLP_DEMO_BUTTON_PIN);
+#endif
+
+    /* Log demo payload source (visible even when monitor reconnects late) */
+#if CONFIG_FLP_SD_ENABLED
+    ESP_LOGI(TAG,
+             "Demo payload: %u bytes (%s) [SD: %s err=%s(0x%x) CS=%d MOSI=%d MISO=%d SCK=%d]",
+             (unsigned) s_demo_size,
+             s_demo_size == FALLBACK_PAYLOAD_SIZE ? "fallback" : "SD card",
+             s_sd_status,
+             esp_err_to_name(s_sd_err),
+             s_sd_err,
+             CONFIG_FLP_SD_CS,
+             CONFIG_FLP_SD_MOSI,
+             CONFIG_FLP_SD_MISO,
+             CONFIG_FLP_SD_SCK);
+#else
+    ESP_LOGI(TAG,
+             "Demo payload: %u bytes (fallback, SD disabled)",
+             (unsigned) s_demo_size);
 #endif
 }

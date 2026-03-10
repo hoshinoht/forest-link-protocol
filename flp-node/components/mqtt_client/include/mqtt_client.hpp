@@ -45,7 +45,12 @@ struct FragmentPublishRequest
     char filename[20];
 };
 
-/* Cloud NACK for retransmitting a file chunk */
+/* Cloud ACK/NACK for selective-repeat ARQ */
+struct CloudAckItem
+{
+    uint16_t seq;
+};
+
 struct CloudNackItem
 {
     uint16_t seq;
@@ -114,6 +119,12 @@ class MqttClient
     /* Drain one pending mesh command (returns true if item was available) */
     bool receive_cmd(MeshCmdItem &out);
 
+    /* Drain one cloud ACK (returns true if item was available) */
+    bool drain_cloud_ack(uint16_t &seq_out);
+
+    /* Drain one cloud NACK (returns true if item was available) */
+    bool drain_cloud_nack(uint16_t &seq_out);
+
     TopicTable &topic_table()
     {
         return topic_table_;
@@ -128,6 +139,7 @@ class MqttClient
     esp_mqtt_client_handle_t client_ = nullptr;
     QueueHandle_t publish_queue_ = nullptr;
     QueueHandle_t file_publish_queue_ = nullptr;
+    QueueHandle_t ack_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
     QueueHandle_t cmd_queue_ = nullptr; /* inbound mesh commands from cloud */
     TaskHandle_t task_ = nullptr; /* MQTT task handle for notifications */
@@ -143,12 +155,7 @@ class MqttClient
     void register_default_topics();
     void process_file_publish(const FilePublishRequest &req);
     void process_fragment_publish();
-    void process_nack_retransmit();
     void notify();
-
-    /* Last published file data (retained for NACK retransmission) */
-    const uint8_t *last_file_data_ = nullptr;
-    size_t last_file_size_ = 0;
 
     /* Fix 13: optional event group signalled on first MQTT connect */
     EventGroupHandle_t connected_event_group_ = nullptr;

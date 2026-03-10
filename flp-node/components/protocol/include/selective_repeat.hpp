@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "fec_codec.hpp"
 #include "freertos/FreeRTOS.h"
@@ -34,6 +35,11 @@ class SelectiveRepeat
 {
   public:
     SelectiveRepeat() = default;
+    ~SelectiveRepeat();
+
+    /* Non-copyable (owns heap memory) */
+    SelectiveRepeat(const SelectiveRepeat &) = delete;
+    SelectiveRepeat &operator=(const SelectiveRepeat &) = delete;
 
     void init(uint8_t window_size, uint32_t timeout_ms);
 
@@ -88,8 +94,8 @@ class SelectiveRepeat
         return static_cast<uint32_t>(esp_timer_get_time() / 1000);
     }
 
-    /* Sender state */
-    FragmentSlot window_[ARQ_WINDOW] = {};
+    /* Sender state — heap-allocated to keep BSS small (prefers PSRAM) */
+    FragmentSlot *window_ = nullptr;
     uint8_t window_size_ = 0;
     uint32_t timeout_ms_ = 0;
     uint16_t base_seq_ = 0;

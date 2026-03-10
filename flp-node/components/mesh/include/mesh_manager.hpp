@@ -70,8 +70,9 @@ class MeshManager
     void update_espnow_broadcast_peer();
 
     /* Task 5: File transfer API */
-    void
-    start_file_transfer(const char *filename, const uint8_t *data, size_t size);
+    void start_file_transfer(const char *filename,
+                             size_t size,
+                             ReadChunkFn read_chunk);
 
     /* Task 6: MQTT bridge wiring */
     void set_mqtt_client(MqttClient *client)

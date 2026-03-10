@@ -246,9 +246,21 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
 
 /* -- Start file transfer ------------------------------------------------------ */
 
+ReadChunkFn TransferEngine::make_buffer_reader(const uint8_t *data, size_t size)
+{
+    return [data, size](uint8_t *buf, size_t offset, size_t len) -> size_t
+    {
+        if (offset >= size) { return 0; }
+        size_t avail = size - offset;
+        if (len > avail) { len = avail; }
+        memcpy(buf, data + offset, len);
+        return len;
+    };
+}
+
 void TransferEngine::start_file_transfer(const char *filename,
-                                         const uint8_t *data,
                                          size_t size,
+                                         ReadChunkFn read_chunk,
                                          bool has_internet,
                                          bool has_mqtt,
                                          uint8_t hops_to_internet)
@@ -267,7 +279,7 @@ void TransferEngine::start_file_transfer(const char *filename,
      */
     size_t frag_payload = (ESPNOW_MAX_PAYLOAD / 8) * 8;
 
-    transfer_.data = data;
+    transfer_.read_chunk = read_chunk;
     transfer_.size = size;
     transfer_.fragment_size = static_cast<uint16_t>(frag_payload);
     uint16_t data_frags =
@@ -278,6 +290,23 @@ void TransferEngine::start_file_transfer(const char *filename,
         static_cast<uint16_t>(esp_timer_get_time() / 1000);
     strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
+
+    /* Compute CRC32 incrementally via chunk reads */
+    uint32_t crc = 0;
+    {
+        uint8_t crc_buf[512];
+        size_t off = 0;
+        while (off < size)
+        {
+            size_t chunk = (size - off < sizeof(crc_buf))
+                               ? (size - off)
+                               : sizeof(crc_buf);
+            size_t got = transfer_.read_chunk(crc_buf, off, chunk);
+            if (got == 0) { break; }
+            crc = esp_rom_crc32_le(crc, crc_buf, got);
+            off += got;
+        }
+    }
 
     /* Local-exit fast path: source node has internet + MQTT, skip mesh entirely */
     local_exit_ = (has_internet && has_mqtt && forward_to_mqtt_fn_);
@@ -294,8 +323,13 @@ void TransferEngine::start_file_transfer(const char *filename,
                  transfer_.fragment_count,
                  transfer_.session_id);
 
+        /* Initialize cloud selective-repeat ARQ state */
+        memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
+        cloud_base_seq_ = 0;
+        cloud_next_send_ = 0;
+        cloud_retx_count_ = 0;
+
         /* Publish transfer meta directly */
-        uint32_t crc = esp_rom_crc32_le(0, data, size);
         if (forward_meta_fn_)
         {
             forward_meta_fn_(transfer_.session_id,
@@ -327,8 +361,7 @@ void TransferEngine::start_file_transfer(const char *filename,
     ad.session_id = transfer_.session_id;
     ad.file_size = static_cast<uint32_t>(size);
     ad.fragment_size_d8 = static_cast<uint8_t>(transfer_.fragment_size / 8);
-    ad.crc16 = static_cast<uint16_t>(
-        esp_rom_crc32_le(0, data, size) & 0xFFFF);
+    ad.crc16 = static_cast<uint16_t>(crc & 0xFFFF);
 
     /* Start election with adaptive timeout */
     candidate_count_ = 0;
@@ -392,7 +425,7 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
     {
         ESP_LOGW(TAG, "Election timeout: no exit node candidates");
         transfer_.active = false;
-        transfer_.data = nullptr;
+        transfer_.read_chunk = nullptr;
         for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
         {
             arq_[i].reset_sender();
@@ -425,15 +458,84 @@ void TransferEngine::transfer_tick()
         return;
     }
 
-    /* Local-exit fast path: publish fragments directly to MQTT, no ARQ */
+    /* Local-exit selective-repeat ARQ: sliding window with cloud ACK/NACK */
     if (local_exit_)
     {
-        constexpr uint8_t kLocalExitBatchSize = 2;
-        uint8_t sent = 0;
-        while (transfer_.next_fragment < transfer_.fragment_count &&
-               sent < kLocalExitBatchSize)
+        /* 1. Drain cloud ACKs — mark in bitmap, advance base */
+        if (drain_cloud_ack_fn_)
         {
-            uint16_t seq = transfer_.next_fragment;
+            uint16_t ack_seq = 0;
+            while (drain_cloud_ack_fn_(ack_seq))
+            {
+                if (ack_seq < transfer_.fragment_count)
+                {
+                    cloud_ack_bitmap_[ack_seq / 8] |=
+                        static_cast<uint8_t>(1U << (ack_seq % 8));
+                    ESP_LOGD(TAG, "Cloud ACK: seq=%u", ack_seq);
+                }
+            }
+        }
+
+        /* Advance base past contiguously ACK'd fragments */
+        while (cloud_base_seq_ < transfer_.fragment_count)
+        {
+            uint16_t s = cloud_base_seq_;
+            if (cloud_ack_bitmap_[s / 8] & (1U << (s % 8)))
+            {
+                cloud_base_seq_++;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        /* 2. Drain cloud NACKs — enqueue for retransmission */
+        if (drain_cloud_nack_fn_)
+        {
+            uint16_t nack_seq = 0;
+            while (drain_cloud_nack_fn_(nack_seq))
+            {
+                if (nack_seq >= transfer_.fragment_count)
+                {
+                    continue;
+                }
+                /* Only retransmit if not already ACK'd */
+                if (cloud_ack_bitmap_[nack_seq / 8] & (1U << (nack_seq % 8)))
+                {
+                    continue;
+                }
+                /* Avoid duplicates in retransmit queue */
+                bool already_queued = false;
+                for (uint8_t i = 0; i < cloud_retx_count_; i++)
+                {
+                    if (cloud_retx_queue_[i] == nack_seq)
+                    {
+                        already_queued = true;
+                        break;
+                    }
+                }
+                if (!already_queued &&
+                    cloud_retx_count_ < CLOUD_RETX_QUEUE_SIZE)
+                {
+                    cloud_retx_queue_[cloud_retx_count_++] = nack_seq;
+                    ESP_LOGI(TAG, "Cloud NACK: queued retx seq=%u", nack_seq);
+                }
+            }
+        }
+
+        /* 3. Send retransmissions first (priority over new fragments) */
+        uint8_t sent = 0;
+        for (uint8_t i = 0; i < cloud_retx_count_ && sent < CLOUD_WINDOW_SIZE;
+             i++)
+        {
+            uint16_t seq = cloud_retx_queue_[i];
+            /* Skip if already ACK'd in the meantime */
+            if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+            {
+                continue;
+            }
+
             size_t offset =
                 static_cast<size_t>(seq) * transfer_.fragment_size;
             size_t remain = transfer_.size - offset;
@@ -441,24 +543,78 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
+            uint8_t frag_buf[MAX_MTU];
+            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
             forward_to_mqtt_fn_(transfer_.session_id,
                                 seq,
                                 my_addr_,
-                                transfer_.data + offset,
-                                frag_len,
+                                frag_buf,
+                                got,
                                 transfer_.filename);
-            transfer_.next_fragment++;
+            ESP_LOGI(TAG, "Retransmitted seq=%u", seq);
+            sent++;
+        }
+        /* Remove sent retransmissions from queue (keep unsent ones) */
+        {
+            uint8_t kept = 0;
+            uint8_t skip = 0;
+            for (uint8_t i = 0; i < cloud_retx_count_; i++)
+            {
+                uint16_t seq = cloud_retx_queue_[i];
+                if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+                {
+                    continue; /* ACK'd, drop */
+                }
+                if (skip < sent)
+                {
+                    skip++; /* was retransmitted this tick, drop from queue */
+                    continue;
+                }
+                cloud_retx_queue_[kept++] = seq;
+            }
+            cloud_retx_count_ = kept;
+        }
+
+        /* 4. Send new fragments if window not full */
+        uint16_t window_end = cloud_base_seq_ + CLOUD_WINDOW_SIZE;
+        while (cloud_next_send_ < transfer_.fragment_count &&
+               cloud_next_send_ < window_end &&
+               sent < CLOUD_WINDOW_SIZE)
+        {
+            uint16_t seq = cloud_next_send_;
+            size_t offset =
+                static_cast<size_t>(seq) * transfer_.fragment_size;
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+
+            uint8_t frag_buf[MAX_MTU];
+            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
+            forward_to_mqtt_fn_(transfer_.session_id,
+                                seq,
+                                my_addr_,
+                                frag_buf,
+                                got,
+                                transfer_.filename);
+            cloud_next_send_++;
             sent++;
         }
 
-        if (transfer_.next_fragment >= transfer_.fragment_count)
+        /* 5. Check completion: all fragments ACK'd */
+        if (cloud_base_seq_ >= transfer_.fragment_count)
         {
             ESP_LOGI(TAG,
-                     "Local-exit transfer complete: %s",
+                     "Local-exit transfer complete (all ACK'd): %s",
                      transfer_.filename);
             transfer_.active = false;
-            transfer_.data = nullptr;
+            transfer_.read_chunk = nullptr;
             local_exit_ = false;
+            /* Reset cloud ARQ state */
+            memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
+            cloud_base_seq_ = 0;
+            cloud_next_send_ = 0;
+            cloud_retx_count_ = 0;
             xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
         }
         return;
@@ -482,7 +638,7 @@ void TransferEngine::transfer_tick()
     {
         ESP_LOGE(TAG, "All exit nodes dead, aborting transfer");
         transfer_.active = false;
-        transfer_.data = nullptr;
+        transfer_.read_chunk = nullptr;
         return;
     }
 
@@ -517,8 +673,9 @@ void TransferEngine::transfer_tick()
                 size_t frag_len = (remain < transfer_.fragment_size)
                                       ? remain
                                       : transfer_.fragment_size;
-                arq_[target].send_fragment(
-                    seq, transfer_.data + offset, frag_len);
+                uint8_t frag_buf[MAX_MTU];
+                size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
+                arq_[target].send_fragment(seq, frag_buf, got);
             }
             else
             {
@@ -595,6 +752,9 @@ void TransferEngine::transfer_tick()
              * Fragment 0 (seq=0): prepend filename so exit node
              * can publish transfer meta after receiving it.
              */
+            uint8_t frag_buf[MAX_MTU];
+            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
+
             if (seq == 0)
             {
                 uint8_t name_len = static_cast<uint8_t>(
@@ -602,9 +762,8 @@ void TransferEngine::transfer_tick()
                 uint8_t frag0_buf[MAX_MTU];
                 frag0_buf[0] = name_len;
                 memcpy(frag0_buf + 1, transfer_.filename, name_len);
-                memcpy(frag0_buf + 1 + name_len,
-                       transfer_.data + offset, frag_len);
-                size_t total_len = 1 + name_len + frag_len;
+                memcpy(frag0_buf + 1 + name_len, frag_buf, got);
+                size_t total_len = 1 + name_len + got;
 
                 int ret = arq_[arq_idx].send_fragment(
                     seq, frag0_buf, total_len);
@@ -612,18 +771,17 @@ void TransferEngine::transfer_tick()
                 {
                     break;
                 }
-                /* Ingest only the actual data into FEC */
-                fec_encoder_.ingest(transfer_.data + offset, frag_len);
+                fec_encoder_.ingest(frag_buf, got);
             }
             else
             {
                 int ret = arq_[arq_idx].send_fragment(
-                    seq, transfer_.data + offset, frag_len);
+                    seq, frag_buf, got);
                 if (ret < 0)
                 {
                     break;
                 }
-                fec_encoder_.ingest(transfer_.data + offset, frag_len);
+                fec_encoder_.ingest(frag_buf, got);
             }
         }
 
@@ -650,7 +808,7 @@ void TransferEngine::transfer_tick()
         {
             ESP_LOGI(TAG, "File transfer complete: %s", transfer_.filename);
             transfer_.active = false;
-            transfer_.data = nullptr;
+            transfer_.read_chunk = nullptr;
             for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
             {
                 arq_[i].reset_sender();
@@ -747,7 +905,9 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 
         if (!arq_[target].sender_window_full())
         {
-            arq_[target].send_fragment(seq, transfer_.data + offset, frag_len);
+            uint8_t frag_buf[MAX_MTU];
+            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
+            arq_[target].send_fragment(seq, frag_buf, got);
             redistributed++;
         }
         else if (redist_count_ <

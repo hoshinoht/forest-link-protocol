@@ -17,6 +17,7 @@ static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 static constexpr UBaseType_t MQTT_PUBLISH_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
 static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 64;
+static constexpr UBaseType_t MQTT_ACK_QUEUE_DEPTH = 32;
 static constexpr UBaseType_t MQTT_NACK_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_CMD_QUEUE_DEPTH = 8;
 static constexpr TickType_t MQTT_HEARTBEAT_INTERVAL = pdMS_TO_TICKS(30000);
@@ -43,11 +44,12 @@ void MqttClient::init()
         xQueueCreate(MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest));
     fragment_publish_queue_ =
         xQueueCreate(MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest));
+    ack_queue_ = xQueueCreate(MQTT_ACK_QUEUE_DEPTH, sizeof(CloudAckItem));
     nack_queue_ = xQueueCreate(MQTT_NACK_QUEUE_DEPTH, sizeof(CloudNackItem));
     cmd_queue_ = xQueueCreate(MQTT_CMD_QUEUE_DEPTH, sizeof(MeshCmdItem));
 
     if (!publish_queue_ || !file_publish_queue_ || !fragment_publish_queue_ ||
-        !nack_queue_ || !cmd_queue_)
+        !ack_queue_ || !nack_queue_ || !cmd_queue_)
     {
         ESP_LOGE(TAG, "Failed to create one or more MQTT queues");
         return;
@@ -183,7 +185,7 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 }
             }
 
-            /* Cloud NACK handler — parse {"type":"NACK","seq":N} */
+            /* Cloud ACK/NACK handler — parse {"type":"ACK"|"NACK","seq":N} */
             if (strcmp(topic_buf, "flp/admin/ack") == 0 && event->data &&
                 event->data_len > 0)
             {
@@ -195,12 +197,24 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 memcpy(ack_buf, event->data, alen);
                 ack_buf[alen] = '\0';
 
-                if (strstr(ack_buf, "\"NACK\""))
+                const char *seq_str = strstr(ack_buf, "\"seq\":");
+                if (seq_str)
                 {
-                    const char *seq_str = strstr(ack_buf, "\"seq\":");
-                    if (seq_str)
+                    int seq_val = atoi(seq_str + 6);
+
+                    if (strstr(ack_buf, "\"ACK\""))
                     {
-                        int seq_val = atoi(seq_str + 6);
+                        CloudAckItem ack_item = {};
+                        ack_item.seq = static_cast<uint16_t>(seq_val);
+                        if (xQueueSend(ack_queue_, &ack_item, 0) == pdTRUE)
+                        {
+                            ESP_LOGD(TAG,
+                                     "Cloud ACK received for seq=%u",
+                                     ack_item.seq);
+                        }
+                    }
+                    else if (strstr(ack_buf, "\"NACK\""))
+                    {
                         CloudNackItem nack = {};
                         nack.seq = static_cast<uint16_t>(seq_val);
                         if (xQueueSend(nack_queue_, &nack, 0) == pdTRUE)
@@ -208,7 +222,6 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                             ESP_LOGI(TAG,
                                      "Cloud NACK received for seq=%u",
                                      nack.seq);
-                            notify();
                         }
                     }
                 }
@@ -376,10 +389,6 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
         vTaskDelay(MQTT_CHUNK_PUBLISH_DELAY);
     }
 
-    /* Retain file data pointer for NACK retransmission */
-    last_file_data_ = req.data;
-    last_file_size_ = req.size;
-
     ESP_LOGI(
         TAG, "Published all %u file chunks for %s", chunk_count, req.filename);
 }
@@ -508,46 +517,6 @@ void MqttClient::process_fragment_publish()
     }
 }
 
-void MqttClient::process_nack_retransmit()
-{
-    if (!connected_ || !client_ || !last_file_data_ || last_file_size_ == 0)
-    {
-        return;
-    }
-
-    CloudNackItem nack;
-    while (xQueueReceive(nack_queue_, &nack, 0) == pdTRUE)
-    {
-        size_t offset = static_cast<size_t>(nack.seq) * MQTT_CHUNK_PAYLOAD;
-        if (offset >= last_file_size_)
-        {
-            ESP_LOGW(TAG,
-                     "NACK seq=%u out of range (size=%zu)",
-                     nack.seq,
-                     last_file_size_);
-            continue;
-        }
-
-        size_t remain = last_file_size_ - offset;
-        size_t chunk_len =
-            (remain < MQTT_CHUNK_PAYLOAD) ? remain : MQTT_CHUNK_PAYLOAD;
-
-        char data_topic[64];
-        snprintf(
-            data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
-
-        uint8_t chunk_buf[2 + MQTT_CHUNK_PAYLOAD];
-        chunk_buf[0] = static_cast<uint8_t>(nack.seq & 0xFF);
-        chunk_buf[1] = static_cast<uint8_t>((nack.seq >> 8) & 0xFF);
-        memcpy(chunk_buf + 2, last_file_data_ + offset, chunk_len);
-
-        esp_mqtt_client_publish(
-            client_, data_topic, (const char *) chunk_buf, 2 + chunk_len, 1, 0);
-
-        ESP_LOGI(TAG, "Retransmitted NACK'd chunk seq=%u", nack.seq);
-    }
-}
-
 void MqttClient::run()
 {
     task_ = xTaskGetCurrentTaskHandle();
@@ -605,9 +574,6 @@ void MqttClient::run()
         /* Process fragment publish requests (exit node mode) */
         process_fragment_publish();
 
-        /* Process cloud NACK retransmissions */
-        process_nack_retransmit();
-
         /* Periodic status heartbeat */
         now = xTaskGetTickCount();
         if ((now - last_status_tick) >= status_interval)
@@ -642,6 +608,36 @@ bool MqttClient::receive_cmd(MeshCmdItem &out)
         return false;
     }
     return xQueueReceive(cmd_queue_, &out, 0) == pdTRUE;
+}
+
+bool MqttClient::drain_cloud_ack(uint16_t &seq_out)
+{
+    if (!ack_queue_)
+    {
+        return false;
+    }
+    CloudAckItem item;
+    if (xQueueReceive(ack_queue_, &item, 0) == pdTRUE)
+    {
+        seq_out = item.seq;
+        return true;
+    }
+    return false;
+}
+
+bool MqttClient::drain_cloud_nack(uint16_t &seq_out)
+{
+    if (!nack_queue_)
+    {
+        return false;
+    }
+    CloudNackItem item;
+    if (xQueueReceive(nack_queue_, &item, 0) == pdTRUE)
+    {
+        seq_out = item.seq;
+        return true;
+    }
+    return false;
 }
 
 } /* namespace flp */
