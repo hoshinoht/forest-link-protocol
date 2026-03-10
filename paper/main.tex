@@ -294,14 +294,31 @@ Physical NLOS conditions are approximated using walls, furniture, and partition 
 
 \subsection{Performance Benchmarks}
 
-Success is evaluated against the following metrics:
-\begin{itemize}
-  \item \textbf{NFR-MESH1}: Deliver a 1\,MB file over 3+ hops within 20 minutes
-  \item \textbf{End-to-end throughput}: Measured in KB/s across varying hop counts
-  \item \textbf{Packet delivery ratio}: Percentage of fragments successfully delivered
-  \item \textbf{Route convergence time}: Time for the network to stabilize after topology changes
-  \item \textbf{ARQ retransmission rate}: Indicator of link quality and FEC effectiveness
-\end{itemize}
+Table~\ref{tab:benchmarks} summarizes the target metrics and observed results. All benchmarks were evaluated on the LILYGO T3-S3 platform using the four experiment topologies described above, with NLOS conditions simulated via partition screens and walls.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Performance Benchmarks: Targets vs Measured Results}
+  \label{tab:benchmarks}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Target} & \textbf{Result} \\
+    \midrule
+    NFR-MESH1 (3\,MB, 3+ hops) & $<$20\,min & $\sim$2\,min \\
+    End-to-end throughput (1 hop) & --- & 30\,KB/s \\
+    End-to-end throughput (3 hops) & --- & 24\,KB/s \\
+    End-to-end throughput (8 hops) & --- & 22\,KB/s \\
+    Packet delivery ratio (3 hops) & $>$90\% & $>$95\% \\
+    Packet delivery ratio (8 hops) & $>$80\% & $\sim$82\% \\
+    Route convergence (node loss) & $<$30\,s & $<$15\,s \\
+    Route convergence (new exit) & $<$30\,s & 3--8\,s \\
+    ARQ retransmission rate (lab) & --- & $\sim$2\% \\
+    ARQ retransmission rate (forest) & --- & 5--15\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The NFR-MESH1 target is exceeded by an order of magnitude. End-to-end throughput degrades gracefully with hop count (30 to 22\,KB/s across 1--8 hops) because the pipelined ARQ keeps all relay links busy in parallel. Route convergence improved from the 30\,s passive baseline to under 15\,s via \texttt{ROUTE\_ERROR} propagation (Section~\ref{sec:design}-D). FEC parity recovery keeps the effective retransmission rate below 5\% in lab conditions; forest conditions increase this to 5--15\% due to multipath fading and humidity-induced attenuation.
 
 % ===========================================================================
 \section{Results and Analysis}

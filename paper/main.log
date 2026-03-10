@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.3)  10 MAR 2026 12:30
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.3)  10 MAR 2026 12:32
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -625,17 +625,26 @@ Underfull \hbox (badness 7869) in paragraph at lines 269--270
 []\T1/ptm/m/n/10 The firmware is or-ga-nized into in-de-pen-dent ESP-
  []
 
+
+LaTeX Warning: Reference `tab:benchmarks' on page 4 undefined on input line 297
+.
+
 [4] [5]
-Underfull \hbox (badness 10000) in paragraph at lines 430--432
+Underfull \hbox (badness 10000) in paragraph at lines 447--449
 []\T1/ptm/b/n/10 6) LoRa Control-Plane Over-head. \T1/ptm/m/n/10 The orig-i-nal
 
  []
 
 
-Underfull \hbox (badness 2142) in paragraph at lines 430--432
+Underfull \hbox (badness 2142) in paragraph at lines 447--449
 \T1/ptm/m/n/10 LoRa air-time and lim-it-ing elec-tion re-spon-sive-ness. Bit-
  []
 
+
+Package balance Warning: You have called \balance in second column
+(balance)                Columns might not be balanced.
+
+[6]
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -647,36 +656,29 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-
-Package balance Warning: You have called \balance in second column
-(balance)                Columns might not be balanced.
-
-[6] (./main.aux)
+[7] (./main.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 
 
+LaTeX Warning: There were undefined references.
+
+
 LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
 
-
-Package rerunfilecheck Warning: File `main.out' has changed.
-(rerunfilecheck)                Rerun to get outlines right
-(rerunfilecheck)                or use package `bookmark'.
-
-Package rerunfilecheck Info: Checksums for `main.out':
-(rerunfilecheck)             Before: A8A6B3F3860F3C8897E9F592272DBC10;5592
-(rerunfilecheck)             After:  E5A5A6974CA6AEAAE38B91A601E42C48;5776.
+Package rerunfilecheck Info: File `main.out' has not changed.
+(rerunfilecheck)             Checksum: E5A5A6974CA6AEAAE38B91A601E42C48;5776.
  ) 
 Here is how much of TeX's memory you used:
- 16972 strings out of 467525
- 321289 string characters out of 5418983
+ 16976 strings out of 467525
+ 321334 string characters out of 5418983
  719271 words of memory out of 5000000
- 45632 multiletter control sequences out of 15000+600000
+ 45634 multiletter control sequences out of 15000+600000
  747984 words of font info for 171 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,14n,79p,1167b,1133s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,14n,79p,1167b,1165s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb
 ></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb><
 /usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></u
@@ -689,10 +691,10 @@ al/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local
 f-dist/fonts/type1/urw/times/utmbi8a.pfb></usr/local/texlive/2026/texmf-dist/fo
 nts/type1/urw/times/utmr8a.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/
 urw/times/utmri8a.pfb>
-Output written on main.pdf (6 pages, 171806 bytes).
+Output written on main.pdf (7 pages, 173611 bytes).
 PDF statistics:
- 283 PDF objects out of 1000 (max. 8388607)
- 248 compressed objects within 3 object streams
- 65 named destinations out of 1000 (max. 500000)
- 273 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 295 PDF objects out of 1000 (max. 8388607)
+ 259 compressed objects within 3 object streams
+ 67 named destinations out of 1000 (max. 500000)
+ 281 words of extra memory for PDF output out of 10000 (max. 10000000)
 
