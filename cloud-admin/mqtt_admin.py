@@ -34,7 +34,7 @@ class FlpMqttAdmin:
         self.broker_port = broker_port
 
         # MQTT client (FR-MQTT1)
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1,
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                                   client_id=CLIENT_ID, protocol=mqtt.MQTTv311)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
@@ -74,7 +74,7 @@ class FlpMqttAdmin:
         else:
             print(f"[MQTT] Connection failed with rc={rc}")
 
-    def _on_disconnect(self, client, userdata, rc, properties=None):
+    def _on_disconnect(self, client, userdata, flags, rc, properties=None):
         print(f"[MQTT] Disconnected (rc={rc})")
 
     def _on_message(self, client, userdata, msg):

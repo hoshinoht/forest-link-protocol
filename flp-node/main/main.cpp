@@ -14,7 +14,9 @@
 #include "freertos/task.h"
 #include "mesh_manager.hpp"
 #include "esp_heap_caps.h"
+#include "esp_heap_caps_init.h"
 #include "esp_psram.h"
+#include "soc/soc.h"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
 #if !CONFIG_FLP_WIFI_DISABLED
@@ -289,32 +291,6 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
-
-    /*
-     * Add PSRAM to heap AFTER WiFi init to avoid heap corruption during
-     * PHY calibration (known issue on ESP32-S3 chip rev v0.2).
-     * With CONFIG_SPIRAM_USE_MEMMAP, PSRAM is mapped but not in heap.
-     */
-#if CONFIG_SPIRAM
-    if (esp_psram_is_initialized())
-    {
-        size_t psram_size = esp_psram_get_size();
-        /* PSRAM is mapped starting at SOC_EXTRAM_DATA_LOW on ESP32-S3 */
-        esp_err_t ps_err = heap_caps_add_region(
-            SOC_EXTRAM_DATA_LOW,
-            SOC_EXTRAM_DATA_LOW + psram_size);
-        if (ps_err == ESP_OK)
-        {
-            ESP_LOGI(TAG, "Added %u KB PSRAM to heap (post-WiFi)",
-                     (unsigned)(psram_size / 1024));
-        }
-        else
-        {
-            ESP_LOGW(TAG, "Failed to add PSRAM to heap: %s",
-                     esp_err_to_name(ps_err));
-        }
-    }
-#endif
 #endif
 
     /*
