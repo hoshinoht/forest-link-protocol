@@ -41,6 +41,12 @@ dist/
 .env
 .env.local
 
+# === MQTT-SN gateway clone (deploy.sh) ===
+cloud-admin/mqtt-sn-gateway/
+
+# === Go build artifacts ===
+cloud-admin-go/flp-admin
+
 
 # Claude
 .claude/
