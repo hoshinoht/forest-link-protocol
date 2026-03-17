@@ -290,13 +290,16 @@ class RouteTable
         return best;
     }
 
-    /* Step 2e: Invalidate routes through a dead neighbor */
+    /* Step 2e: Invalidate routes through a dead neighbor.
+     * Returns true only if a route was actually changed (not already invalid),
+     * preventing ROUTE_ERROR rebroadcast storms. */
     bool invalidate_route_via(uint16_t dead_addr)
     {
         bool affected = false;
         for (uint8_t i = 0; i < count_; i++)
         {
-            if (neighbors_[i].addr == dead_addr)
+            if (neighbors_[i].addr == dead_addr &&
+                neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
                 neighbors_[i].hops_to_internet = ROUTE_HOPS_UNKNOWN;
                 affected = true;
