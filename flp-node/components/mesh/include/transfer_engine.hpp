@@ -23,6 +23,9 @@
 namespace flp
 {
 
+/* Callback for reading a chunk of file data on demand */
+using ReadChunkFn = std::function<size_t(uint8_t *buf, size_t offset, size_t len)>;
+
 /* Exit node election candidate */
 struct ExitCandidate
 {
@@ -34,7 +37,7 @@ struct ExitCandidate
 /* Active file transfer state (sender side) */
 struct ActiveTransfer
 {
-    const uint8_t *data = nullptr;
+    ReadChunkFn read_chunk;
     size_t size = 0;
     uint16_t fragment_count = 0;
     uint16_t fragment_size = 0;
@@ -63,6 +66,7 @@ struct BroadcastRetry
 };
 
 /* Callback for sending packets (TransferEngine -> MeshManager) */
+/* Callback for sending packets (TransferEngine -> MeshManager) */
 using SendPacketFn = std::function<void(uint16_t dst,
                                         PacketType type,
                                         const uint8_t *payload,
@@ -85,6 +89,9 @@ using ForwardMetaFn = std::function<void(uint16_t session_id,
                                           uint16_t chunk_count,
                                           uint16_t fragment_size,
                                           uint32_t crc32)>;
+
+/* Callback for draining ACK/NACK from MqttClient */
+using DrainSeqFn = std::function<bool(uint16_t &seq_out)>;
 
 class TransferEngine
 {
@@ -114,11 +121,14 @@ class TransferEngine
      * If has_internet && has_mqtt, uses local-exit fast path (no mesh).
      */
     void start_file_transfer(const char *filename,
-                             const uint8_t *data,
                              size_t size,
+                             ReadChunkFn read_chunk,
                              bool has_internet = false,
                              bool has_mqtt = false,
                              uint8_t hops_to_internet = 0xFF);
+
+    /* Helper: wrap a contiguous buffer as a ReadChunkFn */
+    static ReadChunkFn make_buffer_reader(const uint8_t *data, size_t size);
 
     /* Periodic tick — call from MeshManager::run() */
     void tick(uint32_t now_ms);
@@ -132,8 +142,10 @@ class TransferEngine
         {
             return 0;
         }
+        uint16_t progress_seq = local_exit_ ? cloud_base_seq_
+                                            : transfer_.next_fragment;
         return static_cast<uint8_t>(
-            (transfer_.next_fragment * 100) / transfer_.fragment_count);
+            (progress_seq * 100) / transfer_.fragment_count);
     }
 
     /* Exit node status */
@@ -144,6 +156,10 @@ class TransferEngine
 
     /* Set callback for publishing transfer meta to MQTT (exit node) */
     void set_forward_meta(ForwardMetaFn fn) { forward_meta_fn_ = fn; }
+
+    /* Set drain callbacks for cloud ACK/NACK (local-exit selective repeat) */
+    void set_cloud_ack_drain(DrainSeqFn fn) { drain_cloud_ack_fn_ = fn; }
+    void set_cloud_nack_drain(DrainSeqFn fn) { drain_cloud_nack_fn_ = fn; }
 
   private:
     void transfer_tick();
@@ -178,10 +194,26 @@ class TransferEngine
 
     ForwardToMqttFn forward_to_mqtt_fn_;
     ForwardMetaFn forward_meta_fn_;
+    DrainSeqFn drain_cloud_ack_fn_;
+    DrainSeqFn drain_cloud_nack_fn_;
     bool is_exit_node_ = false;
     bool local_exit_ = false;
     uint16_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
+
+    /* Cloud selective-repeat ARQ state (local-exit path) */
+    static constexpr uint8_t CLOUD_WINDOW_SIZE = 8;
+    static constexpr uint16_t MAX_CLOUD_FRAGMENTS = 2200;
+    static constexpr uint16_t CLOUD_ACK_BITMAP_BYTES =
+        (MAX_CLOUD_FRAGMENTS + 7) / 8;  /* 275 bytes */
+    uint8_t cloud_ack_bitmap_[CLOUD_ACK_BITMAP_BYTES] = {};
+    uint16_t cloud_base_seq_ = 0;       /* lowest un-ACK'd seq */
+    uint16_t cloud_next_send_ = 0;      /* next seq to send for first time */
+
+    /* Retransmit queue for NACK'd fragments */
+    static constexpr uint8_t CLOUD_RETX_QUEUE_SIZE = 16;
+    uint16_t cloud_retx_queue_[CLOUD_RETX_QUEUE_SIZE] = {};
+    uint8_t cloud_retx_count_ = 0;
 
     /* Deferred meta: exit node stores ad info until fragment 0 delivers filename */
     struct PendingMeta

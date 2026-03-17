@@ -1,0 +1,1 @@
+{"name": "Thread/OpenThread", "pdr": 0.99, "throughput_bps": 40000, "latency_ms": 50, "range_m": 100, "notes": "IEEE 802.15.4, mesh networking"}

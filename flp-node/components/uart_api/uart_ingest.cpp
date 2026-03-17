@@ -262,7 +262,10 @@ void UartIngest::handle_file_end()
      * Hand off to mesh manager — it reads from this buffer throughout the
      * multi-minute transfer. Do NOT free it here.
      */
-    mgr_->start_file_transfer(filename_, ingest_buf_, received_size_);
+    mgr_->start_file_transfer(
+        filename_,
+        received_size_,
+        flp::TransferEngine::make_buffer_reader(ingest_buf_, received_size_));
     send_ack(UART_CMD_FILE_END);
 
     /*

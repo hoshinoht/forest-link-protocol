@@ -1,4 +1,5 @@
 """Flask web server for FLP dashboard."""
+import os
 import threading
 from flask import Flask, jsonify, send_from_directory
 
@@ -104,7 +105,7 @@ def api_comparison():
     return jsonify(benchmarks)
 
 
-def start(host="0.0.0.0", port=5000):
+def start(host="0.0.0.0", port=int(os.environ.get("FLP_WEB_PORT", 5050))):
     t = threading.Thread(target=lambda: app.run(host=host, port=port, debug=False), daemon=True)
     t.start()
     print(f"[Web] Dashboard running at http://{host}:{port}/")

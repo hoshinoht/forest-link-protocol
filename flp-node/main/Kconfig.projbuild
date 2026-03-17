@@ -102,7 +102,7 @@ menu "Forest Link Protocol"
         default 1
         depends on !FLP_DEMO_AUTO
 
-    menu "SD Card (TF Slot)"
+    menu "SD Card (TF Slot — SPI on HSPI)"
         config FLP_SD_ENABLED
             bool "Enable SD card"
             default y

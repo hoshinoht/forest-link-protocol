@@ -167,6 +167,26 @@ void MeshManager::init()
             }
         });
 
+    /* Wire up cloud ACK/NACK drain for local-exit selective repeat */
+    transfer_engine_.set_cloud_ack_drain(
+        [this](uint16_t &seq_out) -> bool
+        {
+            if (mqtt_client_)
+            {
+                return mqtt_client_->drain_cloud_ack(seq_out);
+            }
+            return false;
+        });
+    transfer_engine_.set_cloud_nack_drain(
+        [this](uint16_t &seq_out) -> bool
+        {
+            if (mqtt_client_)
+            {
+                return mqtt_client_->drain_cloud_nack(seq_out);
+            }
+            return false;
+        });
+
     /* Wire up transfer meta forwarding (exit node publishes complete meta) */
     transfer_engine_.set_forward_meta(
         [this](uint32_t session_id,
@@ -1037,12 +1057,12 @@ void MeshManager::drain_cmd_queue()
 /* -- Start file transfer (delegates to TransferEngine) ------------------------ */
 
 void MeshManager::start_file_transfer(const char *filename,
-                                      const uint8_t *data,
-                                      size_t size)
+                                      size_t size,
+                                      ReadChunkFn read_chunk)
 {
     bool mqtt_ready = mqtt_client_ && mqtt_client_->is_connected();
     transfer_engine_.start_file_transfer(
-        filename, data, size, has_internet_, mqtt_ready, get_hops_to_internet());
+        filename, size, read_chunk, has_internet_, mqtt_ready, get_hops_to_internet());
 }
 
 /* -- send_packet / send_raw --------------------------------------------------- */

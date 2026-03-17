@@ -2,13 +2,20 @@
 # Espressif IoT Development Framework (ESP-IDF) 5.5.2 Project Minimal Configuration
 #
 CONFIG_IDF_TARGET="esp32s3"
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_SPEED_80M=y
+
+# PSRAM — ESP32-S3FH4R2 has 2MB Quad-SPI PSRAM
+# DISABLED: Enabling PSRAM causes heap corruption during WiFi PHY calibration
+# on this chip revision (v0.2). PSRAM shares MSPI bus with flash; PHY cal does
+# heavy flash I/O that corrupts PSRAM heap metadata. Not needed for sender nodes
+# since streaming ReadChunkFn avoids loading files into RAM.
+# See: https://github.com/espressif/esp-idf/issues/13906
+# CONFIG_SPIRAM=y
+
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
 CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 CONFIG_SPI_FLASH_ROM_IMPL=y
 CONFIG_MQTT_PROTOCOL_311=y
 CONFIG_MBEDTLS_HARDWARE_AES=y
@@ -27,9 +34,9 @@ CONFIG_FLP_DEMO_AUTO_INTERVAL_S=60
 
 # Please change the following Wi-Fi credentials to your own Wi-Fi network before
 # building and flashing the firmware.
-CONFIG_FLP_WIFI_SSID="PO-FAMILY"
-CONFIG_FLP_WIFI_PASSWORD="Hoshi@869978"
+CONFIG_FLP_WIFI_SSID="hoshiyomi"
+CONFIG_FLP_WIFI_PASSWORD="Kiseki033171"
 
 
 # Mqtt gateway
-FLP_MQTT_BROKER_URI="mqtt://192.168.0.2"
+CONFIG_FLP_MQTT_BROKER_URI="mqtt://10.239.233.64"

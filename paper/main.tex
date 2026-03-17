@@ -47,7 +47,7 @@
 % ===========================================================================
 \begin{abstract}
 % ===========================================================================
-This paper presents the design and implementation of Forest Link Protocol (FLP), a novel application-layer mesh protocol for IoT sensor deployments in environments where internet connectivity is intermittent and signal attenuation is high. Unlike standard IoT solutions that rely on continuous cloud connectivity or specialized LPWAN hardware, FLP utilizes commodity ESP32-S3 microcontrollers with dual-transport communication (ESP-NOW for short-range, high-bandwidth mesh relay and LoRa for long-range control signaling) to establish a self-healing, leader-electing tree topology. The protocol organizes nodes into a dynamic tree rooted at any node with verified internet connectivity. Nodes without internet access operate in a delay-tolerant mode, buffering data locally until the network reforms. FLP employs a Selective Repeat ARQ with Forward Error Correction to deliver reliable multi-megabyte file transfers over multiple hops. Our implementation on the LILYGO T3-S3 platform demonstrates that a 3\,MB file can be transferred over three hops in under three minutes in dense forest conditions, meeting the target requirement with significant margin.
+This paper presents the design and implementation of Forest Link Protocol (FLP), a custom application-layer mesh protocol for IoT sensor deployments in environments where internet connectivity is intermittent and signal attenuation is high. Unlike standard IoT solutions that rely on continuous cloud connectivity or specialized LPWAN hardware, FLP utilizes commodity ESP32-S3 microcontrollers with dual-transport communication (ESP-NOW for short-range, high-bandwidth mesh relay and LoRa for long-range control signaling) to establish a self-healing, leader-electing tree topology. The protocol organizes nodes into a dynamic tree rooted at any node with verified internet connectivity. Nodes without internet access operate in a delay-tolerant mode, buffering data locally until the network reforms. Key mechanisms include multi-exit striping with dead-exit redistribution across up to four exit nodes, and per-packet adaptive transport selection with a runtime reliability feedback loop. FLP employs a Selective Repeat ARQ with Forward Error Correction to deliver reliable multi-megabyte file transfers over multiple hops. Our implementation on the LILYGO T3-S3 platform demonstrates that a 3\,MB file can be transferred over three hops in approximately two minutes under dense forest conditions (projected), exceeding the 20-minute target by an order of magnitude.
 \end{abstract}
 
 % ===========================================================================
@@ -66,10 +66,10 @@ The primary issue we identified is the ``Green Wall'' effect, where dense and wa
 This results in disconnected or brittle networks that fail to deliver critical environmental data when signal quality fluctuates. Specific technical challenges include:
 
 \begin{itemize}
-  \item \textbf{Signal Attenuation}:2.4\,GHz signals are heavily absorbed by foliage, creating hidden-node problems.
-  \item \textbf{Transient Backhaul}:The internet gateway is often a single point of failure (e.g., a solar-powered 4G modem) that may sleep or fail without warning.
-  \item \textbf{The Bandwidth Gap}:LoRaWAN duty cycles severely limit payload size, making transfer of rich sensor datasets impractical.
-  \item \textbf{The Reliability Gap}:Standard TCP/IP meshes suffer from management collapse in forests; if the WiFi link drops, the entire protocol state fails.
+  \item \textbf{Signal Attenuation}: 2.4\,GHz signals are heavily absorbed by foliage, creating hidden-node problems.
+  \item \textbf{Transient Backhaul}: The internet gateway is often a single point of failure (e.g., a solar-powered 4G modem) that may sleep or fail without warning.
+  \item \textbf{The Bandwidth Gap}: LoRaWAN duty cycles severely limit payload size, making transfer of rich sensor datasets impractical.
+  \item \textbf{The Reliability Gap}: Standard TCP/IP meshes suffer from management collapse in forests; if the WiFi link drops, the entire protocol state fails.
 \end{itemize}
 
 \subsection{Relevance and Importance}
@@ -81,10 +81,20 @@ This research is vital for the Smart Forestry and Environmental Conservation ind
 The overarching goal is to implement and validate the Forest Link Protocol, focusing on:
 
 \begin{enumerate}
-  \item \textbf{Adaptive Protocol Selection}:Developing an intelligent system that dynamically chooses communication strategy based on real-time topology, hop count, and RSSI measurements.
-  \item \textbf{Self-Healing Topology}:Implementing an implicit leader election mechanism that allows any node with internet connectivity to assume the root role automatically.
-  \item \textbf{Delay Tolerant Networking}:Ensuring that nodes without internet access buffer data locally and flush it to the cloud seamlessly upon reconnection.
-  \item \textbf{Efficient Data Transport}:Utilizing Selective Repeat ARQ with FEC parity to minimize retransmission overhead over lossy links.
+  \item \textbf{Adaptive Protocol Selection}: Developing an intelligent system that dynamically chooses communication strategy based on real-time topology, hop count, and RSSI measurements.
+  \item \textbf{Self-Healing Topology}: Implementing an implicit leader election mechanism that allows any node with internet connectivity to assume the root role automatically.
+  \item \textbf{Delay Tolerant Networking}: Ensuring that nodes without internet access buffer data locally and flush it to the cloud seamlessly upon reconnection.
+  \item \textbf{Efficient Data Transport}: Utilizing Selective Repeat ARQ with FEC parity to minimize retransmission overhead over lossy links.
+\end{enumerate}
+
+\subsection{Contributions}
+
+This work makes three contributions:
+
+\begin{enumerate}
+  \item \textbf{Multi-exit striping with dead-exit redistribution.} Fragments are striped round-robin across up to four exit nodes; dead exits are detected by ACK timeout and their pending fragments are redistributed to survivors. Cloud-side deduplication by session ID ensures correctness despite fragments arriving on separate MQTT topics. This mechanism is loosely analogous to MPTCP sub-flow striping~\cite{ford2013mptcp} but operates at the application layer on commodity microcontrollers.
+  \item \textbf{Per-packet adaptive transport selection with feedback loop.} A multi-factor scoring function (RSSI, hop count, payload size, battery level) selects between ESP-NOW and LoRa on a per-packet basis, with a runtime reliability bias derived from historical success rates that shifts transport preference when one link outperforms the other by more than 10\%.
+  \item \textbf{Integrated system validated on a physical testbed.} DSDV+ETX routing, Selective Repeat ARQ with XOR FEC, DTN-style buffering, and the above mechanisms are integrated and evaluated on commodity ESP32-S3 hardware under NLOS lab conditions, demonstrating end-to-end multi-megabyte file transfer.
 \end{enumerate}
 
 % ===========================================================================
@@ -96,9 +106,10 @@ The overarching goal is to implement and validate the Forest Link Protocol, focu
 
 The field of IoT mesh networking in constrained and remote environments has seen significant development across several protocol families. Low-Power Wide-Area Networks (LPWANs) still represent the dominant paradigm for remote IoT deployments, with LoRaWAN emerging as the most widely adopted standard across the four major LPWAN candidates (LoRa, NB-IoT, Sigfox, and LTE-M) in terms of global network operators and country coverage~\cite{maurya2025lorawan}.
 
-For short-range mesh deployments, IEEE~802.15.4-based protocols such as Zigbee and Thread are widely studied. Delay Tolerant Networking (DTN) has been researched since the early 2000s via the Bundle Protocol (RFC~5050 and successors), which still remains the backbone of DTN, providing the store-carry-forward abstraction. Recent work emphasizes BPv7 (updated Bundle Protocol) for improved efficiency, extensibility, and security~\cite{elewaily2024dtn}.
+For short-range mesh deployments, IEEE~802.15.4-based protocols such as Zigbee and Thread are widely studied. DTN-based store-carry-forward approaches are discussed in Section~\ref{sec:findings}.
 
 \subsection{Significant Research Findings}
+\label{sec:findings}
 
 LoRaWAN has become the most widely adopted LPWAN standard. Research has focused on Adaptive Data Rate (ADR) algorithms to optimize transmission efficiency and energy use~\cite{lehong2020adr}. Despite these advances, studies consistently highlight LoRaWAN's strict duty cycle and limited payload capacity as major constraints, restricting its use to small telemetry packets rather than large sensor datasets.
 
@@ -106,15 +117,34 @@ In parallel, DTN research has advanced from the original Bundle Protocol (RFC~50
 
 Together, these developments show that current IoT solutions either sacrifice throughput for range (LoRaWAN) or remain confined to specialized contexts (DTN). This gap directly relates to the problem statement: forest environments require both resilience against intermittent connectivity and sufficient bandwidth for richer datasets.
 
+\textbf{Evaluation methodologies.} LoRaWAN ADR studies are typically validated in NS-3 or LoRaSim simulations with 100--1\,000 nodes, reporting packet delivery ratio and energy per byte~\cite{lehong2020adr}. DTN evaluations rely on the ONE simulator with mobility models, measuring delivery ratio and end-to-end latency~\cite{castillo2024dtn}. Neither body of work addresses a dual-transport hybrid for bulk file transfer in forest environments, the gap FLP targets.
+
 \subsection{Limitations of Existing Solutions}
 
 LoRaWAN, while dominant in LPWAN deployments, suffers from strict duty cycle restrictions and small payload sizes, making it unsuitable for transferring large sensor datasets or multimedia logs. Its reliance on gateway infrastructure also introduces cost and reliability challenges in remote environments.
 
 DTN, though resilient in intermittent and high-latency conditions, faces its own limitations. Despite successful trials, DTN implementations remain tied to specialized hardware or research prototypes, limiting accessibility for commodity deployments~\cite{castillo2024dtn}.
 
-\subsection{Relation to Objectives}
+\subsection{Gap-to-Design Mapping}
 
-LoRaWAN struggles with payload and duty cycle limits, while DTN faces adoption and complexity challenges. FLP bridges these gaps by combining efficient data transport, delay-tolerant resilience, and adaptive self-healing topologies, tailored for forest connectivity using commodity hardware.
+Table~\ref{tab:gap_mapping} maps the specific limitations identified above to the corresponding FLP design responses.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Literature Gap to FLP Design Response}
+  \label{tab:gap_mapping}
+  \begin{tabular}{@{}p{3.2cm}p{3.2cm}c@{}}
+    \toprule
+    \textbf{Literature Gap} & \textbf{FLP Design Response} & \textbf{Sec.} \\
+    \midrule
+    LoRaWAN payload/duty limits & Dual-transport: ESP-NOW bulk + LoRa control & 3.1, 3.6 \\
+    DTN tied to specialized HW & Commodity ESP32-S3 at \$15/node & 3.2 \\
+    No per-packet adaptive transport & ProtocolSelector with feedback loop & 3.6 \\
+    No multi-exit resilience in LPWAN & Multi-exit striping + dead-exit redistribution & 3.5 \\
+    Simulation-only validation & Physical NLOS testbed & 4.3 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 % ===========================================================================
 \section{System Design}
@@ -126,9 +156,9 @@ LoRaWAN struggles with payload and duty cycle limits, while DTN faces adoption a
 FLP employs a three-layer communication architecture with adaptive protocol selection, as shown in Fig.~\ref{fig:architecture}:
 
 \begin{enumerate}
-  \item \textbf{ESP-NOW (Short-Range Mesh)}:High-bandwidth (\(\sim\)34\,KB/s per hop), short-range (30--50\,m in forest) inter-node communication for bulk data relay.
-  \item \textbf{LoRa (Long-Range Control)}:Extended range (50--150\,m in forest at SF7/BW800), higher bandwidth (\(\sim\)6\,KB/s at SF7/BW800) than narrowband LoRa, used for broadcast discovery, route advertisements, and transfer coordination. Spread-spectrum coding gain provides~6--18\,dB advantage over ESP-NOW depending on SF.
-  \item \textbf{WiFi + MQTT (External Gateway)}:Opportunistic cloud connectivity via MQTT for data exfiltration when a node detects internet access.
+  \item \textbf{ESP-NOW (Short-Range Mesh)}: High-bandwidth (\(\sim\)34\,KB/s per hop), short-range (30--50\,m in forest) inter-node communication for bulk data relay.
+  \item \textbf{LoRa (Long-Range Control)}: Extended range (50--150\,m in forest at SF7/BW800), higher bandwidth (\(\sim\)4\,KB/s at SF7/BW800~\cite{semtech2020sx1280}) than narrowband LoRa, used for broadcast discovery, route advertisements, and transfer coordination. Spread-spectrum coding gain provides~6--18\,dB advantage over ESP-NOW depending on SF.
+  \item \textbf{WiFi + MQTT (External Gateway)}: Opportunistic cloud connectivity via MQTT for data offloading when a node detects internet access.
 \end{enumerate}
 
 \begin{figure}[htbp]
@@ -145,7 +175,7 @@ FLP employs a three-layer communication architecture with adaptive protocol sele
 
 \subsection{Hardware Platform}
 
-All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 8\,MB octal PSRAM and an integrated SX1280 LoRa transceiver. Table~\ref{tab:hardware} summarizes the key hardware specifications.
+All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 2\,MB quad-SPI PSRAM (disabled; the system operates from internal SRAM and SD card) and an integrated SX1280 LoRa transceiver. Table~\ref{tab:hardware} summarizes the key hardware specifications.
 
 \begin{table}[htbp]
   \centering
@@ -156,7 +186,7 @@ All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with
     \textbf{Component} & \textbf{Specification} \\
     \midrule
     MCU & ESP32-S3, dual-core Xtensa LX7 \\
-    PSRAM & 8\,MB octal (fragment reassembly buffer) \\
+    PSRAM & 2\,MB quad-SPI (disabled; internal SRAM used) \\
     LoRa & SX1280, 2.4\,GHz, BW 800\,kHz, SF7--SF10 adaptive \\
     WiFi & 802.11 b/g/n, 2.4\,GHz \\
     ESP-NOW & 250\,B MTU, broadcast + unicast \\
@@ -190,8 +220,9 @@ FLP uses a compact 8-byte packet header (Table~\ref{tab:header}) designed to max
 Packet types include \texttt{DATA} (0x01), \texttt{ACK} (0x02), \texttt{NACK} (0x03), \texttt{DISCOVERY} (0x10), \texttt{ROUTE\_REQ/REPLY} (0x11/0x12), \texttt{ROUTE\_ERROR} (0x13), \texttt{TRANSFER\_AD} (0x20), \texttt{TRANSFER\_ACK} (0x21), \texttt{PARITY} (0x06), and relay types \texttt{MESH\_PUB/CMD} (0x30/0x31).
 
 \subsection{Routing: Sequence-Numbered Distance Vector}
+\label{sec:routing}
 
-FLP implements a DSDV-inspired routing protocol with ETX (Expected Transmission Count) weighted metrics. Each discovery broadcast carries:
+FLP implements a DSDV-inspired~\cite{perkins1994dsdv} routing protocol with ETX (Expected Transmission Count)~\cite{decouto2003etx} weighted metrics. Each discovery broadcast carries:
 
 \begin{itemize}
   \item A monotonic sequence number (\texttt{inet\_seq}) from the originating exit node
@@ -210,6 +241,10 @@ Route updates are accepted only if the sequence number is higher than the curren
 where ETX is computed per-neighbor from transmission success rate. This naturally routes around lossy links: a 2-hop path with ETX\,=\,1.0 (cost\,=\,200) beats a 1-hop path with ETX\,=\,5.0 (cost\,=\,600).
 
 \textbf{Route Error Propagation.} When a neighbor becomes unreachable (15\,s without contact), a \texttt{ROUTE\_ERROR} packet is broadcast, enabling upstream nodes to invalidate stale routes within seconds rather than waiting for the 30\,s passive timeout.
+
+\subsection{Data Lifecycle}
+
+The end-to-end data flow proceeds as follows: (1)~a sensor node reads the target file from its local SD card via a streaming \texttt{ReadChunkFn} callback, avoiding loading the entire file into RAM; (2)~the node broadcasts a compact \texttt{TRANSFER\_AD} via LoRa to discover exit nodes; (3)~exit nodes with internet access respond with \texttt{TRANSFER\_ACK}; (4)~the source stripes fragments round-robin across up to four elected exit nodes via ESP-NOW, protected by Selective Repeat ARQ with XOR FEC; (5)~each exit node forwards received fragments to an MQTT broker over WiFi; (6)~the cloud-side MQTT Admin reassembles fragments by session ID and verifies file integrity via CRC-32.
 
 \subsection{File Transfer Protocol}
 
@@ -234,19 +269,33 @@ A \texttt{ProtocolSelector} module continuously evaluates transport suitability 
 
 \subsection{Adaptive LoRa Spreading Factor}
 
-Inspired by LoRaWAN's ADR mechanism, FLP adjusts the SX1280 LoRa spreading factor (SF7--SF10) every 10\,s based on link quality and neighbor count. At SF7/BW800, the SX1280 achieves approximately 50\,kbps and~41\,ms airtime per 255-byte packet, providing adequate control-plane throughput. Poor LoRa success rates with few neighbors trigger an increase toward SF10 for extended coding gain, while good conditions with sufficient neighbors revert to SF7 for minimum airtime and lower contention.
+Following LoRaWAN's ADR approach, FLP adjusts the SX1280 LoRa spreading factor (SF7--SF10) every 10\,s based on link quality and neighbor count. At SF7/BW800, the SX1280 achieves approximately 33\,kbps raw data rate~\cite{semtech2020sx1280} with~60\,ms airtime per 255-byte packet (including preamble and header overhead), providing adequate control-plane throughput. Poor LoRa success rates with few neighbors trigger an increase toward SF10 for extended coding gain, while good conditions with sufficient neighbors revert to SF7 for minimum airtime and lower contention.
 
-\subsection{Security}
+\subsection{Security and Threat Model}
 
-FLP employs hardware-accelerated AES-128-GCM encryption on the ESP32-S3, providing both confidentiality and integrity for all mesh traffic without significant throughput reduction.
+FLP's target deployment is environmental monitoring in restricted-access forests, where the primary threats are link failure and data loss rather than adversarial interception. The current prototype provides the following protections:
+
+\begin{itemize}
+  \item \textbf{Data integrity}: CRC-16 on \texttt{TRANSFER\_AD} payloads; CRC-32 on the fully reassembled file at the cloud side.
+  \item \textbf{Replay protection}: Monotonic \texttt{inet\_seq} in DSDV route updates (RFC~1982~\cite{rfc1982} serial-number arithmetic) and unique session IDs per transfer prevent replay of stale routes and duplicate file deliveries.
+  \item \textbf{Broadcast flooding mitigation}: A per-node deduplication cache and per-sequence NACK cooldown timers suppress storm amplification under lossy conditions.
+\end{itemize}
+
+\textbf{Out of scope (acknowledged).} Confidentiality (ESP-NOW supports PMK-based encryption but it is disabled in the prototype), mutual node authentication, and man-in-the-middle resistance are not addressed. Enabling ESP-NOW encryption and adding a pre-shared key provisioning step are hardening measures planned for production deployment (Section~\ref{sec:conclusion}).
 
 \subsection{Data Storage and Processing}
 
-Collected data is stored in the ESP32-S3's 8\,MB PSRAM until internet availability is detected. Fragment reassembly uses $O(1)$ memory-mapped indexing: each fragment's offset is computed directly from its sequence number, enabling reassembly without sorting or searching. Once published to the cloud, the MQTT Admin reconstructs fragmented packets, discards duplicates, and rebuilds the original file.
+Sensor data is buffered on the local SD card (up to 32\,GB FAT32) until internet availability is detected. A streaming \texttt{ReadChunkFn} callback reads data directly from the SD card during transfer, keeping RAM usage constant regardless of file size. Once published to the cloud, the MQTT Admin reconstructs fragmented packets using $O(1)$ sequence-number-based indexing, discards duplicates, and verifies the reassembled file against its CRC-32.
 
 \subsection{Cloud Interaction}
 
-Users interact with forest nodes through the cloud by publishing MQTT packets to the MQTT Admin, which are relayed back down through the mesh to specific nodes via the \texttt{MESH\_CMD} packet type. Each node maintains a synchronized topic lookup table for efficient relay-topic mapping.
+Communication between the cloud and in-forest nodes is bidirectional:
+
+\textbf{Uplink.} Nodes publish telemetry via \texttt{MESH\_PUB} packets with 1-byte topic IDs (heap usage, link metrics, topology snapshots, status heartbeats). Exit nodes forward these to the MQTT broker on per-node topics.
+
+\textbf{Downlink.} The MQTT Admin issues commands via \texttt{MESH\_CMD} packets with subtypes including \texttt{REQUEST\_TELEMETRY}, \texttt{CONFIG\_UPDATE}, \texttt{REBOOT}, and \texttt{TOPIC\_MSG}. Commands are routed through the mesh to the target node using the standard DSDV forwarding path. Each node subscribes to up to four topic IDs, and a synchronized topic lookup table maps relay addresses to subscriptions.
+
+A web-based dashboard provides real-time topology visualization, per-node health monitoring, and the ability to trigger file transfers or issue commands to individual nodes.
 
 % ===========================================================================
 \section{Implementation}
@@ -255,7 +304,7 @@ Users interact with forest nodes through the cloud by publishing MQTT packets to
 
 \subsection{System Prototyping and Development Tools}
 
-The FLP system is prototyped using ESP32-S3 microcontrollers equipped with 8\,MB PSRAM, programmed in C/C++ using ESP-IDF v5.5 (Espressif IoT Development Framework). ESP-IDF provides the build system, component management, and runtime configuration through Kconfig. The dual-protocol mesh relies on ESP-NOW for short-range, high-bandwidth communication and an SX1280 2.4\,GHz LoRa transceiver on the LILYGO T3-S3 board for long-range links.
+The FLP system is prototyped using ESP32-S3 microcontrollers programmed in C/C++ using ESP-IDF v5.5 (Espressif IoT Development Framework). ESP-IDF provides the build system, component management, and runtime configuration through Kconfig. The dual-protocol mesh relies on ESP-NOW for short-range, high-bandwidth communication and an SX1280 2.4\,GHz LoRa transceiver on the LILYGO T3-S3 board for long-range links.
 
 On the cloud side, a Mosquitto MQTT broker serves as the external gateway, paired with an MQTT Admin service responsible for fragment reassembly, sliding window flow control, and topic management. Each node is fitted with an SSD1306 OLED display for real-time status output during development and demonstration.
 
@@ -268,14 +317,22 @@ Key software tools include:
 
 The firmware is organized into independent ESP-IDF components: \texttt{espnow/} (ESP-NOW transport), \texttt{lora/} (LoRa transport), \texttt{mesh/} (MeshManager, TransferEngine, route table), \texttt{protocol/} (ARQ, FEC, packet definitions), \texttt{mqtt\_client/} (MQTT-SN client), \texttt{display/} (OLED driver), and \texttt{sdcard/} (SD card reader). Each component is developed and validated independently before integration.
 
+\subsection{Deployment Constraints}
+
+\textbf{Power.} Each node draws approximately 120\,mA when active (WiFi + LoRa + SD card). A 3.7\,V 2000\,mAh LiPo battery provides roughly 16 hours of continuous operation. Long-term autonomous deployment requires solar harvesting or aggressive duty cycling, which is deferred to future work.
+
+\textbf{Weather.} The LILYGO T3-S3 has no ingress protection rating; field deployment requires weatherproof enclosures. Humidity-induced RF attenuation is modeled in Table~\ref{tab:transfer_time}.
+
+\textbf{Maintenance.} The current firmware does not support over-the-air (OTA) updates; physical access is required for firmware changes. Local SD card storage (32\,GB FAT32) provides months of sensor data buffering before retrieval is needed.
+
 \subsection{Deployment Strategy}
 
 The FLP system is deployed in a multi-layered mesh configuration consisting of Sensor Nodes (origin nodes), Relay Nodes (extenders), and Cloud Gateways (data exit points). Deployment in a dense forest presents the ``Green Wall'' effect where moisture-heavy foliage attenuates 2.4\,GHz signals. FLP mitigates this through:
 
 \begin{enumerate}
-  \item \textbf{Adaptive Protocol Selection}:FLP uses LoRa as a control plane to discover other nodes. Once a neighbor is identified, FLP escalates to ESP-NOW for high-speed file transfers. If the ESP-NOW RSSI drops below a threshold, FLP falls back to LoRa.
-  \item \textbf{Network Resilience}:To prevent management collapse observed in TCP/IP meshes, FLP uses Opportunistic Exit Node Election, where nodes with internet access advertise their state and sensor nodes broadcast an ``intent'' packet via LoRa to locate these exit nodes dynamically.
-  \item \textbf{Priority Scheduling}:A dual-priority FreeRTOS queue ensures that control packets (ACK, NACK, route updates) are processed before bulk data fragments, preventing ARQ timeouts under heavy transfer load.
+  \item \textbf{Adaptive Protocol Selection}: FLP uses LoRa as a control plane to discover other nodes. Once a neighbor is identified, FLP escalates to ESP-NOW for high-speed file transfers. If the ESP-NOW RSSI drops below a threshold, FLP falls back to LoRa.
+  \item \textbf{Network Resilience}: To prevent management collapse observed in TCP/IP meshes, FLP uses Opportunistic Exit Node Election, where nodes with internet access advertise their state and sensor nodes broadcast an ``intent'' packet via LoRa to locate these exit nodes dynamically.
+  \item \textbf{Priority Scheduling}: A dual-priority FreeRTOS queue ensures that control packets (ACK, NACK, route updates) are processed before bulk data fragments, preventing ARQ timeouts under heavy transfer load.
 \end{enumerate}
 
 \subsection{Testing Process}
@@ -294,14 +351,35 @@ Physical NLOS conditions are approximated using walls, furniture, and partition 
 
 \subsection{Performance Benchmarks}
 
-Success is evaluated against the following metrics:
-\begin{itemize}
-  \item \textbf{NFR-MESH1}: Deliver a 1\,MB file over 3+ hops within 20 minutes
-  \item \textbf{End-to-end throughput}: Measured in KB/s across varying hop counts
-  \item \textbf{Packet delivery ratio}: Percentage of fragments successfully delivered
-  \item \textbf{Route convergence time}: Time for the network to stabilize after topology changes
-  \item \textbf{ARQ retransmission rate}: Indicator of link quality and FEC effectiveness
-\end{itemize}
+Table~\ref{tab:benchmarks} summarizes the target metrics and observed results. All benchmarks were evaluated on the LILYGO T3-S3 platform using the four experiment topologies described above, with NLOS conditions simulated via partition screens and walls.
+
+\textbf{Measurement methodology.} Throughput is computed as \texttt{file\_size / transfer\_time} from timestamps recorded by the cloud-side metrics store. Packet delivery ratio (PDR) is \texttt{1 - (tx\_fail / tx\_count)} from per-node counters. Route convergence time is measured from the \texttt{ROUTE\_ERROR} broadcast timestamp to the first successful packet on an alternate route. ARQ retransmission rate is \texttt{retransmit\_count / total\_fragments} per transfer session.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Performance Benchmarks: Targets vs Measured Results}
+  \label{tab:benchmarks}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Target} & \textbf{Result} \\
+    \midrule
+    NFR-MESH1 (3\,MB, 3+ hops) & $<$20\,min & $\sim$2\,min \\
+    End-to-end throughput (1 hop) & --- & 30\,KB/s \\
+    End-to-end throughput (3 hops) & --- & 24\,KB/s \\
+    End-to-end throughput (8 hops)* & --- & 22\,KB/s \\
+    Packet delivery ratio (3 hops) & $>$90\% & $>$95\% \\
+    Packet delivery ratio (8 hops)* & $>$80\% & $\sim$82\% \\
+    Route convergence (node loss) & $<$30\,s & $<$15\,s \\
+    Route convergence (new exit) & $<$30\,s & 3--8\,s \\
+    ARQ retransmission rate (lab) & --- & $\sim$2\% \\
+    ARQ retransmission rate (forest)* & --- & 5--15\% \\
+    \bottomrule
+  \end{tabular}
+  \vspace{1pt}
+  \raggedright\footnotesize *Extrapolated from measured per-hop degradation; experiments used up to 4 nodes / 3 hops.
+\end{table}
+
+The NFR-MESH1 target is exceeded by an order of magnitude. End-to-end throughput degrades gracefully with hop count (30 to 22\,KB/s across 1--8 hops) because the pipelined ARQ keeps all relay links busy in parallel. Route convergence improved from the 30\,s passive baseline to under 15\,s via \texttt{ROUTE\_ERROR} propagation (Section~\ref{sec:routing}). FEC parity recovery keeps the effective retransmission rate below 5\% in lab conditions; forest conditions increase this to 5--15\% due to multipath fading and humidity-induced attenuation.
 
 % ===========================================================================
 \section{Results and Analysis}
@@ -334,7 +412,7 @@ Key optimizations included: enlarging the ARQ window from 8 to 32 fragments, red
 
 \subsection{Transfer Time Performance}
 
-Table~\ref{tab:transfer_time} shows the projected 3\,MB file transfer times across different environmental conditions with four exit nodes.
+Table~\ref{tab:transfer_time} shows 3\,MB file transfer times across different environmental conditions with four exit nodes. The ``Lab'' row is directly measured; forest conditions are projected from lab throughput using estimated attenuation factors derived from ITU-R vegetation attenuation models~\cite{itur2019vegetation}.
 
 \begin{table}[htbp]
   \centering
@@ -345,19 +423,21 @@ Table~\ref{tab:transfer_time} shows the projected 3\,MB file transfer times acro
     \textbf{Condition} & \textbf{Time} \\
     \midrule
     Lab (clean RF, short range) & $\sim$50\,s \\
-    Moderate forest (partial canopy) & $\sim$70\,s \\
-    Dense forest (full canopy, dry) & $\sim$85\,s \\
-    Dense forest + rain & $\sim$95\,s \\
-    Worst case (heavy rain, high humidity) & $\sim$110\,s \\
+    Moderate forest (partial canopy)* & $\sim$70\,s \\
+    Dense forest (full canopy, dry)* & $\sim$85\,s \\
+    Dense forest + rain* & $\sim$95\,s \\
+    Worst case (heavy rain, high humidity)* & $\sim$110\,s \\
     \bottomrule
   \end{tabular}
+  \vspace{1pt}
+  \raggedright\footnotesize *Projected from lab throughput using ITU-R P.833 vegetation attenuation estimates.
 \end{table}
 
-All scenarios meet the NFR-MESH1 target of delivering data within 20 minutes, with dense forest conditions achieving transfer times of approximately 1.5--2 minutes, well within the requirement.
+Both the measured lab result and projected forest scenarios meet the NFR-MESH1 target of delivering data within 20 minutes, with dense forest conditions achieving transfer times of approximately 1.5--2 minutes, well within the requirement.
 
 \subsection{Scalability}
 
-Table~\ref{tab:scalability} presents the relationship between network size and transfer performance in a Singapore tropical forest environment.
+Table~\ref{tab:scalability} presents the relationship between network size and transfer performance. The 2-node and 4-node rows are measured in the lab testbed; the 6-node and 9-node rows are extrapolated from measured per-hop throughput degradation.
 
 \begin{table}[htbp]
   \centering
@@ -369,13 +449,15 @@ Table~\ref{tab:scalability} presents the relationship between network size and t
     \midrule
     2 & 1 & 100\,m & 2.0\,min & $>$98\% \\
     4 & 3 & 300\,m & 2.6\,min & $>$95\% \\
-    6 & 5 & 500\,m & 2.8\,min & $\sim$91\% \\
-    9 & 8 & 800\,m & 3.0\,min & $\sim$82\% \\
+    6* & 5 & 500\,m & 2.8\,min & $\sim$91\% \\
+    9* & 8 & 800\,m & 3.0\,min & $\sim$82\% \\
     \bottomrule
   \end{tabular}
+  \vspace{1pt}
+  \raggedright\footnotesize *Extrapolated from measured per-hop throughput degradation.
 \end{table}
 
-Transfer time scales slowly with hop count (2.0 to 3.0 minutes across 1--8 hops) because the pipelined ARQ keeps all relay links busy in parallel. The relay node's per-hop throughput ($\sim$25\,KB/s), not the number of hops, is the dominant bottleneck.
+For the measured configurations (2 and 4 nodes), transfer time scales slowly with hop count because the pipelined ARQ keeps all relay links busy in parallel. The relay node's per-hop throughput ($\sim$25\,KB/s), not the number of hops, is the dominant bottleneck. Extrapolated values for 6 and 9 nodes assume similar per-hop degradation.
 
 \subsection{Routing Performance}
 
@@ -385,6 +467,38 @@ The DSDV sequence-numbered routing with ETX weighting provides several measurabl
   \item \textbf{Route convergence}: Stale routes are invalidated within seconds via \texttt{ROUTE\_ERROR} propagation, compared to the 30\,s passive timeout in the baseline.
   \item \textbf{Lossy link avoidance}: ETX-weighted routing naturally avoids high-loss links, reducing the overall ARQ retransmission rate.
   \item \textbf{Congestion-aware forwarding}: When the packet queue exceeds 75\% capacity, low-priority forwarded packets are dropped, protecting control traffic from being starved during heavy transfers.
+\end{itemize}
+
+\subsection{Failure and Recovery}
+
+FLP implements several failure recovery mechanisms, each validated at different levels:
+
+\begin{itemize}
+  \item \textbf{Exit node failure}: The \texttt{exit\_node\_health\_tick()} function detects unresponsive exit nodes via ACK timeout (10\,s). Pending fragments are redistributed round-robin to surviving exits by \texttt{redistribute\_dead\_exit()}. Validated in the 4-node multi-exit lab experiment by powering off one exit mid-transfer.
+  \item \textbf{Route failure}: \texttt{detect\_early\_stale()} triggers a \texttt{ROUTE\_ERROR} broadcast after 15\,s of neighbor silence. \texttt{invalidate\_route\_via()} clears all routes through the failed node, and upstream nodes converge on alternate paths within seconds. Validated in the 3-hop experiment by removing the relay node.
+  \item \textbf{WiFi disconnect}: The MQTT client implements automatic reconnection with exponential backoff. During disconnection, the node continues mesh operations and buffers outbound data locally (DTN-style). Validated by toggling the WiFi access point during transfer.
+  \item \textbf{Transfer stall}: If no progress is made for 30\,s, the transfer engine re-broadcasts \texttt{TRANSFER\_AD} to re-elect exit nodes. This path is architecturally supported but has not been stress-tested under sustained adverse conditions.
+\end{itemize}
+
+\subsection{Latency Analysis}
+
+Per-packet latency is dominated by radio airtime and ARQ round-trips rather than software processing:
+
+\begin{itemize}
+  \item \textbf{ESP-NOW per-packet airtime}: 250\,B at approximately 1\,Mbps raw rate~\cite{espressif2024espnow} yields $\sim$2\,ms per frame.
+  \item \textbf{ARQ round-trip per hop}: Send, propagate, and ACK return takes approximately 5--10\,ms under clean conditions.
+  \item \textbf{MQTT pipeline}: The 10\,ms processing interval at each exit node adds minimal latency per fragment.
+  \item \textbf{End-to-end single fragment (1 hop)}: Approximately 15--20\,ms from source transmission to cloud receipt.
+  \item \textbf{Bulk file transfer}: Dominated by aggregate throughput rather than per-packet latency; the pipelined ARQ window keeps all links saturated.
+\end{itemize}
+
+\subsection{Security Evaluation}
+
+\begin{itemize}
+  \item \textbf{CRC integrity}: CRC-16 on control packets and CRC-32 on reassembled files detect accidental corruption. In lab testing, intentionally corrupted fragments were correctly rejected.
+  \item \textbf{Replay protection}: Stale DSDV route updates are rejected by \texttt{seq\_newer()}, which implements RFC~1982~\cite{rfc1982} serial-number comparison. Duplicate file fragments are deduplicated by session ID at the cloud.
+  \item \textbf{NACK storm suppression}: Under 20\% simulated packet loss, the per-sequence cooldown timer reduced NACK volume from $O(n^2)$ to $O(n)$, preventing reverse-path congestion collapse.
+  \item \textbf{Encryption}: ESP-NOW PMK-based encryption is supported by hardware but disabled in the prototype (all peers registered with \texttt{encrypt = false}). Enabling encryption is deferred to future work.
 \end{itemize}
 
 \subsection{Comparison with Existing Solutions}
@@ -404,15 +518,42 @@ Table~\ref{tab:comparison} compares FLP against LoRaWAN and DTN for the target u
     Self-healing & Yes & No (star) & Partial \\
     Hardware cost & \$15/node & \$30+ GW & Specialized \\
     Duty cycle limit & None & 1\% & None \\
+    Multi-exit resilience & Yes (4 exits) & No (star) & No \\
+    Adaptive transport & Per-packet & ADR (SF only) & N/A \\
     \bottomrule
   \end{tabular}
 \end{table}
 
+\subsection{Mitigation of Challenges}
+
+Several significant engineering challenges emerged during development, each requiring iterative redesign informed by empirical testing.
+
+\textbf{1) BLE-to-ESP-NOW Transport Pivot.}
+The initial FLP implementation used Bluetooth Low Energy (NimBLE GATT) as the short-range mesh transport. BLE imposed a 4-peer connection limit, required scan/connect handshakes that added seconds of latency per link, and suffered from connection interval scheduling overhead that capped effective throughput at $\sim$8\,KB/s. Address mismatches between the BLE stack and mesh layer caused silent routing failures. After extensive tuning (MTU negotiation to 512\,B, Data Length Extension, reduced connection intervals from 30--50\,ms to 7.5--15\,ms), BLE throughput remained fundamentally limited by its connection-oriented design. The transport was replaced entirely with ESP-NOW, which is connectionless, supports 20 peers, and achieved 34\,KB/s effective throughput, a 4.3$\times$ improvement with substantially simpler code.
+
+\textbf{2) Routing Loop Elimination.}
+The original hop-count-only routing suffered from count-to-infinity loops after gateway failures: when an exit node went offline, stale routes persisted for up to 30\,s, causing packets to cycle between nodes. This was resolved by adopting DSDV sequence-numbered distance vectors with a monotonic \texttt{inet\_seq} from each exit node. Routes are only accepted if the sequence number is strictly newer, or equal with lower cost, eliminating stale-route loops entirely. Additionally, \texttt{ROUTE\_ERROR} packets were introduced to proactively invalidate routes within seconds of neighbor loss (15\,s timeout), rather than relying on passive expiry.
+
+\textbf{3) NACK Storm Suppression.}
+Under lossy conditions, the Selective Repeat ARQ generated $O(n^2)$ NACKs: every missing fragment in the receive window triggered a retransmission request on each ARQ cycle, flooding the reverse path and worsening congestion. This was mitigated by restricting NACKs to gaps at the receive window front only, with a per-sequence cooldown timer that prevents re-NACKing a fragment until its expected round-trip time has elapsed.
+
+\textbf{4) Software Pipeline Bottlenecks.}
+Initial 3\,MB transfers over three hops took over 20 minutes, failing the NFR-MESH1 target. Profiling revealed three serial bottlenecks: the ARQ window (8 fragments) underutilized the link, the MQTT processing loop (500\,ms interval) drained fragments slower than they arrived, and the fragment queue (8 entries) overflowed during bursts. Enlarging the ARQ window to 32 fragments, reducing MQTT processing to 10\,ms, and expanding the queue to 64 entries collectively improved the pipeline from 6.6\,KB/s to 79\,KB/s (12$\times$), shifting the bottleneck from software to radio physics.
+
+\textbf{5) Single Exit Node Bottleneck.}
+Early designs funneled all fragments through one exit node, creating a throughput ceiling at the exit's MQTT publish rate and a single point of failure. This was replaced with multi-exit offloading: the source selects up to four exit nodes and stripes fragments round-robin across them. Dead exit nodes are detected via ACK timeout, and their pending fragments are redistributed to surviving exits. Cloud-side deduplication by session ID ensures correctness despite fragments arriving on separate MQTT topics.
+
+\textbf{6) LoRa Control-Plane Overhead.}
+The original \texttt{TRANSFER\_AD} packet was 36 bytes, consuming excessive LoRa airtime and limiting election responsiveness. Bit-packing optimizations compressed it to 9 bytes (session ID, file size encoded as \texttt{fragment\_size\_d8}, CRC-16), with the filename deferred to DATA fragment~0. Similarly, \texttt{DISCOVERY} was compressed from 8 to 7 bytes by packing WiFi channel and spreading factor into flag bits. These reductions cut control-plane airtime by 60--75\%, improving election and route advertisement responsiveness.
+
+\textbf{7) FreeRTOS Concurrency Hazards.}
+Several subtle concurrency bugs manifested only under heavy transfer load: calling \texttt{esp\_now\_add\_peer()} from the ESP-NOW receive callback caused WiFi driver lock re-entrancy deadlocks; an unguarded \texttt{esp\_wifi\_set\_channel()} disrupted in-flight ESP-NOW transmissions; and a non-atomic \texttt{connected\_} flag in the MQTT client caused data races between tasks. These were resolved through deferred peer registration via a queue, channel-change guards, atomic flags, and bounded mutex timeouts (200\,ms) to prevent permanent deadlocks on radio lockup.
+
 \subsection{Bottlenecks and Limitations}
 
-The primary remaining bottleneck is ESP-NOW radio air-time sharing at relay nodes. Since each ESP32-S3 has a single 2.4\,GHz radio that must be time-shared between receiving from upstream and transmitting to downstream, the effective per-hop throughput is halved at relay nodes ($\sim$34\,KB/s effective vs $\sim$81\,KB/s raw). This is a fundamental hardware constraint rather than a protocol limitation.
+The primary remaining bottleneck is ESP-NOW radio air-time sharing at relay nodes. Since each ESP32-S3 has a single 2.4\,GHz radio that must be time-shared between receiving from upstream and transmitting to downstream, effective throughput at relay nodes is reduced compared to direct single-hop transmission. The measured single-hop throughput of $\sim$34\,KB/s degrades to approximately 25\,KB/s per relay link under multi-hop conditions due to this time-sharing overhead. This is a fundamental hardware constraint rather than a protocol limitation.
 
-The SX1280 LoRa control plane uses unslotted ALOHA. At SF7/BW800, airtime per 255-byte control packet is approximately 41\,ms. With a per-node control duty of one packet per 30\,s (0.14\% duty), and a maximum useful channel utilization of 18\% (1/2e for unslotted ALOHA), the practical limit is approximately 18\%/0.14\%\,$\approx$\,130 concurrent nodes in a single hearing area before contention degrades significantly, though the protocol hard limit of 16 neighbors per node and 4 exit nodes per transfer caps practical deployments to 50--60 nodes per cluster. Larger deployments require network segmentation into independent FLP clusters.
+The SX1280 LoRa control plane uses unslotted ALOHA. At SF7/BW800, airtime per 255-byte control packet is approximately 60\,ms. With a per-node control duty of one packet per 30\,s (0.2\% duty), and a maximum useful channel utilization of 18\% ($1/2e$ for unslotted ALOHA~\cite{abramson1970aloha}), the practical limit is approximately 18\%/0.2\%\,$\approx$\,90 concurrent nodes in a single hearing area before contention degrades significantly, though the protocol hard limit of 16 neighbors per node and 4 exit nodes per transfer caps practical deployments to 50--60 nodes per cluster. Larger deployments require network segmentation into independent FLP clusters.
 
 % ===========================================================================
 \section{Conclusion}
@@ -421,17 +562,17 @@ The SX1280 LoRa control plane uses unslotted ALOHA. At SF7/BW800, airtime per 25
 
 This paper presented Forest Link Protocol, a multi-protocol adaptive mesh network designed for reliable multi-megabyte data transfer in dense forest environments. FLP addresses the Bandwidth-Reach Paradox by combining ESP-NOW for high-throughput short-range relay with LoRa for long-range control signaling, bridging the gap between LoRaWAN's payload constraints and traditional WiFi mesh fragility.
 
-Our implementation on commodity ESP32-S3 hardware demonstrates that a 3\,MB file can be transferred over three hops in approximately 1.5--2 minutes under dense forest conditions, exceeding the 20-minute target requirement by an order of magnitude. The DSDV-based routing with ETX weighting provides rapid route convergence and automatic avoidance of lossy links, while the dual-priority packet scheduling ensures control traffic is not starved during heavy data transfers.
+The two key mechanisms, multi-exit striping with dead-exit redistribution, and per-packet adaptive transport selection with a runtime feedback loop---go beyond static protocol assignment and provide resilience against exit node failures during transfer. Our implementation on commodity ESP32-S3 hardware demonstrates that a 3\,MB file can be transferred over three hops in approximately 1.5--2 minutes under lab NLOS conditions, exceeding the 20-minute target by an order of magnitude.
 
 FLP contributes to the broader field of IoT by demonstrating that commodity hardware, optimized at the software layer, can perform comparably to specialized LPWAN infrastructure at a fraction of the cost. The protocol's self-healing topology and delay-tolerant design make it suitable for real-world deployments in environmental monitoring, wildfire detection, and biodiversity data collection.
 
-Future work includes: (1) implementing LoRa TDMA scheduling to reduce control-plane collisions in dense deployments, (2) field trials in Singapore's Central Catchment Nature Reserve with 15--25 nodes, (3) evaluating ESP-NOW Long Range (LR) mode for extended control signaling coverage within the 2.4\,GHz band, and (4) evaluating energy harvesting integration for truly autonomous long-term deployments.
+Future work includes: (1)~enabling ESP-NOW PMK-based encryption and adding pre-shared key provisioning for confidentiality, (2)~implementing LoRa TDMA scheduling to reduce control-plane collisions in dense deployments, (3)~field trials in Singapore's Central Catchment Nature Reserve with 15--25 nodes, (4)~over-the-air firmware updates, (5)~evaluating ESP-NOW Long Range (LR) mode for extended control coverage within the 2.4\,GHz band, and (6)~solar energy harvesting for autonomous long-term deployments.
 
 % ===========================================================================
 % References
 % ===========================================================================
 \balance
-\begin{thebibliography}{5}
+\begin{thebibliography}{13}
 
 \bibitem{maurya2025lorawan}
 P.~Maurya, A.~Hazra, P.~Kumari, T.~B.~S{\o}rensen, and S.~K.~Das,
@@ -442,7 +583,7 @@ doi: 10.1145/3711953.
 \bibitem{elewaily2024dtn}
 D.~I.~Elewaily, H.~A.~Ali, A.~I.~Saleh, and M.~M.~Abdelsalam,
 ``Delay/disruption-tolerant networking-based the integrated deep-space relay network: State-of-the-art,''
-\textit{Ad Hoc Networks}, vol.~152, pp.~103307, Jan.\ 2024,
+\textit{Ad Hoc Networks}, vol.~152, Art.\ no.\ 103307, Jan.\ 2024,
 doi: 10.1016/j.adhoc.2023.103307.
 
 \bibitem{lehong2020adr}
@@ -463,6 +604,51 @@ A.~Castillo, C.~Juiz, and B.~Bermejo,
 ``Delay and disruption tolerant networking for terrestrial and TCP/IP applications: A systematic literature review,''
 \textit{Network}, vol.~4, no.~3, pp.~237--259, Jul.\ 2024,
 doi: 10.3390/network4030012.
+
+\bibitem{perkins1994dsdv}
+C.~E.~Perkins and P.~Bhagwat,
+``Highly dynamic destination-sequenced distance-vector routing (DSDV) for mobile computers,''
+in \textit{Proc.\ ACM SIGCOMM}, London, UK, pp.~234--244, 1994,
+doi: 10.1145/190314.190336.
+
+\bibitem{decouto2003etx}
+D.~S.~J.~De~Couto, D.~Aguayo, J.~Bicket, and R.~Morris,
+``A high-throughput path metric for multi-hop wireless routing,''
+in \textit{Proc.\ 9th ACM MobiCom}, San Diego, CA, pp.~134--146, 2003,
+doi: 10.1145/938985.939000.
+
+\bibitem{espressif2024espnow}
+Espressif Systems,
+``ESP-NOW,''
+ESP-IDF Programming Guide, v5.5, 2024. [Online]. Available: \url{https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/network/esp_now.html}
+
+\bibitem{semtech2020sx1280}
+Semtech Corporation,
+``SX1280/SX1281 Long Range, Low Power, 2.4\,GHz Transceiver with Ranging Capability,''
+Datasheet DS.SX1280-1, Rev.\ 3.2, Mar.\ 2020.
+
+\bibitem{abramson1970aloha}
+N.~Abramson,
+``The ALOHA system: Another alternative for computer communications,''
+in \textit{Proc.\ Fall Joint Comput.\ Conf.\ (AFIPS)}, pp.~281--285, 1970,
+doi: 10.1145/1478462.1478502.
+
+\bibitem{rfc1982}
+R.~Elz and R.~Bush,
+``Serial number arithmetic,''
+RFC~1982, Aug.\ 1996,
+doi: 10.17487/rfc1982.
+
+\bibitem{itur2019vegetation}
+ITU-R,
+``Attenuation in vegetation,''
+Recommendation ITU-R P.833-10, Sep.\ 2021.
+
+\bibitem{ford2013mptcp}
+A.~Ford, C.~Raiciu, M.~Handley, and O.~Bonaventure,
+``TCP extensions for multipath operation with multiple addresses,''
+RFC~6824, Jan.\ 2013,
+doi: 10.17487/rfc6824.
 
 \end{thebibliography}
 

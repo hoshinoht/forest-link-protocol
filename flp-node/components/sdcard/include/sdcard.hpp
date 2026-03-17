@@ -2,17 +2,30 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+
+#include "esp_err.h"
 
 namespace flp {
 
-/* / Mount SD card via SPI. Returns true on success. */
-bool sdcard_init();
+/* Mount SD card via SPI. Returns ESP_OK on success. */
+esp_err_t sdcard_init();
 
 /*
- * / Read entire file into a PSRAM-allocated buffer.
- * / Caller must free *buf_out with free() when done.
- * / Returns true on success.
+ * Open a file on SD card and return its size.
+ * Caller must fclose() the returned handle when done.
+ * Returns nullptr on failure.
  */
-bool sdcard_read_file(const char *path, uint8_t **buf_out, size_t *size_out);
+FILE *sdcard_open(const char *path, size_t *size_out);
+
+/*
+ * Read a chunk from an SD card file.
+ * Opens the file, seeks to offset, reads len bytes, closes.
+ * Returns number of bytes actually read.
+ */
+size_t sdcard_read_chunk(const char *path,
+                         uint8_t *buf,
+                         size_t offset,
+                         size_t len);
 
 } /* namespace flp */

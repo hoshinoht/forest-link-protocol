@@ -14,4 +14,5 @@ idf_component_register(
         uart_api
         display
         sdcard
+        esp_psram
 )

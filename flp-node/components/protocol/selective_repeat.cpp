@@ -10,10 +10,44 @@ static const char *TAG = "arq";
 namespace flp
 {
 
+SelectiveRepeat::~SelectiveRepeat()
+{
+    if (window_)
+    {
+        heap_caps_free(window_);
+        window_ = nullptr;
+    }
+    cleanup_receiver();
+}
+
 void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
 {
     window_size_ = (window_size > ARQ_WINDOW) ? ARQ_WINDOW : window_size;
     timeout_ms_ = timeout_ms;
+
+    /* Allocate sender window on heap, preferring PSRAM */
+    if (!window_)
+    {
+        window_ = static_cast<FragmentSlot *>(heap_caps_calloc(
+            ARQ_WINDOW, sizeof(FragmentSlot),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!window_)
+        {
+            /* Fall back to internal RAM */
+            window_ = static_cast<FragmentSlot *>(
+                heap_caps_calloc(ARQ_WINDOW, sizeof(FragmentSlot),
+                                 MALLOC_CAP_8BIT));
+        }
+        if (!window_)
+        {
+            ESP_LOGE(TAG, "Failed to allocate ARQ window (%zu bytes)",
+                     ARQ_WINDOW * sizeof(FragmentSlot));
+            return;
+        }
+        ESP_LOGI(TAG, "ARQ window allocated: %zu bytes",
+                 ARQ_WINDOW * sizeof(FragmentSlot));
+    }
+
     reset_sender();
     ESP_LOGI(
         TAG, "ARQ init: window=%u timeout=%lums", window_size_, timeout_ms_);
@@ -25,7 +59,10 @@ void SelectiveRepeat::reset_sender()
 {
     base_seq_ = 0;
     next_seq_ = 0;
-    memset(window_, 0, sizeof(window_));
+    if (window_)
+    {
+        memset(window_, 0, ARQ_WINDOW * sizeof(FragmentSlot));
+    }
 }
 
 bool SelectiveRepeat::sender_window_full() const
