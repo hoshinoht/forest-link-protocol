@@ -197,7 +197,31 @@ func RunTransferEngine(
 			return
 
 		case meta := <-metaCh:
-			tq.Enqueue(meta.SessionID.String(), meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
+			sessionID := meta.SessionID.String()
+			if tq.ActiveTransfer != nil {
+				if tq.ActiveTransfer.SessionID == sessionID {
+					// Same session from another exit node — merge (multi-exit)
+					log.Printf("[transfer] merging exit node %s into session %s",
+						meta.NodeID, sessionID)
+				} else {
+					// Different session ID while one is active.
+					// Only supersede if active transfer is stale (no chunks
+					// for 10s) — meaning the source died. If active is
+					// healthy, queue the new one so we don't kill a working
+					// transfer when two sensors start simultaneously.
+					now := float64(time.Now().UnixMilli()) / 1000.0
+					staleSec := now - lastChunkTime
+					if staleSec > 10.0 || lastChunkTime == 0 {
+						log.Printf("[transfer] superseding stale session %s (no data for %.0fs) with %s",
+							tq.ActiveTransfer.SessionID, staleSec, sessionID)
+						completeTransfer(false)
+					} else {
+						log.Printf("[transfer] session %s queued (active session %s still receiving)",
+							sessionID, tq.ActiveTransfer.SessionID)
+					}
+				}
+			}
+			tq.Enqueue(sessionID, meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
 			// If this enqueue made a new active transfer, set it up.
 			if tq.ActiveTransfer != nil && sr == nil {
 				setupActive()
