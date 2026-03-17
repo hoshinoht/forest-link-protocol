@@ -455,11 +455,20 @@ void MeshManager::process_slab(BufferSlab *slab)
         return;
     }
 
-    /* Update route table with source info */
-    bool via_espnow = (slab->source == RxTransport::ESPNOW);
-    bool via_lora = (slab->source == RxTransport::LORA);
-    route_table_.update_neighbor(
-        hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
+    /*
+     * Update route table only for direct packets (hop_count == 0).
+     * Forwarded packets (hop_count > 0) carry the ORIGINAL source address,
+     * not the relay that sent them. Recording them as neighbors creates
+     * unreachable entries that cause next_hop() to return addresses outside
+     * radio range, silently losing packets.
+     */
+    if (hdr.hop_count() == 0)
+    {
+        bool via_espnow = (slab->source == RxTransport::ESPNOW);
+        bool via_lora = (slab->source == RxTransport::LORA);
+        route_table_.update_neighbor(
+            hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
+    }
 
     const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
     size_t payload_len = slab->len - PACKET_HEADER_SIZE;
@@ -525,11 +534,24 @@ void MeshManager::process_slab(BufferSlab *slab)
         /*
          * Fix 4: Dedup — drop packets we've already forwarded to prevent
          * broadcast storm (O(TTL × relays) amplification per packet).
+         *
+         * ARQ-controlled types (DATA/PARITY/ACK/NACK) use a short 200ms
+         * window so legitimate retransmits (after 700ms+ ARQ timeout) pass
+         * through, while relay echo loops (~50ms) are still blocked.
+         * Control packets keep the 10s window for broadcast storm prevention.
          */
+        PacketType ptype = hdr.type();
+        bool arq_type = (ptype == PacketType::DATA ||
+                         ptype == PacketType::PARITY ||
+                         ptype == PacketType::ACK ||
+                         ptype == PacketType::NACK);
+        uint32_t dedup_window = arq_type ? 200 : 10000;
+
         if (already_seen(hdr.src_addr,
                          hdr.dst_addr,
                          static_cast<uint8_t>(hdr.type()),
-                         hdr.seq_num))
+                         hdr.seq_num,
+                         dedup_window))
         {
             ESP_LOGD(TAG,
                      "Dedup: dropping already-seen packet from 0x%04X seq=%u",
@@ -1206,17 +1228,42 @@ void MeshManager::send_packet(uint16_t dst,
     }
     else
     {
+        /*
+         * Use next_hop() to find the radio-level destination.
+         * The packet header carries the final dst_addr; the radio-level
+         * send must target the next relay, not the final destination.
+         * Without this, ESP-NOW unicast to multi-hop destinations fails
+         * (peer MAC not in table). LoRa accidentally works because it
+         * ignores peer_addr and always broadcasts.
+         */
+        uint16_t radio_dst = route_table_.next_hop(dst);
+        if (radio_dst == BROADCAST_ADDR)
+        {
+            /* No route known — broadcast if targeting EXIT_ANY_ADDR
+             * (bootstrap: a relay may hear us and forward toward exits) */
+            if (dst == EXIT_ANY_ADDR)
+            {
+                send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
+                send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "No route to 0x%04X, dropping", dst);
+            }
+            return;
+        }
+
         NeighborEntry neighbor;
         int8_t rssi = kDefaultRssi;
         uint8_t hops = 0xFF;
-        if (route_table_.get_neighbor(dst, neighbor))
+        if (route_table_.get_neighbor(radio_dst, neighbor))
         {
             rssi = neighbor.rssi;
             hops = neighbor.hop_count;
         }
         Transport t =
             protocol_selector_.select(rssi, hops, total, kLinkQualityPct);
-        send_raw(t, buf, total, dst);
+        send_raw(t, buf, total, radio_dst);
     }
 }
 

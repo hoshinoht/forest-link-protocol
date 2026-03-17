@@ -242,14 +242,15 @@ class MeshManager
     SeenEntry seen_cache_[SEEN_CACHE_SIZE] = {};
     uint8_t seen_idx_ = 0;
 
-    bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq)
+    bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq,
+                      uint32_t window_ms)
     {
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         for (uint8_t i = 0; i < SEEN_CACHE_SIZE; i++)
         {
             if (seen_cache_[i].src == src && seen_cache_[i].dst == dst &&
                 seen_cache_[i].type == type && seen_cache_[i].seq == seq &&
-                (now - seen_cache_[i].time_ms) < 10000)
+                (now - seen_cache_[i].time_ms) < window_ms)
             {
                 return true;
             }

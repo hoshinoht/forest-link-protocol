@@ -94,6 +94,14 @@ class SelectiveRepeat
         timeout_ms_ = timeout_ms;
     }
 
+    /* Configure stride for multi-exit round-robin: this ARQ only owns
+     * sequences where (seq % stride == offset).  stride=1 means all. */
+    void set_exit_stride(uint8_t stride, uint8_t offset)
+    {
+        exit_stride_ = stride;
+        exit_offset_ = offset;
+    }
+
   private:
     uint32_t now_ms() const
     {
@@ -106,6 +114,10 @@ class SelectiveRepeat
     uint32_t timeout_ms_ = 0;
     uint16_t base_seq_ = 0;
     uint16_t next_seq_ = 0;
+
+    /* Multi-exit stride: skip non-owned seqs in base advancement / tick */
+    uint8_t exit_stride_ = 1;   /* total exit nodes (1 = single-exit) */
+    uint8_t exit_offset_ = 0;   /* this ARQ's index */
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;
