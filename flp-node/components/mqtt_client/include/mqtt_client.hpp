@@ -86,8 +86,8 @@ class MqttClient
                       size_t size,
                       uint16_t src_node);
 
-    /* Fragment-level publish for exit nodes (no reassembly needed) */
-    void publish_fragment(uint16_t session_id, uint16_t seq, uint16_t src_node,
+    /* Fragment-level publish for exit nodes (returns false if queue full) */
+    bool publish_fragment(uint16_t session_id, uint16_t seq, uint16_t src_node,
                           const uint8_t *data, size_t len, const char *filename);
 
     /* Publish complete transfer meta (called when exit node receives fragment 0) */

@@ -440,7 +440,7 @@ void MqttClient::publish_transfer_meta(uint16_t session_id,
              crc32);
 }
 
-void MqttClient::publish_fragment(uint16_t session_id,
+bool MqttClient::publish_fragment(uint16_t session_id,
                                   uint16_t seq,
                                   uint16_t src_node,
                                   const uint8_t *data,
@@ -450,7 +450,7 @@ void MqttClient::publish_fragment(uint16_t session_id,
     if (!data || !filename || (len == 0U))
     {
         ESP_LOGW(TAG, "publish_fragment: invalid args for seq=%u", seq);
-        return;
+        return false;
     }
 
     FragmentPublishRequest req = {};
@@ -468,12 +468,12 @@ void MqttClient::publish_fragment(uint16_t session_id,
 
     if (xQueueSend(fragment_publish_queue_, &req, 0) != pdTRUE)
     {
-        ESP_LOGW(TAG, "Fragment publish queue full, dropping seq=%u", seq);
+        ESP_LOGW(TAG, "Fragment publish queue full, NACK seq=%u", seq);
+        return false;
     }
-    else
-    {
-        notify();
-    }
+
+    notify();
+    return true;
 }
 
 void MqttClient::process_fragment_publish()

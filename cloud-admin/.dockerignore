@@ -1,7 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-.DS_Store
-flp_metrics.db
-received_files/
-mqtt-sn-gateway/

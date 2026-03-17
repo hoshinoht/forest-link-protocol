@@ -151,20 +151,21 @@ void MeshManager::init()
                uint16_t seq_num)
         { send_packet(dst, type, payload, payload_len, seq_num); });
 
-    /* Wire up fragment forwarding to MQTT */
+    /* Wire up fragment forwarding to MQTT (returns false if queue full) */
     transfer_engine_.set_forward_to_mqtt(
-        [this](uint32_t session_id,
+        [this](uint16_t session_id,
                uint16_t seq,
                uint16_t src_node,
                const uint8_t *data,
                size_t len,
-               const char *filename)
+               const char *filename) -> bool
         {
             if (mqtt_client_)
             {
-                mqtt_client_->publish_fragment(
+                return mqtt_client_->publish_fragment(
                     session_id, seq, src_node, data, len, filename);
             }
+            return false;
         });
 
     /* Wire up cloud ACK/NACK drain for local-exit selective repeat */
@@ -686,7 +687,8 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
         PacketType t = hdr.type();
         bool high_priority = (t == PacketType::ACK || t == PacketType::NACK ||
                               t == PacketType::ROUTE_ERROR ||
-                              t == PacketType::TRANSFER_ACK);
+                              t == PacketType::TRANSFER_ACK ||
+                              t == PacketType::TRANSFER_AD);
         if (!high_priority)
         {
             ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X",
@@ -695,16 +697,30 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
         }
     }
 
+    /* Mutate in-place: decrement TTL, increment hop count */
+    PacketHeader *fwd_hdr = reinterpret_cast<PacketHeader *>(slab->data);
+    fwd_hdr->set_ttl_hops(fwd_hdr->ttl() - 1, fwd_hdr->hop_count() + 1);
+
+    /*
+     * P4 fix: Broadcast TRANSFER_AD so ALL exit nodes in range hear it.
+     * Normal unicast forwarding only reaches one exit, breaking multi-exit
+     * election when the sensor is behind relay node(s).
+     */
+    if (hdr.type() == PacketType::TRANSFER_AD)
+    {
+        ESP_LOGD(TAG, "Broadcasting TRANSFER_AD from 0x%04X, ttl=%u",
+                 hdr.src_addr, fwd_hdr->ttl());
+        send_raw(Transport::ESPNOW, slab->data, slab->len, BROADCAST_ADDR);
+        send_raw(Transport::LORA, slab->data, slab->len, BROADCAST_ADDR);
+        return;
+    }
+
     uint16_t next = route_table_.next_hop(hdr.dst_addr);
     if (next == BROADCAST_ADDR)
     {
         ESP_LOGW(TAG, "No route to 0x%04X, dropping", hdr.dst_addr);
         return;
     }
-
-    /* Mutate in-place */
-    PacketHeader *fwd_hdr = reinterpret_cast<PacketHeader *>(slab->data);
-    fwd_hdr->set_ttl_hops(fwd_hdr->ttl() - 1, fwd_hdr->hop_count() + 1);
 
     NeighborEntry neighbor;
     int8_t rssi = kDefaultRssi;
@@ -890,6 +906,22 @@ void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
     }
 
     uint8_t cmd_id = payload[0];
+
+    /*
+     * P6 fix: Simple command dedup — when multiple exit nodes forward the
+     * same command, the target receives duplicates (different src_addr
+     * bypasses the packet dedup cache). Ignore identical cmd_id within 2s.
+     */
+    uint32_t cmd_now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (cmd_id == last_mesh_cmd_id_ && (cmd_now - last_mesh_cmd_ms_) < 2000)
+    {
+        ESP_LOGD(TAG, "Duplicate MESH_CMD cmd=%u from 0x%04X, ignoring",
+                 cmd_id, hdr.src_addr);
+        return;
+    }
+    last_mesh_cmd_id_ = cmd_id;
+    last_mesh_cmd_ms_ = cmd_now;
+
     ESP_LOGI(TAG,
              "MESH_CMD from 0x%04X: cmd=%u len=%zu",
              hdr.src_addr,

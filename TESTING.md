@@ -120,10 +120,14 @@ Cloud sends a command to the exit node via MQTT.
 
 ```bash
 # Send a telemetry request to the exit node
-# Topic: flp/<exit_addr>/cmd
+# Topic: flp/admin/cmd (all exit nodes subscribe to this)
 # Payload: [target_addr_le16][cmd_id][data...]
 # For local command (target = self), use the exit node's own address
-mosquitto_pub -t "flp/<exit_addr>/cmd" -m "$(printf '\x01')" --stdin-line
+python3 -c "
+import struct, sys
+target = 0x<exit_addr>  # the exit node's own address
+sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
+" | mosquitto_pub -t "flp/admin/cmd" -s
 ```
 
 **Observe:** Exit node serial log shows `MESH_CMD from 0x0000: cmd=1` (REQUEST_TELEMETRY). Node responds with telemetry on `flp/<addr>/metrics`.
@@ -168,16 +172,23 @@ mosquitto_pub -t "flp/<exit_addr>/cmd" -m "$(printf '\x01')" --stdin-line
 
 **Trigger (on Pi):**
 
+Option A — via `mosquitto_pub` directly:
 ```bash
-# Send MESH_CMD to Board 2 (sensor) via Board 1 (exit)
-# Payload: [target_addr_le16][cmd_id]
-# target_addr = Board 2's address (check OLED "FLP-XXXX")
-# cmd_id = 0x01 (REQUEST_TELEMETRY)
+# All exit nodes subscribe to flp/admin/cmd
+# Payload: [target_addr:2LE][cmd_id:1]
 python3 -c "
 import struct, sys
-target = 0x<board2_addr>  # e.g. 0x1A3F
+target = 0x<board2_addr>  # e.g. 0x1A3F (check OLED 'FLP-XXXX')
 sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
-" | mosquitto_pub -t "flp/<exit_addr>/cmd" -s
+" | mosquitto_pub -t "flp/admin/cmd" -s
+```
+
+Option B — via cloud-admin-go API (if running on Pi):
+```bash
+# POST /api/cmd/<target_node_id> with cmd ID
+curl -X POST http://<pi_ip>:8080/api/cmd/<board2_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 1}'
 ```
 
 **Observe:**
@@ -227,12 +238,20 @@ sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
 
 **Trigger (on Pi):**
 
+Option A — via `mosquitto_pub`:
 ```bash
 python3 -c "
 import struct, sys
 target = 0x<board3_addr>  # the sensor node
 sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
-" | mosquitto_pub -t "flp/<exit_addr>/cmd" -s
+" | mosquitto_pub -t "flp/admin/cmd" -s
+```
+
+Option B — via cloud-admin-go API:
+```bash
+curl -X POST http://<pi_ip>:8080/api/cmd/<board3_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 1}'
 ```
 
 **Observe:**
@@ -286,30 +305,30 @@ sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
 [Pi] --MQTT--> [X1] ---> [R] ---> [S]
 ```
 
-Downlink commands are routed through whichever exit node has the best route to the target. Only one exit node forwards the command (no duplication).
+All exit nodes subscribe to `flp/admin/cmd`. Both X1 and X2 receive the command and route it into the mesh. The target node deduplicates identical commands within a 2-second window.
 
 **Trigger (on Pi):**
 
+Option A — via `mosquitto_pub`:
 ```bash
 python3 -c "
 import struct, sys
 target = 0x<board4_addr>  # the sensor node
 sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
-" | mosquitto_pub -t "flp/<x1_addr>/cmd" -s
+" | mosquitto_pub -t "flp/admin/cmd" -s
+```
+
+Option B — via cloud-admin-go API:
+```bash
+curl -X POST http://<pi_ip>:8080/api/cmd/<board4_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 1}'
 ```
 
 **Observe:**
-- X1 routes MESH_CMD through relay to sensor
-- Board 4 receives and responds
-- Try sending via X2 as well to verify both paths work:
-
-```bash
-python3 -c "
-import struct, sys
-target = 0x<board4_addr>
-sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
-" | mosquitto_pub -t "flp/<x2_addr>/cmd" -s
-```
+- Both X1 and X2 route MESH_CMD through relay to sensor
+- Board 4 receives and processes the command (duplicates deduped at target)
+- Board 4 responds with telemetry via mesh relay to MQTT
 
 ---
 

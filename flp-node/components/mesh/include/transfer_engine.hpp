@@ -73,8 +73,8 @@ using SendPacketFn = std::function<void(uint16_t dst,
                                         size_t payload_len,
                                         uint16_t seq_num)>;
 
-/* Callback for forwarding fragments to MQTT */
-using ForwardToMqttFn = std::function<void(uint16_t session_id,
+/* Callback for forwarding fragments to MQTT (returns true if queued OK) */
+using ForwardToMqttFn = std::function<bool(uint16_t session_id,
                                             uint16_t seq,
                                             uint16_t src_node,
                                             const uint8_t *data,
@@ -221,7 +221,7 @@ class TransferEngine
         uint32_t file_size;
         uint16_t fragment_count;
         uint16_t fragment_size;
-        uint16_t crc16;
+        uint32_t crc32;
         bool waiting; /* true = waiting for frag 0 with filename */
     } pending_meta_ = {};
 

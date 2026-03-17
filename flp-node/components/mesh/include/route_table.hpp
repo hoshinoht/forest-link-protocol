@@ -157,6 +157,7 @@ class RouteTable
     /* Step 3c: ETX-weighted composite cost routing */
     uint16_t next_hop(uint16_t dst_addr) const
     {
+        /* Direct neighbor: always use direct path */
         for (uint8_t i = 0; i < count_; i++)
         {
             if (neighbors_[i].addr == dst_addr)
@@ -164,6 +165,17 @@ class RouteTable
                 return dst_addr;
             }
         }
+
+        /*
+         * When routing toward the internet (EXIT_ANY_ADDR), prefer the
+         * neighbor with lowest hops_to_internet — standard behaviour.
+         *
+         * When routing toward a specific node (unicast), skip exit-node
+         * neighbors (hops_to_internet == 0) to avoid bouncing packets
+         * between exit nodes instead of routing toward deep-field relays.
+         * Falls back to any candidate if no non-exit neighbor qualifies.
+         */
+        bool toward_internet = (dst_addr == EXIT_ANY_ADDR);
 
         uint16_t best_addr = BROADCAST_ADDR;
         uint32_t best_cost = UINT32_MAX;
@@ -173,12 +185,35 @@ class RouteTable
             {
                 continue;
             }
+            if (!toward_internet && neighbors_[i].hops_to_internet == 0)
+            {
+                continue; /* skip other exit nodes for unicast routing */
+            }
             uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
                           + neighbors_[i].etx_x100;
             if (cost < best_cost)
             {
                 best_cost = cost;
                 best_addr = neighbors_[i].addr;
+            }
+        }
+
+        /* Fallback: if all candidates were exit nodes, allow them */
+        if (best_addr == BROADCAST_ADDR && !toward_internet)
+        {
+            for (uint8_t i = 0; i < count_; i++)
+            {
+                if (neighbors_[i].hops_to_internet >= ROUTE_HOPS_UNKNOWN)
+                {
+                    continue;
+                }
+                uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
+                              + neighbors_[i].etx_x100;
+                if (cost < best_cost)
+                {
+                    best_cost = cost;
+                    best_addr = neighbors_[i].addr;
+                }
             }
         }
 

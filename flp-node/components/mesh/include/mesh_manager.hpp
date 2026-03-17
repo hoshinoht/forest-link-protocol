@@ -210,6 +210,10 @@ class MeshManager
     char subscribed_topics_[4][32] = {};
     uint8_t subscribed_topic_count_ = 0;
 
+    /* P6: Command dedup — ignore duplicate MESH_CMD within 2 seconds */
+    uint8_t last_mesh_cmd_id_ = 0xFF;
+    uint32_t last_mesh_cmd_ms_ = 0;
+
     /*
      * Step 4: Enlarged dedup cache with timestamps.
      * Prevents broadcast storm by dropping packets we've already forwarded.

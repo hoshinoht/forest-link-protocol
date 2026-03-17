@@ -390,8 +390,9 @@ async function sendTopicMsg() {
     const log = document.getElementById('msg-log');
     const ts = new Date().toLocaleTimeString();
     const entry = document.createElement('div');
+    const status = data.ok ? ' OK' : ' ERR: ' + (data.error || 'unknown');
     entry.textContent = '[' + ts + '] -> 0x' + nodeId + ' topic="' + topic + '"'
-        + (payloadHex ? ' data=' + payloadHex : '') + (data.ok ? ' OK' : ' ERR');
+        + (payloadHex ? ' data=' + payloadHex : '') + status;
     log.insertBefore(entry, log.firstChild);
 }
 

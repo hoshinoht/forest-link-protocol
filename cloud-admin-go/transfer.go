@@ -169,8 +169,10 @@ func RunTransferEngine(
 		if s == nil {
 			return
 		}
+		// Set CompletedAt BEFORE recording metrics (was 0 when metrics ran)
+		s.CompletedAt = float64(time.Now().UnixMilli()) / 1000.0
 		if success {
-			elapsed := float64(time.Now().UnixMilli())/1000.0 - s.StartedAt
+			elapsed := s.CompletedAt - s.StartedAt
 			nacks := 0
 			if sr != nil {
 				nacks = sr.NACKCount
@@ -195,7 +197,7 @@ func RunTransferEngine(
 			return
 
 		case meta := <-metaCh:
-			tq.Enqueue(meta.SessionID, meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
+			tq.Enqueue(meta.SessionID.String(), meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
 			// If this enqueue made a new active transfer, set it up.
 			if tq.ActiveTransfer != nil && sr == nil {
 				setupActive()

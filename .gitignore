@@ -51,3 +51,7 @@ cloud-admin-go/flp-admin
 # Claude
 .claude/
 CLAUDE.md
+
+
+# received_files
+cloud-admin-go/received_files/**
