@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.3)  10 MAR 2026 12:32
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.3)  16 MAR 2026 18:15
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -588,59 +588,136 @@ File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 
 
 ]
-Underfull \hbox (badness 10000) in paragraph at lines 129--130
-[]\T1/ptm/b/n/10 ESP-NOW (Short-Range Mesh)\T1/ptm/m/n/10 :High-bandwidth
+Underfull \hbox (badness 10000) in paragraph at lines 140--140
+[]|\T1/ptm/m/n/8 LoRaWAN pay-load/duty
  []
 
 
-Underfull \hbox (badness 1377) in paragraph at lines 130--131
-[]\T1/ptm/b/n/10 LoRa (Long-Range Con-trol)\T1/ptm/m/n/10 :Extended range (50--
-
+Underfull \hbox (badness 3977) in paragraph at lines 140--140
+[]|\T1/ptm/m/n/8 Dual-transport: ESP-NOW
  []
 
-LaTeX Font Info:    Trying to load font information for T1+pcr on input line 18
+
+Underfull \hbox (badness 4505) in paragraph at lines 141--141
+[]|\T1/ptm/m/n/8 Commodity ESP32-S3 at
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 142--142
+[]|\T1/ptm/m/n/8 No per-packet adap-tive
+ []
+
+[2]
+Underfull \hbox (badness 4467) in paragraph at lines 159--160
+[]\T1/ptm/b/n/10 ESP-NOW (Short-Range Mesh)\T1/ptm/m/n/10 : High-bandwidth
+ []
+
+LaTeX Font Info:    Trying to load font information for T1+pcr on input line 21
 1.
 (/usr/local/texlive/2026/texmf-dist/tex/latex/psnfss/t1pcr.fd
 File: t1pcr.fd 2001/06/04 font definitions for T1/pcr.
 )
-Underfull \hbox (badness 10000) in paragraph at lines 190--191
+Underfull \hbox (badness 10000) in paragraph at lines 220--221
 \T1/ptm/m/n/10 (0x03), \T1/pcr/m/n/10 DISCOVERY \T1/ptm/m/n/10 (0x10), \T1/pcr/
 m/n/10 ROUTE_REQ/REPLY
  []
 
 
-Underfull \hbox (badness 10000) in paragraph at lines 190--191
+Underfull \hbox (badness 10000) in paragraph at lines 220--221
 \T1/ptm/m/n/10 (0x11/0x12), \T1/pcr/m/n/10 ROUTE_ERROR \T1/ptm/m/n/10 (0x13), \
 T1/pcr/m/n/10 TRANSFER_AD
  []
 
-[2]
-Underfull \hbox (badness 3919) in paragraph at lines 220--221
+[3]
+Underfull \hbox (badness 3919) in paragraph at lines 255--256
 []\T1/ptm/b/n/10 Phase 2: Pipelined Data Trans-fer. \T1/ptm/m/n/10 Data is frag
 -
  []
 
-[3]
-Underfull \hbox (badness 7869) in paragraph at lines 269--270
+
+Underfull \hbox (badness 10000) in paragraph at lines 296--297
+[]\T1/ptm/b/n/10 Downlink. \T1/ptm/m/n/10 The MQTT Ad-min is-sues com-mands
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 296--297
+\T1/ptm/m/n/10 via \T1/pcr/m/n/10 MESH_CMD \T1/ptm/m/n/10 pack-ets with sub-typ
+es in-clud-ing
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 296--297
+\T1/pcr/m/n/10 REQUEST_TELEMETRY\T1/ptm/m/n/10 , \T1/pcr/m/n/10 CONFIG_UPDATE\T
+1/ptm/m/n/10 , \T1/pcr/m/n/10 REBOOT\T1/ptm/m/n/10 ,
+ []
+
+[4]
+Underfull \hbox (badness 7869) in paragraph at lines 318--319
 []\T1/ptm/m/n/10 The firmware is or-ga-nized into in-de-pen-dent ESP-
  []
 
-[4] [5]
-Underfull \hbox (badness 10000) in paragraph at lines 447--449
+
+Underfull \hbox (badness 2772) in paragraph at lines 356--357
+[]\T1/ptm/b/n/10 Measurement method-ol-ogy. \T1/ptm/m/n/10 Through-put is com-p
+uted
+ []
+
+
+Underfull \hbox (badness 6575) in paragraph at lines 356--357
+\T1/ptm/m/n/10 as \T1/pcr/m/n/10 file_size / transfer_time \T1/ptm/m/n/10 from 
+times-tamps
+ []
+
+[5]
+Underfull \hbox (badness 10000) in paragraph at lines 477--478
+[]\T1/ptm/b/n/10 Exit node fail-ure\T1/ptm/m/n/10 : The
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 477--478
+\T1/pcr/m/n/10 exit_node_health_tick() \T1/ptm/m/n/10 func-tion de-tects
+ []
+
+[6]
+Underfull \hbox (badness 1755) in paragraph at lines 499--500
+[]\T1/ptm/b/n/10 Replay pro-tec-tion\T1/ptm/m/n/10 : Stale DSDV route up-dates 
+are
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 499--500
+\T1/ptm/m/n/10 re-jected by \T1/pcr/m/n/10 seq_newer()\T1/ptm/m/n/10 , which im
+-ple-ments
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 546--548
 []\T1/ptm/b/n/10 6) LoRa Control-Plane Over-head. \T1/ptm/m/n/10 The orig-i-nal
 
  []
 
 
-Underfull \hbox (badness 2142) in paragraph at lines 447--449
+Underfull \hbox (badness 2142) in paragraph at lines 546--548
 \T1/ptm/m/n/10 LoRa air-time and lim-it-ing elec-tion re-spon-sive-ness. Bit-
  []
 
+[7]
+Underfull \hbox (badness 4621) in paragraph at lines 609--613
+[]\T1/ptm/m/n/8 C. E. Perkins and P. Bhag-wat, ``Highly dy-namic destination-
+ []
 
-Package balance Warning: You have called \balance in second column
-(balance)                Columns might not be balanced.
 
-[6]
+Underfull \hbox (badness 1430) in paragraph at lines 615--619
+\T1/ptm/m/n/8 throughput path met-ric for multi-hop wire-less rout-ing,'' in \T
+1/ptm/m/it/8 Proc.
+ []
+
+
+Underfull \hbox (badness 2269) in paragraph at lines 615--619
+\T1/ptm/m/it/8 9th ACM Mo-bi-Com\T1/ptm/m/n/8 , San Diego, CA, pp. 134--146, 20
+03, doi:
+ []
+
 
 ** Conference Paper **
 Before submitting the final camera ready copy, remember to:
@@ -652,22 +729,26 @@ Before submitting the final camera ready copy, remember to:
  uses only Type 1 fonts and that every step in the generation
  process uses the appropriate paper size.
 
-[7] (./main.aux)
+
+Package balance Warning: You have called \balance in second column
+(balance)                Columns might not be balanced.
+
+[8] (./main.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 Package rerunfilecheck Info: File `main.out' has not changed.
-(rerunfilecheck)             Checksum: E5A5A6974CA6AEAAE38B91A601E42C48;5776.
+(rerunfilecheck)             Checksum: 5D8328D3D641B01D4DA1365E1777D19C;6750.
  ) 
 Here is how much of TeX's memory you used:
- 16976 strings out of 467525
- 321334 string characters out of 5418983
- 719345 words of memory out of 5000000
- 45634 multiletter control sequences out of 15000+600000
+ 17012 strings out of 467525
+ 321892 string characters out of 5418983
+ 719847 words of memory out of 5000000
+ 45651 multiletter control sequences out of 15000+600000
  747984 words of font info for 171 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,14n,79p,1167b,1165s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,14n,79p,1379b,1133s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb
 ></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb><
 /usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></u
@@ -680,10 +761,10 @@ al/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local
 f-dist/fonts/type1/urw/times/utmbi8a.pfb></usr/local/texlive/2026/texmf-dist/fo
 nts/type1/urw/times/utmr8a.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/
 urw/times/utmri8a.pfb>
-Output written on main.pdf (7 pages, 173273 bytes).
+Output written on main.pdf (8 pages, 186816 bytes).
 PDF statistics:
- 296 PDF objects out of 1000 (max. 8388607)
- 260 compressed objects within 3 object streams
- 67 named destinations out of 1000 (max. 500000)
- 281 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 358 PDF objects out of 1000 (max. 8388607)
+ 320 compressed objects within 4 object streams
+ 86 named destinations out of 1000 (max. 500000)
+ 329 words of extra memory for PDF output out of 10000 (max. 10000000)
 
