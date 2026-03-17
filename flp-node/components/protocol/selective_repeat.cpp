@@ -59,6 +59,8 @@ void SelectiveRepeat::reset_sender()
 {
     base_seq_ = 0;
     next_seq_ = 0;
+    exit_stride_ = 1;
+    exit_offset_ = 0;
     if (window_)
     {
         memset(window_, 0, ARQ_WINDOW * sizeof(FragmentSlot));
@@ -124,9 +126,16 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);
 
-    /* Advance base while consecutive slots are acked */
+    /* Advance base while consecutive owned slots are acked */
     while (base_seq_ < next_seq_)
     {
+        /* Skip sequences not assigned to this ARQ instance */
+        if (exit_stride_ > 1 &&
+            (base_seq_ % exit_stride_) != exit_offset_)
+        {
+            base_seq_++;
+            continue;
+        }
         uint8_t base_idx = base_seq_ % window_size_;
         if (!window_[base_idx].acked)
         {
@@ -175,6 +184,13 @@ void SelectiveRepeat::tick()
 
     for (uint16_t seq = base_seq_; seq < next_seq_; seq++)
     {
+        /* Skip sequences not assigned to this ARQ */
+        if (exit_stride_ > 1 &&
+            (seq % exit_stride_) != exit_offset_)
+        {
+            continue;
+        }
+
         uint8_t idx = seq % window_size_;
         FragmentSlot &slot = window_[idx];
 

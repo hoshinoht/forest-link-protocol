@@ -465,6 +465,7 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
             transfer_.last_ack_ms[i] = now;
             arq_[i].reset_sender();
             arq_[i].set_peer_addr(candidates_[i].addr);
+            arq_[i].set_exit_stride(candidate_count_, i);
         }
         ESP_LOGI(TAG, "Elected %u exit nodes", transfer_.exit_node_count);
 
@@ -741,7 +742,24 @@ void TransferEngine::transfer_tick()
         }
         if (arq_[arq_idx].sender_window_full())
         {
-            break;
+            /* Primary exit full — try next alive exit with window space.
+             * This avoids starving other exits when one is congested. */
+            bool found_alt = false;
+            for (uint8_t j = 1; j < transfer_.exit_node_count; j++)
+            {
+                uint8_t try_idx = (arq_idx + j) % transfer_.exit_node_count;
+                if (transfer_.exit_node_alive[try_idx] &&
+                    !arq_[try_idx].sender_window_full())
+                {
+                    arq_idx = try_idx;
+                    found_alt = true;
+                    break;
+                }
+            }
+            if (!found_alt)
+            {
+                break; /* ALL alive exits full, wait for ACKs */
+            }
         }
 
         uint16_t seq = transfer_.next_fragment;

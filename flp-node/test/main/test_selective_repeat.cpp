@@ -118,6 +118,75 @@ static void test_receive_fragment_seq_at_total_rejected(void)
 }
 
 /* =========================================================================
+ * Stride-aware ARQ (multi-exit head-of-line blocking fix)
+ * ====================================================================== */
+
+/* With stride=2, offset=0 the ARQ owns even seqs. base_seq_ must skip
+ * odd (non-owned) slots when advancing after ACKs. */
+static void test_stride_base_advancement(void)
+{
+    SelectiveRepeat arq;
+    arq.init(32, 2000);
+    arq.set_exit_stride(2, 0); /* exit0: even seqs */
+
+    uint8_t data[16] = {0};
+    arq.send_fragment(0, data, 16);
+    arq.send_fragment(2, data, 16);
+    arq.send_fragment(4, data, 16);
+
+    TEST_ASSERT_EQUAL_UINT16(0, arq.get_base_seq());
+
+    /* ACK seq 0 — base should advance past 0 AND skip 1 (not ours) */
+    arq.handle_ack(0);
+    TEST_ASSERT_EQUAL_UINT16(2, arq.get_base_seq());
+
+    /* ACK seq 2 — base should advance past 2, skip 3 */
+    arq.handle_ack(2);
+    TEST_ASSERT_EQUAL_UINT16(4, arq.get_base_seq());
+
+    /* ACK seq 4 — base advances past 4, skip 5, reaches next_seq_=5 */
+    arq.handle_ack(4);
+    TEST_ASSERT_EQUAL_UINT16(5, arq.get_base_seq());
+
+    /* Window should not be full (only 3 real fragments in 32-slot window) */
+    TEST_ASSERT_FALSE(arq.sender_window_full());
+}
+
+/* Default stride=1 must preserve original contiguous behavior. */
+static void test_stride_1_unchanged_behavior(void)
+{
+    SelectiveRepeat arq;
+    arq.init(8, 2000);
+
+    uint8_t data[16] = {0};
+    for (uint16_t i = 0; i < 8; i++)
+        arq.send_fragment(i, data, 16);
+
+    TEST_ASSERT_TRUE(arq.sender_window_full());
+    TEST_ASSERT_EQUAL_UINT16(0, arq.get_base_seq());
+
+    arq.handle_ack(0);
+    TEST_ASSERT_EQUAL_UINT16(1, arq.get_base_seq()); /* no skipping */
+}
+
+/* reset_sender must clear stride back to defaults. */
+static void test_reset_sender_clears_stride(void)
+{
+    SelectiveRepeat arq;
+    arq.init(8, 2000);
+    arq.set_exit_stride(3, 2);
+
+    arq.reset_sender();
+
+    /* After reset, send contiguous seqs — base should advance without skipping */
+    uint8_t data[16] = {0};
+    arq.send_fragment(0, data, 16);
+    arq.send_fragment(1, data, 16);
+    arq.handle_ack(0);
+    TEST_ASSERT_EQUAL_UINT16(1, arq.get_base_seq()); /* stride=1, no skip */
+}
+
+/* =========================================================================
  * Test runner
  * ====================================================================== */
 void run_selective_repeat_tests(void)
@@ -126,4 +195,7 @@ void run_selective_repeat_tests(void)
     RUN_TEST(test_receive_fragment_invalid_data_idx_rejected);
     RUN_TEST(test_receive_fragment_bitmap_boundary_seq_accepted);
     RUN_TEST(test_receive_fragment_seq_at_total_rejected);
+    RUN_TEST(test_stride_base_advancement);
+    RUN_TEST(test_stride_1_unchanged_behavior);
+    RUN_TEST(test_reset_sender_clears_stride);
 }
