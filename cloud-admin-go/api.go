@@ -181,9 +181,15 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 
 		var dataBytes []byte
 		if body.Data != "" {
-			dataBytes, err = hex.DecodeString(body.Data)
+			hexStr := body.Data
+			hexStr = strings.TrimPrefix(hexStr, "0x")
+			hexStr = strings.TrimPrefix(hexStr, "0X")
+			if len(hexStr)%2 != 0 {
+				hexStr = "0" + hexStr
+			}
+			dataBytes, err = hex.DecodeString(hexStr)
 			if err != nil {
-				errorResponse(w, "data must be valid hex", http.StatusBadRequest)
+				errorResponse(w, "data must be valid hex (e.g. 'F', '1A2B')", http.StatusBadRequest)
 				return
 			}
 		}
@@ -240,9 +246,15 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 
 		var dataBytes []byte
 		if body.Data != "" {
-			dataBytes, err = hex.DecodeString(body.Data)
+			hexStr := body.Data
+			hexStr = strings.TrimPrefix(hexStr, "0x")
+			hexStr = strings.TrimPrefix(hexStr, "0X")
+			if len(hexStr)%2 != 0 {
+				hexStr = "0" + hexStr
+			}
+			dataBytes, err = hex.DecodeString(hexStr)
 			if err != nil {
-				errorResponse(w, "data must be valid hex", http.StatusBadRequest)
+				errorResponse(w, "data must be valid hex (e.g. 'F', '1A2B')", http.StatusBadRequest)
 				return
 			}
 		}
@@ -258,6 +270,24 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 
 		mqttClient.PublishCmd(payload)
 		jsonResponse(w, map[string]interface{}{"ok": true, "target": nodeID, "topic": body.Topic})
+	})
+
+	// GET /api/benchmarks
+	mux.HandleFunc("/api/benchmarks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if metrics != nil {
+			data, err := metrics.QueryBenchmarks()
+			if err != nil {
+				errorResponse(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			jsonResponse(w, data)
+		} else {
+			jsonResponse(w, []interface{}{})
+		}
 	})
 
 	// GET /api/comparison

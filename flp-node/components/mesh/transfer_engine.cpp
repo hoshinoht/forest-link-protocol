@@ -16,7 +16,8 @@
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
-static constexpr uint32_t FAST_ARQ_TIMEOUT_MS = 700;
+static constexpr uint32_t BASE_ARQ_TIMEOUT_MS = 700;
+static constexpr uint32_t PER_HOP_ARQ_TIMEOUT_MS = 400;
 static constexpr uint32_t BROADCAST_INITIAL_BACKOFF_MS = 500;
 
 constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
@@ -32,7 +33,7 @@ void TransferEngine::init(EventGroupHandle_t events,
 
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
-        arq_[i].init(ARQ_WINDOW, FAST_ARQ_TIMEOUT_MS);
+        arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS);
         arq_[i].set_send_callback(
             [this](uint16_t dst,
                    PacketType type,
@@ -63,18 +64,17 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
     memcpy(&ad, payload, sizeof(ad));
 
     uint16_t frag_size = static_cast<uint16_t>(ad.fragment_size_d8) * 8;
-    uint16_t frag_count = (frag_size > 0)
-        ? static_cast<uint16_t>((ad.file_size + frag_size - 1) / frag_size)
-        : 0;
+    uint16_t frag_count = ad.fragment_count;
 
     ESP_LOGI(TAG,
              "Transfer ad from 0x%04X: size=%" PRIu32
-             " frag_size=%u frags=%u session=%u",
+             " frag_size=%u frags=%u session=%u crc32=%" PRIu32,
              hdr.src_addr,
              ad.file_size,
              frag_size,
              frag_count,
-             ad.session_id);
+             ad.session_id,
+             ad.crc32);
 
     /* If we have internet, respond as exit node candidate */
     if (has_internet)
@@ -106,7 +106,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         pending_meta_.file_size = ad.file_size;
         pending_meta_.fragment_count = frag_count;
         pending_meta_.fragment_size = frag_size;
-        pending_meta_.crc16 = ad.crc16;
+        pending_meta_.crc32 = ad.crc32;
         pending_meta_.waiting = true;
         transfer_.filename[0] = '\0'; /* will be filled by frag 0 */
 
@@ -153,9 +153,6 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 {
     if (is_exit_node_)
     {
-        /* Send ACK back to source — routed through mesh */
-        send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
-
         const uint8_t *fwd_data = payload;
         size_t fwd_len = payload_len;
 
@@ -185,7 +182,7 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
                                      pending_meta_.file_size,
                                      pending_meta_.fragment_count,
                                      pending_meta_.fragment_size,
-                                     static_cast<uint32_t>(pending_meta_.crc16));
+                                     pending_meta_.crc32);
                 }
                 pending_meta_.waiting = false;
 
@@ -194,15 +191,30 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
             }
         }
 
-        /* Forward fragment to MQTT */
+        /*
+         * P5 fix: Only ACK after fragment is successfully queued for MQTT.
+         * If the queue is full, send NACK so the sender retransmits later.
+         * This prevents silent data loss at the MQTT layer.
+         */
+        bool queued = false;
         if (forward_to_mqtt_fn_)
         {
-            forward_to_mqtt_fn_(active_session_id_,
-                                hdr.seq_num,
-                                source_addr_,
-                                fwd_data,
-                                fwd_len,
-                                transfer_.filename);
+            queued = forward_to_mqtt_fn_(active_session_id_,
+                                         hdr.seq_num,
+                                         source_addr_,
+                                         fwd_data,
+                                         fwd_len,
+                                         transfer_.filename);
+        }
+
+        if (queued)
+        {
+            send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
+        }
+        else
+        {
+            send_fn_(hdr.src_addr, PacketType::NACK, nullptr, 0, hdr.seq_num);
+            ESP_LOGW(TAG, "MQTT queue full, NACK seq=%u", hdr.seq_num);
         }
         return;
     }
@@ -356,12 +368,13 @@ void TransferEngine::start_file_transfer(const char *filename,
         transfer_.fragment_count,
         transfer_.session_id);
 
-    /* Build compact TRANSFER_AD (no filename, no fragment_count) */
+    /* Build TRANSFER_AD with full CRC32 and total fragment count */
     TransferAdPayload ad = {};
     ad.session_id = transfer_.session_id;
     ad.file_size = static_cast<uint32_t>(size);
     ad.fragment_size_d8 = static_cast<uint8_t>(transfer_.fragment_size / 8);
-    ad.crc16 = static_cast<uint16_t>(crc & 0xFFFF);
+    ad.crc32 = crc;
+    ad.fragment_count = transfer_.fragment_count;
 
     /* Start election with adaptive timeout */
     candidate_count_ = 0;
@@ -376,6 +389,15 @@ void TransferEngine::start_file_transfer(const char *filename,
     if (election_timeout_ms_ > MAX_ELECTION_MS)
     {
         election_timeout_ms_ = MAX_ELECTION_MS;
+    }
+
+    /* P8: Adaptive ARQ timeout — increase for multi-hop to avoid
+     * spurious retransmissions when round-trip exceeds 700ms. */
+    uint32_t arq_timeout = BASE_ARQ_TIMEOUT_MS +
+        (hops_to_internet * PER_HOP_ARQ_TIMEOUT_MS);
+    for (int i = 0; i < MAX_EXIT_NODES; i++)
+    {
+        arq_[i].set_timeout(arq_timeout);
     }
 
     /*
@@ -545,12 +567,15 @@ void TransferEngine::transfer_tick()
 
             uint8_t frag_buf[MAX_MTU];
             size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-            forward_to_mqtt_fn_(transfer_.session_id,
-                                seq,
-                                my_addr_,
-                                frag_buf,
-                                got,
-                                transfer_.filename);
+            if (!forward_to_mqtt_fn_(transfer_.session_id,
+                                     seq,
+                                     my_addr_,
+                                     frag_buf,
+                                     got,
+                                     transfer_.filename))
+            {
+                break; /* queue full, retry next tick */
+            }
             ESP_LOGI(TAG, "Retransmitted seq=%u", seq);
             sent++;
         }
@@ -591,12 +616,15 @@ void TransferEngine::transfer_tick()
 
             uint8_t frag_buf[MAX_MTU];
             size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-            forward_to_mqtt_fn_(transfer_.session_id,
-                                seq,
-                                my_addr_,
-                                frag_buf,
-                                got,
-                                transfer_.filename);
+            if (!forward_to_mqtt_fn_(transfer_.session_id,
+                                     seq,
+                                     my_addr_,
+                                     frag_buf,
+                                     got,
+                                     transfer_.filename))
+            {
+                break; /* queue full, retry next tick */
+            }
             cloud_next_send_++;
             sent++;
         }

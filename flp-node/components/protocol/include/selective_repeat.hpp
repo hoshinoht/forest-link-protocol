@@ -88,6 +88,12 @@ class SelectiveRepeat
         peer_addr_ = addr;
     }
 
+    /* Update timeout (for adaptive ARQ based on hop count) */
+    void set_timeout(uint32_t timeout_ms)
+    {
+        timeout_ms_ = timeout_ms;
+    }
+
   private:
     uint32_t now_ms() const
     {

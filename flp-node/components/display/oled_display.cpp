@@ -170,7 +170,11 @@ void OledDisplay::render_status(const NodeStatus &s)
     char line[17];
 
     /* Page 0: inverted title bar */
-    snprintf(line, sizeof(line), "FLP-%04X %s", s.node_addr, FLP_VERSION);
+#if CONFIG_FLP_WIFI_DISABLED
+    snprintf(line, sizeof(line), "FLP-%04X  RELAY", s.node_addr);
+#else
+    snprintf(line, sizeof(line), "FLP-%04X GATEWAY", s.node_addr);
+#endif
     draw_title_bar(line);
 
     /* Page 1: icons + peer count */
@@ -251,7 +255,11 @@ void OledDisplay::render_transfer(const NodeStatus &s)
     char line[17];
 
     /* Page 0: inverted title bar */
-    snprintf(line, sizeof(line), "FLP-%04X %s", s.node_addr, FLP_VERSION);
+#if CONFIG_FLP_WIFI_DISABLED
+    snprintf(line, sizeof(line), "FLP-%04X  RELAY", s.node_addr);
+#else
+    snprintf(line, sizeof(line), "FLP-%04X GATEWAY", s.node_addr);
+#endif
     draw_title_bar(line);
 
     /* Page 1: filename (scrolling if > 16 chars) */

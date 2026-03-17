@@ -119,9 +119,10 @@ struct __attribute__((packed)) TransferAdPayload
     uint16_t session_id;
     uint32_t file_size;
     uint8_t fragment_size_d8; /* actual = val * 8 */
-    uint16_t crc16;
+    uint32_t crc32;           /* full CRC32 (was crc16, caused cloud mismatch) */
+    uint16_t fragment_count;  /* total fragments including FEC parity */
 };
-static_assert(sizeof(TransferAdPayload) == 9, "TransferAdPayload must be 9 bytes");
+static_assert(sizeof(TransferAdPayload) == 13, "TransferAdPayload must be 13 bytes");
 
 struct __attribute__((packed)) TransferAckPayload
 {

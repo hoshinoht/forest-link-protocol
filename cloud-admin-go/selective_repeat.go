@@ -17,6 +17,7 @@ type CloudSelectiveRepeat struct {
 	totalChunks  int
 	lastNACKTime map[int]float64 // per-seq NACK cooldown
 	ackCallback  func(msgType string, seq int)
+	NACKCount    int // total NACKs sent during this session
 }
 
 // NewCloudSelectiveRepeat creates a new SR instance.
@@ -35,6 +36,7 @@ func (sr *CloudSelectiveRepeat) StartSession(totalChunks int) {
 	sr.bitmap = make([]byte, bitmapSize)
 	sr.expectedBase = 0
 	sr.lastNACKTime = make(map[int]float64)
+	sr.NACKCount = 0
 }
 
 // isReceived checks whether the bit for seq is set.
@@ -94,6 +96,7 @@ func (sr *CloudSelectiveRepeat) CheckTimeouts() {
 			continue
 		}
 		sr.lastNACKTime[seq] = now
+		sr.NACKCount++
 		if sr.ackCallback != nil {
 			sr.ackCallback("NACK", seq)
 		}

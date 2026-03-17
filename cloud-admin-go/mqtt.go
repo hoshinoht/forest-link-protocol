@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -15,13 +16,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type FileMeta struct {
-	NodeID       string `json:"-"`
-	SessionID    string `json:"session_id"`
-	Filename     string `json:"filename"`
-	TotalSize    int    `json:"total_size"`
-	ChunkCount   int    `json:"chunk_count"`
-	CRC32        uint32 `json:"crc32"`
-	FragmentSize int    `json:"fragment_size"`
+	NodeID       string      `json:"-"`
+	SessionID    json.Number `json:"session_id"`
+	Filename     string      `json:"filename"`
+	TotalSize    int         `json:"total_size"`
+	ChunkCount   int         `json:"chunk_count"`
+	CRC32        uint32      `json:"crc32"`
+	FragmentSize int         `json:"fragment_size"`
 }
 
 type FileChunk struct {
@@ -79,8 +80,15 @@ func (m *MQTTClient) Connect() error {
 	opts.SetClientID("flp-admin")
 	opts.SetProtocolVersion(4) // MQTTv3.1.1
 	opts.SetKeepAlive(60)
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(2 * time.Second)
+	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+		log.Printf("[mqtt] connection lost: %v (will auto-reconnect)", err)
+	})
 	opts.SetDefaultPublishHandler(m.onMessage)
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
+		// Re-subscribe on every (re)connect so subscriptions survive reconnects
 		subs := map[string]byte{
 			"flp/+/file/meta": 1,
 			"flp/+/file/data": 1,
