@@ -171,9 +171,16 @@ func RunTransferEngine(
 		}
 		if success {
 			elapsed := float64(time.Now().UnixMilli())/1000.0 - s.StartedAt
-			log.Printf("[transfer] completed session %s in %.1fs", s.SessionID, elapsed)
-			if err := metrics.RecordTransfer(s); err != nil {
-				log.Printf("[transfer] failed to record metrics: %v", err)
+			nacks := 0
+			if sr != nil {
+				nacks = sr.NACKCount
+			}
+			log.Printf("[transfer] completed session %s in %.1fs (%d NACKs)", s.SessionID, elapsed, nacks)
+			if err := metrics.RecordTransfer(s, nacks); err != nil {
+				log.Printf("[transfer] failed to record transfer: %v", err)
+			}
+			if err := metrics.RecordBenchmark(s, nacks); err != nil {
+				log.Printf("[transfer] failed to record benchmark: %v", err)
 			}
 		} else {
 			log.Printf("[transfer] aborted session %s (timeout)", s.SessionID)

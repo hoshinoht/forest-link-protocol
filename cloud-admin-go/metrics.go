@@ -57,6 +57,15 @@ func (m *MetricsStore) initDB() error {
 			min_internal INTEGER, min_psram INTEGER,
 			largest_block INTEGER
 		)`,
+		`CREATE TABLE IF NOT EXISTS benchmark_results (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT UNIQUE,
+			timestamp REAL, filename TEXT,
+			file_size INTEGER, chunk_count INTEGER, fragment_size INTEGER,
+			duration_sec REAL, goodput_bps REAL, retransmits INTEGER,
+			exit_node_count INTEGER, pdr REAL, latency_ms REAL,
+			range_m INTEGER DEFAULT 1000, notes TEXT
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_node_metrics_node_ts ON node_metrics (node_id, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_heap_metrics_node_ts ON heap_metrics (node_id, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_transfer_metrics_start ON transfer_metrics (start)`,
@@ -124,7 +133,7 @@ func (m *MetricsStore) RecordHeap(nodeID string, payload []byte) error {
 }
 
 // RecordTransfer records a completed file transfer, computing goodput.
-func (m *MetricsStore) RecordTransfer(session *TransferSession) error {
+func (m *MetricsStore) RecordTransfer(session *TransferSession, retransmits int) error {
 	elapsed := session.CompletedAt - session.StartedAt
 	var goodput float64
 	if elapsed > 0 {
@@ -133,7 +142,7 @@ func (m *MetricsStore) RecordTransfer(session *TransferSession) error {
 	_, err := m.writeDB.Exec(
 		"INSERT INTO transfer_metrics VALUES (?,?,?,?,?,?,?)",
 		session.SessionID, session.StartedAt, session.CompletedAt,
-		session.TotalSize, session.ChunkCount, 0, goodput,
+		session.TotalSize, session.ChunkCount, retransmits, goodput,
 	)
 	return err
 }
@@ -178,13 +187,67 @@ func (m *MetricsStore) QueryTransfers() ([]map[string]interface{}, error) {
 	return scanRows(rows)
 }
 
-// DerivedMetrics computes aggregate protocol metrics across all stored data.
+// RecordBenchmark snapshots a self-contained benchmark row from a completed transfer.
+// PDR and latency are captured from the current node_metrics so the benchmark
+// row remains valid after the ephemeral telemetry is cleaned up.
+func (m *MetricsStore) RecordBenchmark(session *TransferSession, retransmits int) error {
+	elapsed := session.CompletedAt - session.StartedAt
+	var goodput float64
+	if elapsed > 0 {
+		goodput = float64(session.TotalSize) * 8.0 / elapsed
+	}
+
+	// Snapshot PDR from node_metrics.
+	var totalTx, totalFail sql.NullInt64
+	var avgLatency sql.NullFloat64
+	_ = m.readDB.QueryRow(
+		"SELECT SUM(tx), SUM(fail), AVG(latency_ms) FROM node_metrics",
+	).Scan(&totalTx, &totalFail, &avgLatency)
+
+	pdr := 1.0
+	if totalTx.Valid && totalTx.Int64 > 0 {
+		pdr = 1.0 - float64(totalFail.Int64)/float64(totalTx.Int64)
+	}
+	lat := 0.0
+	if avgLatency.Valid {
+		lat = avgLatency.Float64
+	}
+
+	now := float64(time.Now().UnixMilli()) / 1000.0
+	_, err := m.writeDB.Exec(
+		`INSERT OR IGNORE INTO benchmark_results
+			(session_id, timestamp, filename, file_size, chunk_count, fragment_size,
+			 duration_sec, goodput_bps, retransmits, exit_node_count, pdr, latency_ms, range_m, notes)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		session.SessionID, now, session.Filename, session.TotalSize,
+		session.ChunkCount, session.FragmentSize, elapsed, goodput,
+		retransmits, len(session.ExitNodes), pdr, lat, 1000,
+		"Auto-captured from live transfer",
+	)
+	return err
+}
+
+// QueryBenchmarks returns all persistent benchmark rows, newest first.
+func (m *MetricsStore) QueryBenchmarks() ([]map[string]interface{}, error) {
+	rows, err := m.readDB.Query(
+		`SELECT id, session_id, timestamp, filename, file_size, chunk_count, fragment_size,
+			duration_sec, goodput_bps, retransmits, exit_node_count, pdr, latency_ms, range_m, notes
+		FROM benchmark_results ORDER BY timestamp DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// DerivedMetrics computes aggregate protocol metrics from persistent benchmark_results.
 func (m *MetricsStore) DerivedMetrics() (map[string]interface{}, error) {
-	var avgGoodput sql.NullFloat64
+	var avgGoodput, avgPDR, avgLatency sql.NullFloat64
 	var count int64
 	err := m.readDB.QueryRow(
-		"SELECT AVG(goodput_bps), COUNT(*) FROM transfer_metrics",
-	).Scan(&avgGoodput, &count)
+		"SELECT AVG(goodput_bps), AVG(pdr), AVG(latency_ms), COUNT(*) FROM benchmark_results",
+	).Scan(&avgGoodput, &avgPDR, &avgLatency, &count)
 	if err != nil {
 		return nil, err
 	}
@@ -192,20 +255,10 @@ func (m *MetricsStore) DerivedMetrics() (map[string]interface{}, error) {
 		return nil, nil
 	}
 
-	var totalTx, totalFail sql.NullInt64
-	var avgLatency sql.NullFloat64
-	err = m.readDB.QueryRow(
-		"SELECT SUM(tx), SUM(fail), AVG(latency_ms) FROM node_metrics",
-	).Scan(&totalTx, &totalFail, &avgLatency)
-	if err != nil {
-		return nil, err
-	}
-
 	pdr := 1.0
-	if totalTx.Valid && totalTx.Int64 > 0 {
-		pdr = 1.0 - float64(totalFail.Int64)/float64(totalTx.Int64)
+	if avgPDR.Valid {
+		pdr = avgPDR.Float64
 	}
-
 	lat := 0.0
 	if avgLatency.Valid {
 		lat = math.Round(avgLatency.Float64*100) / 100
@@ -217,7 +270,7 @@ func (m *MetricsStore) DerivedMetrics() (map[string]interface{}, error) {
 		"throughput_bps": math.Round(avgGoodput.Float64*100) / 100,
 		"latency_ms":     lat,
 		"range_m":        1000,
-		"notes":          "Measured from live mesh deployment",
+		"notes":          fmt.Sprintf("Aggregated from %d benchmark runs", count),
 	}, nil
 }
 

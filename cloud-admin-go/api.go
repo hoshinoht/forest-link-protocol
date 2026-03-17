@@ -260,6 +260,24 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 		jsonResponse(w, map[string]interface{}{"ok": true, "target": nodeID, "topic": body.Topic})
 	})
 
+	// GET /api/benchmarks
+	mux.HandleFunc("/api/benchmarks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if metrics != nil {
+			data, err := metrics.QueryBenchmarks()
+			if err != nil {
+				errorResponse(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			jsonResponse(w, data)
+		} else {
+			jsonResponse(w, []interface{}{})
+		}
+	})
+
 	// GET /api/comparison
 	mux.HandleFunc("/api/comparison", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
