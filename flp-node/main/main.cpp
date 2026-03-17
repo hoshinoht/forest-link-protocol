@@ -212,6 +212,7 @@ static void display_task(void *arg)
         status.transfer_pct = mgr->get_transfer_progress();
         status.free_heap_kb = esp_get_free_heap_size() / 1024;
         status.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+        status.cloud_cmd_received = mgr->has_recent_cloud_cmd();
 
         oled_display.update(status);
 

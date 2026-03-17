@@ -118,6 +118,17 @@ func (ta *TopologyAggregator) UpdateHeap(nodeID string, payload []byte) {
 	}
 }
 
+// NodeIDs returns all known node IDs.
+func (ta *TopologyAggregator) NodeIDs() []string {
+	ta.mu.RLock()
+	defer ta.mu.RUnlock()
+	ids := make([]string, 0, len(ta.nodes))
+	for id := range ta.nodes {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 func (ta *TopologyAggregator) ToJSON() map[string]interface{} {
 	ta.mu.RLock()
 	defer ta.mu.RUnlock()

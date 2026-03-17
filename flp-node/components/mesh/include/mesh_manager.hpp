@@ -118,6 +118,11 @@ class MeshManager
         if (has_internet_) { return 0; }
         return route_table_.min_hops_to_internet();
     }
+    bool has_recent_cloud_cmd() const
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        return last_cloud_cmd_ms_ > 0 && (now - last_cloud_cmd_ms_) < 3000;
+    }
     bool is_transfer_active() const
     {
         return transfer_engine_.is_transfer_active();
@@ -213,6 +218,9 @@ class MeshManager
     /* P6: Command dedup — ignore duplicate MESH_CMD within 2 seconds */
     uint8_t last_mesh_cmd_id_ = 0xFF;
     uint32_t last_mesh_cmd_ms_ = 0;
+
+    /* Cloud command indicator (display auto-clears after 3s) */
+    uint32_t last_cloud_cmd_ms_ = 0;
 
     /*
      * Step 4: Enlarged dedup cache with timestamps.

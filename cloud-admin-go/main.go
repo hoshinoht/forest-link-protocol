@@ -43,8 +43,10 @@ func main() {
 	}
 	defer mqttClient.Disconnect()
 
+	progress := NewTransferProgress()
+
 	// Transfer engine goroutine
-	go RunTransferEngine(ctx, metaCh, chunkCh, mqttClient, metrics, *srWindow, *srTimeout)
+	go RunTransferEngine(ctx, metaCh, chunkCh, mqttClient, metrics, *srWindow, *srTimeout, progress)
 
 	// Telemetry goroutine
 	go RunTelemetry(ctx, topoCh, metricCh, topo, metrics)
@@ -66,7 +68,7 @@ func main() {
 	}()
 
 	// HTTP server
-	go StartHTTPServer(ctx, *webPort, topo, metrics, mqttClient)
+	go StartHTTPServer(ctx, *webPort, topo, metrics, mqttClient, progress)
 
 	fmt.Fprintf(os.Stderr, "[Admin] FLP Admin running. Dashboard at http://0.0.0.0:%d/\n", *webPort)
 

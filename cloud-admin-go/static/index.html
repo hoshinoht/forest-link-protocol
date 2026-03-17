@@ -50,7 +50,10 @@ tr:hover { background: #161b22; }
 </div>
 
 <div id="topology" class="panel active">
-    <div class="stat-grid" id="topo-stats"></div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+        <div class="stat-grid" id="topo-stats" style="flex:1;margin-bottom:0;"></div>
+        <button id="crawl-btn" onclick="crawlMesh()">Crawl Mesh</button>
+    </div>
     <div id="topo-container"></div>
 </div>
 
@@ -68,6 +71,12 @@ tr:hover { background: #161b22; }
 </div>
 
 <div id="transfers" class="panel">
+    <div id="active-transfer" style="margin-bottom:16px;display:none;">
+        <div class="stat-grid" id="active-stats"></div>
+        <div style="background:#21262d;border-radius:4px;height:20px;margin-top:8px;">
+            <div id="active-bar" style="background:#58a6ff;height:100%;border-radius:4px;transition:width 0.3s;width:0%"></div>
+        </div>
+    </div>
     <div class="stat-grid" id="transfer-stats"></div>
     <table>
         <thead><tr><th>Session</th><th>Size</th><th>Chunks</th><th>Duration</th><th>Goodput</th><th>Retransmits</th></tr></thead>
@@ -394,6 +403,46 @@ async function sendTopicMsg() {
     entry.textContent = '[' + ts + '] -> 0x' + nodeId + ' topic="' + topic + '"'
         + (payloadHex ? ' data=' + payloadHex : '') + status;
     log.insertBefore(entry, log.firstChild);
+}
+
+// --- Active Transfer Progress ---
+async function pollActiveTransfer() {
+    try {
+        const r = await fetch('/api/active-transfer');
+        const d = await r.json();
+        const wrap = document.getElementById('active-transfer');
+        if (!d.active) {
+            wrap.style.display = 'none';
+            return;
+        }
+        wrap.style.display = 'block';
+        const statsEl = document.getElementById('active-stats');
+        clearChildren(statsEl);
+        statsEl.appendChild(createStatCard('File', d.filename, ''));
+        statsEl.appendChild(createStatCard('Progress', (d.progress * 100).toFixed(1) + '%', ''));
+        statsEl.appendChild(createStatCard('Chunks', d.received + ' / ' + d.chunk_count, ''));
+        statsEl.appendChild(createStatCard('Size', (d.total_size / 1024).toFixed(1) + ' KB', ''));
+        statsEl.appendChild(createStatCard('Elapsed', d.elapsed_sec.toFixed(1) + 's', ''));
+        document.getElementById('active-bar').style.width = (d.progress * 100).toFixed(1) + '%';
+    } catch (e) { /* silent */ }
+}
+setInterval(pollActiveTransfer, 2000);
+pollActiveTransfer();
+
+// --- Crawl Mesh ---
+async function crawlMesh() {
+    const btn = document.getElementById('crawl-btn');
+    btn.disabled = true;
+    btn.textContent = 'Crawling...';
+    try {
+        const r = await fetch('/api/crawl');
+        const d = await r.json();
+        btn.textContent = 'Pinged ' + d.nodes_pinged + ' nodes';
+        setTimeout(() => { btn.textContent = 'Crawl Mesh'; btn.disabled = false; }, 3000);
+    } catch (e) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Crawl Mesh'; btn.disabled = false; }, 3000);
+    }
 }
 
 // --- Node Commands ---
