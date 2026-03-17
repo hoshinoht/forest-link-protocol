@@ -57,7 +57,9 @@ void MqttClient::init()
 
     /* Configure and start ESP-IDF MQTT client */
     esp_mqtt_client_config_t mqtt_cfg = {};
+#if !CONFIG_FLP_WIFI_DISABLED
     mqtt_cfg.broker.address.uri = CONFIG_FLP_MQTT_BROKER_URI;
+#endif
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(
@@ -67,8 +69,12 @@ void MqttClient::init()
     /* Register predefined topics */
     register_default_topics();
 
+#if !CONFIG_FLP_WIFI_DISABLED
     ESP_LOGI(
         TAG, "MQTT client initialized, broker=%s", CONFIG_FLP_MQTT_BROKER_URI);
+#else
+    ESP_LOGI(TAG, "MQTT client initialized (no broker)");
+#endif
 }
 
 void MqttClient::register_default_topics()

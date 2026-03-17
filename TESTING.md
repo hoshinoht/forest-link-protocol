@@ -49,13 +49,17 @@ Confirm: OLED shows `W:OK`, serial shows `Got IP: x.x.x.x`
 **Relay / sensor node (WiFi disabled):**
 
 ```bash
-cp sdkconfig.defaults.relay sdkconfig.defaults
-rm -f sdkconfig && idf.py build && idf.py -p /dev/<port> flash monitor
+rm -f sdkconfig && idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" set-target esp32s3 && idf.py build && idf.py -p /dev/<port> flash monitor
 ```
+
+The `-D SDKCONFIG_DEFAULTS=...` flag layers `sdkconfig.defaults.relay` on top of the base defaults, setting `CONFIG_FLP_WIFI_DISABLED=y`. No need to modify or restore `sdkconfig.defaults`.
 
 Confirm: OLED shows `W:--`, serial shows `WiFi STA started (no AP)`
 
-Restore after flashing relays: `git checkout sdkconfig.defaults`
+> **Note:** After flashing relay nodes, switch back to gateway mode for the next exit node build:
+> ```bash
+> rm -f sdkconfig && idf.py set-target esp32s3 && idf.py build
+> ```
 
 **Auto-demo mode** (no button press needed):
 
