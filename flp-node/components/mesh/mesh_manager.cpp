@@ -921,6 +921,7 @@ void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
     }
     last_mesh_cmd_id_ = cmd_id;
     last_mesh_cmd_ms_ = cmd_now;
+    last_cloud_cmd_ms_ = cmd_now;
 
     ESP_LOGI(TAG,
              "MESH_CMD from 0x%04X: cmd=%u len=%zu",

@@ -2,9 +2,84 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
+	"sync"
 	"time"
 )
+
+// ---------------------------------------------------------------------------
+// TransferProgress — thread-safe snapshot of the active transfer for the API
+// ---------------------------------------------------------------------------
+
+type TransferProgress struct {
+	mu          sync.RWMutex
+	SessionID   string  `json:"session_id"`
+	Filename    string  `json:"filename"`
+	TotalSize   int     `json:"total_size"`
+	ChunkCount  int     `json:"chunk_count"`
+	Received    int     `json:"received"`
+	Progress    float64 `json:"progress"`
+	Active      bool    `json:"active"`
+	StartedAt   float64 `json:"started_at"`
+	ElapsedSec  float64 `json:"elapsed_sec"`
+}
+
+func NewTransferProgress() *TransferProgress {
+	return &TransferProgress{}
+}
+
+func (p *TransferProgress) Update(sessionID, filename string, totalSize, chunkCount, received int, progress float64, active bool, startedAt float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.SessionID = sessionID
+	p.Filename = filename
+	p.TotalSize = totalSize
+	p.ChunkCount = chunkCount
+	p.Received = received
+	p.Progress = progress
+	p.Active = active
+	p.StartedAt = startedAt
+	if active && startedAt > 0 {
+		p.ElapsedSec = float64(time.Now().UnixMilli())/1000.0 - startedAt
+	} else {
+		p.ElapsedSec = 0
+	}
+}
+
+func (p *TransferProgress) ToJSON() json.RawMessage {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	elapsed := p.ElapsedSec
+	if p.Active && p.StartedAt > 0 {
+		elapsed = float64(time.Now().UnixMilli())/1000.0 - p.StartedAt
+	}
+
+	// Anonymous struct avoids copying the mutex via *p
+	b, _ := json.Marshal(struct {
+		SessionID  string  `json:"session_id"`
+		Filename   string  `json:"filename"`
+		TotalSize  int     `json:"total_size"`
+		ChunkCount int     `json:"chunk_count"`
+		Received   int     `json:"received"`
+		Progress   float64 `json:"progress"`
+		Active     bool    `json:"active"`
+		StartedAt  float64 `json:"started_at"`
+		ElapsedSec float64 `json:"elapsed_sec"`
+	}{
+		SessionID:  p.SessionID,
+		Filename:   p.Filename,
+		TotalSize:  p.TotalSize,
+		ChunkCount: p.ChunkCount,
+		Received:   p.Received,
+		Progress:   p.Progress,
+		Active:     p.Active,
+		StartedAt:  p.StartedAt,
+		ElapsedSec: elapsed,
+	})
+	return b
+}
 
 const (
 	transferTimeoutSec = 60
@@ -131,6 +206,7 @@ func RunTransferEngine(
 	metrics *MetricsStore,
 	srWindow int,
 	srTimeout float64,
+	progress *TransferProgress,
 ) {
 	tq := NewTransferQueue()
 	tq.CmdCallback = func(nodeID, command, sessionID string) {
@@ -150,6 +226,7 @@ func RunTransferEngine(
 		if s == nil {
 			sr = nil
 			reassembler = nil
+			progress.Update("", "", 0, 0, 0, 0, false, 0)
 			return
 		}
 		sr = NewCloudSelectiveRepeat(srWindow, srTimeout)
@@ -159,6 +236,7 @@ func RunTransferEngine(
 		sr.StartSession(s.ChunkCount)
 		reassembler = NewFileReassembler(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, s.CRC32, s.FragmentSize)
 		lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
+		progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, 0, 0, true, s.StartedAt)
 		log.Printf("[transfer] started session %s (%s, %d bytes, %d chunks)",
 			s.SessionID, s.Filename, s.TotalSize, s.ChunkCount)
 	}
@@ -169,6 +247,7 @@ func RunTransferEngine(
 		if s == nil {
 			return
 		}
+		progress.Update("", "", 0, 0, 0, 0, false, 0)
 		// Set CompletedAt BEFORE recording metrics (was 0 when metrics ran)
 		s.CompletedAt = float64(time.Now().UnixMilli()) / 1000.0
 		if success {
@@ -197,7 +276,31 @@ func RunTransferEngine(
 			return
 
 		case meta := <-metaCh:
-			tq.Enqueue(meta.SessionID.String(), meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
+			sessionID := meta.SessionID.String()
+			if tq.ActiveTransfer != nil {
+				if tq.ActiveTransfer.SessionID == sessionID {
+					// Same session from another exit node — merge (multi-exit)
+					log.Printf("[transfer] merging exit node %s into session %s",
+						meta.NodeID, sessionID)
+				} else {
+					// Different session ID while one is active.
+					// Only supersede if active transfer is stale (no chunks
+					// for 10s) — meaning the source died. If active is
+					// healthy, queue the new one so we don't kill a working
+					// transfer when two sensors start simultaneously.
+					now := float64(time.Now().UnixMilli()) / 1000.0
+					staleSec := now - lastChunkTime
+					if staleSec > 10.0 || lastChunkTime == 0 {
+						log.Printf("[transfer] superseding stale session %s (no data for %.0fs) with %s",
+							tq.ActiveTransfer.SessionID, staleSec, sessionID)
+						completeTransfer(false)
+					} else {
+						log.Printf("[transfer] session %s queued (active session %s still receiving)",
+							sessionID, tq.ActiveTransfer.SessionID)
+					}
+				}
+			}
+			tq.Enqueue(sessionID, meta.NodeID, meta.Filename, meta.TotalSize, meta.ChunkCount, meta.CRC32, meta.FragmentSize)
 			// If this enqueue made a new active transfer, set it up.
 			if tq.ActiveTransfer != nil && sr == nil {
 				setupActive()
@@ -212,6 +315,9 @@ func RunTransferEngine(
 			if isNew {
 				sr.OnChunkReceived(seq)
 				lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
+				s := tq.ActiveTransfer
+				progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
+					reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
 			}
 
 			// Check for completion.

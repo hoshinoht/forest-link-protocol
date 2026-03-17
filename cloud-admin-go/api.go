@@ -38,7 +38,7 @@ func errorResponse(w http.ResponseWriter, msg string, code int) {
 }
 
 // StartHTTPServer registers HTTP handlers and runs the server until ctx is cancelled.
-func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, metrics *MetricsStore, mqttClient *MQTTClient) {
+func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, metrics *MetricsStore, mqttClient *MQTTClient, progress *TransferProgress) {
 	mux := http.NewServeMux()
 
 	// GET / — serve static/index.html (and other static assets)
@@ -338,6 +338,41 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			benchmarks = []interface{}{}
 		}
 		jsonResponse(w, benchmarks)
+	})
+
+	// GET /api/active-transfer
+	mux.HandleFunc("/api/active-transfer", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(progress.ToJSON())
+	})
+
+	// GET /api/crawl
+	mux.HandleFunc("/api/crawl", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		nodeIDs := topo.NodeIDs()
+		for _, id := range nodeIDs {
+			targetAddr, err := strconv.ParseUint(id, 16, 16)
+			if err != nil {
+				continue
+			}
+			payload := make([]byte, 3)
+			binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
+			payload[2] = 0x01 // REQUEST_TELEMETRY
+			mqttClient.PublishCmd(payload)
+		}
+		// Broadcast to 0xFFFF for undiscovered nodes
+		bcast := []byte{0xFF, 0xFF, 0x01}
+		mqttClient.PublishCmd(bcast)
+
+		jsonResponse(w, map[string]interface{}{"ok": true, "nodes_pinged": len(nodeIDs)})
 	})
 
 	srv := &http.Server{

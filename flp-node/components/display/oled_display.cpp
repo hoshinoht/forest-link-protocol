@@ -229,6 +229,13 @@ void OledDisplay::render_status(const NodeStatus &s)
     }
     ssd1306_display_text(&dev_, 4, line, strlen(line), false);
 
+    /* Page 5: cloud command indicator */
+    if (s.cloud_cmd_received)
+    {
+        snprintf(line, sizeof(line), ">> Cloud CMD RX");
+        ssd1306_display_text(&dev_, 5, line, strlen(line), false);
+    }
+
     /* Page 6: heap */
     snprintf(line, sizeof(line), "Heap: %lukB", (unsigned long) s.free_heap_kb);
     ssd1306_display_text(&dev_, 6, line, strlen(line), false);
