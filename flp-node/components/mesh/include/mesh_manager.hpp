@@ -201,6 +201,10 @@ class MeshManager
     /* Fix 2: track current WiFi channel to avoid redundant set_channel calls */
     uint8_t current_channel_ = 0;
 
+    /* Channel hopping for relay bootstrap (find gateway's ESP-NOW channel) */
+    uint32_t channel_hop_timer_ms_ = 0;
+    uint8_t channel_hop_idx_ = 0;
+
     /* Fix 7: deferred ESP-NOW peer update flag (set from WiFi event task) */
     std::atomic<bool> espnow_peer_update_pending_{false};
 

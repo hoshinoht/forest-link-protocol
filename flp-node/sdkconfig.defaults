@@ -25,7 +25,7 @@ CONFIG_FLP_OLED_ENABLED=y
 CONFIG_FLP_OLED_SDA=18
 CONFIG_FLP_OLED_SCL=17
 CONFIG_FLP_OLED_RST=-1
-CONFIG_FLP_DEMO_AUTO=y
+CONFIG_FLP_DEMO_AUTO=n
 CONFIG_FLP_DEMO_AUTO_INTERVAL_S=60
 
 # IMPORTANT NOTE: As this is a prototype we will be hardcoding the Wi-Fi credentials for simplicity.
@@ -34,9 +34,9 @@ CONFIG_FLP_DEMO_AUTO_INTERVAL_S=60
 
 # Please change the following Wi-Fi credentials to your own Wi-Fi network before
 # building and flashing the firmware.
-CONFIG_FLP_WIFI_SSID="hoshiyomi"
-CONFIG_FLP_WIFI_PASSWORD="Kiseki033171"
+CONFIG_FLP_WIFI_SSID="lomohomo"
+CONFIG_FLP_WIFI_PASSWORD="K0piP3ng"
 
 
 # Mqtt gateway
-CONFIG_FLP_MQTT_BROKER_URI="mqtt://10.239.233.64"
+CONFIG_FLP_MQTT_BROKER_URI="mqtt://172.20.10.13"

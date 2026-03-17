@@ -213,6 +213,14 @@ void MeshManager::init()
 
     discovery_timer_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
+    /* Init channel hop state from current WiFi channel */
+    {
+        wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&current_channel_, &sec);
+        channel_hop_idx_ = current_channel_;
+        channel_hop_timer_ms_ = discovery_timer_ms_;
+    }
+
     /* Init heap monitor */
     heap_monitor_.init();
 
@@ -360,6 +368,32 @@ void MeshManager::run()
         {
             publish_all_telemetry();
             topo_metrics_timer_ms_ = now;
+        }
+
+        /*
+         * Channel hopping for relay nodes: if we have no route to the
+         * internet, cycle through WiFi channels 1-13 to find the
+         * gateway's ESP-NOW channel.  Sends a discovery probe on each
+         * channel to trigger an immediate response from any exit node.
+         * Stops automatically once a neighbor with internet is found.
+         */
+        if (!has_internet_ &&
+            route_table_.min_hops_to_internet() >= ROUTE_HOPS_UNKNOWN)
+        {
+            constexpr uint32_t kChannelHopIntervalMs = 5000;
+            if (now - channel_hop_timer_ms_ > kChannelHopIntervalMs)
+            {
+                channel_hop_idx_ = (channel_hop_idx_ % 13) + 1;
+                esp_wifi_set_channel(channel_hop_idx_, WIFI_SECOND_CHAN_NONE);
+                current_channel_ = channel_hop_idx_;
+                ESP_LOGI(TAG, "Channel hop: trying ch=%u", channel_hop_idx_);
+
+                /* Probe immediately on the new channel */
+                send_discovery();
+                discovery_timer_ms_ = now;
+
+                channel_hop_timer_ms_ = now;
+            }
         }
 
         /* Drain inbound mesh commands from cloud (exit nodes only) */
@@ -624,10 +658,34 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
         resp.flags |= (sf_enc << 5);
 
-        send_packet(hdr.src_addr,
-                    PacketType::DISCOVERY,
-                    reinterpret_cast<const uint8_t *>(&resp),
-                    sizeof(resp));
+        /*
+         * Reply via the same transport the request arrived on.
+         * If a relay on a different WiFi channel sent discovery via LoRa,
+         * responding via ESP-NOW would silently fail (channel mismatch).
+         */
+        if (source == RxTransport::LORA)
+        {
+            uint8_t resp_buf[MAX_MTU];
+            PacketHeader resp_hdr = {};
+            resp_hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
+            resp_hdr.src_addr = my_addr_;
+            resp_hdr.dst_addr = hdr.src_addr;
+            resp_hdr.set_ttl_hops(DEFAULT_TTL, 0);
+            resp_hdr.seq_num = 0;
+            memcpy(resp_buf, &resp_hdr, PACKET_HEADER_SIZE);
+            memcpy(resp_buf + PACKET_HEADER_SIZE, &resp, sizeof(resp));
+            send_raw(Transport::LORA,
+                     resp_buf,
+                     PACKET_HEADER_SIZE + sizeof(resp),
+                     hdr.src_addr);
+        }
+        else
+        {
+            send_packet(hdr.src_addr,
+                        PacketType::DISCOVERY,
+                        reinterpret_cast<const uint8_t *>(&resp),
+                        sizeof(resp));
+        }
     }
 }
 
@@ -796,17 +854,27 @@ void MeshManager::send_discovery()
      */
     send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
 
-    if (route_table_.get_espnow_neighbor_count() == 0 ||
-        route_table_.oldest_contact_age_ms() > 20000)
+    /*
+     * Send LoRa discovery when:
+     *  - no ESP-NOW neighbors at all (bootstrap), OR
+     *  - no neighbor contact in 20s (stale mesh), OR
+     *  - no route to internet yet (gateway may be on a different WiFi
+     *    channel, unreachable via ESP-NOW but reachable via LoRa)
+     */
+    bool lora_tx = (route_table_.get_espnow_neighbor_count() == 0 ||
+                    route_table_.oldest_contact_age_ms() > 20000 ||
+                    disc.hops_to_internet >= ROUTE_HOPS_UNKNOWN);
+    if (lora_tx)
     {
         send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
     }
 
-    ESP_LOGD(TAG,
-             "Sent discovery broadcast (hops_to_inet=%u ch=%u seq=%u)",
-             disc.hops_to_internet,
+    ESP_LOGI(TAG,
+             "Discovery TX: ch=%u hops_inet=%u espnow_nbrs=%u lora=%s",
              ch,
-             disc.inet_seq);
+             disc.hops_to_internet,
+             (unsigned) route_table_.get_espnow_neighbor_count(),
+             lora_tx ? "yes" : "no");
 }
 
 /* -- Mesh relay layer --------------------------------------------------------- */
