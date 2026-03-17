@@ -62,7 +62,7 @@ static const char *s_sd_status = "not attempted";
 static esp_err_t s_sd_err = ESP_OK;
 #endif
 
-#if CONFIG_FLP_DEMO_AUTO
+#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
 /* Auto demo mode: periodic transfer without button */
 static void auto_demo_task(void *arg)
 {
@@ -96,7 +96,7 @@ static void auto_demo_task(void *arg)
         vTaskDelay(interval);
     }
 }
-#else
+#elif !CONFIG_FLP_DEMO_AUTO
 /* Manual demo mode: button-triggered transfer */
 static TaskHandle_t s_button_task_handle = nullptr;
 static TickType_t s_last_button_press = 0;
@@ -396,7 +396,7 @@ extern "C" void app_main()
                 FLP_UART_TASK_PRIORITY,
                 nullptr);
 
-#if CONFIG_FLP_DEMO_AUTO
+#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
     /* Auto demo mode: periodic transfer task */
     xTaskCreate(auto_demo_task,
                 "auto_demo",
@@ -407,7 +407,7 @@ extern "C" void app_main()
     ESP_LOGI(TAG,
              "Auto demo enabled: transfer every %d seconds",
              CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
-#else
+#elif !CONFIG_FLP_DEMO_AUTO
     /* Demo button (GPIO ISR + lightweight handler task) */
     xTaskCreate(button_task,
                 "button_task",
@@ -445,18 +445,23 @@ extern "C" void app_main()
                 nullptr);
 #endif
 
-#if CONFIG_FLP_DEMO_AUTO
+#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, auto demo every %ds)",
              CONFIG_FLP_UART_TX_PIN,
              CONFIG_FLP_UART_RX_PIN,
              CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
-#else
+#elif !CONFIG_FLP_DEMO_AUTO
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, button on GPIO %d)",
              CONFIG_FLP_UART_TX_PIN,
              CONFIG_FLP_UART_RX_PIN,
              CONFIG_FLP_DEMO_BUTTON_PIN);
+#else
+    ESP_LOGI(TAG,
+             "All tasks created (UART on GPIO %d/%d, relay mode)",
+             CONFIG_FLP_UART_TX_PIN,
+             CONFIG_FLP_UART_RX_PIN);
 #endif
 
     /* Log demo payload source (visible even when monitor reconnects late) */
