@@ -36,6 +36,7 @@ struct NeighborEntry
     uint16_t tx_count;       /* packets sent to this neighbor */
     uint16_t tx_success;     /* successful transmissions */
     uint16_t etx_x100;      /* ETX * 100 (fixed-point, e.g. 150 = 1.5 ETX) */
+    uint8_t queue_load;      /* forwarding load reported by this neighbor */
     bool early_stale_sent;   /* true if we already sent ROUTE_ERROR for this neighbor */
 };
 
@@ -154,8 +155,9 @@ class RouteTable
         return false;
     }
 
-    /* Step 3c: ETX-weighted composite cost routing */
-    uint16_t next_hop(uint16_t dst_addr) const
+    /* Step 3c: ETX-weighted composite cost routing
+     * my_addr: this node's address, used for loop avoidance (0 = disabled). */
+    uint16_t next_hop(uint16_t dst_addr, uint16_t my_addr = 0) const
     {
         /* Direct neighbor: always use direct path */
         for (uint8_t i = 0; i < count_; i++)
@@ -189,8 +191,15 @@ class RouteTable
             {
                 continue; /* skip other exit nodes for unicast routing */
             }
+            /* Loop avoidance: skip neighbors whose route leads back to us */
+            if (toward_internet && my_addr != 0 &&
+                neighbors_[i].inet_origin == my_addr)
+            {
+                continue;
+            }
             uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                          + neighbors_[i].etx_x100;
+                          + neighbors_[i].etx_x100
+                          + neighbors_[i].queue_load;
             if (cost < best_cost)
             {
                 best_cost = cost;
@@ -208,7 +217,8 @@ class RouteTable
                     continue;
                 }
                 uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                              + neighbors_[i].etx_x100;
+                              + neighbors_[i].etx_x100
+                              + neighbors_[i].queue_load;
                 if (cost < best_cost)
                 {
                     best_cost = cost;
@@ -418,14 +428,112 @@ class RouteTable
         }
     }
 
+    void set_queue_load(uint16_t addr, uint8_t load)
+    {
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == addr)
+            {
+                neighbors_[i].queue_load = load;
+                break;
+            }
+        }
+    }
+
+    /* --- Hysteresis: better route tracking --- */
+    static constexpr uint8_t SWITCH_THRESHOLD_CYCLES = 3;
+    static constexpr uint32_t MIN_COST_IMPROVEMENT = 50;
+
+    struct BetterRouteResult
+    {
+        bool should_switch;
+        uint16_t new_addr;
+    };
+
+    /* Call once per discovery cycle. Compares current best next-hop cost
+     * against all alternatives. Returns should_switch=true only after
+     * SWITCH_THRESHOLD_CYCLES consecutive improvements. */
+    BetterRouteResult check_better_route(uint16_t current_best, uint16_t my_addr = 0)
+    {
+        /* Compute cost of current best */
+        uint32_t current_cost = UINT32_MAX;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == current_best &&
+                neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
+            {
+                current_cost = (uint32_t)neighbors_[i].hops_to_internet * 100
+                             + neighbors_[i].etx_x100
+                             + neighbors_[i].queue_load;
+                break;
+            }
+        }
+
+        /* Find the cheapest alternative (excluding current best) */
+        uint16_t alt_addr = 0;
+        uint32_t alt_cost = UINT32_MAX;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if (neighbors_[i].addr == current_best)
+            {
+                continue;
+            }
+            if (neighbors_[i].hops_to_internet >= ROUTE_HOPS_UNKNOWN)
+            {
+                continue;
+            }
+            if (my_addr != 0 && neighbors_[i].inet_origin == my_addr)
+            {
+                continue;
+            }
+            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
+                          + neighbors_[i].etx_x100
+                          + neighbors_[i].queue_load;
+            if (cost < alt_cost)
+            {
+                alt_cost = cost;
+                alt_addr = neighbors_[i].addr;
+            }
+        }
+
+        /* Check if alternative is meaningfully better */
+        if (alt_addr != 0 && current_cost > alt_cost &&
+            (current_cost - alt_cost) >= MIN_COST_IMPROVEMENT)
+        {
+            if (better_route_.candidate_addr == alt_addr)
+            {
+                better_route_.consecutive_cycles++;
+            }
+            else
+            {
+                better_route_.candidate_addr = alt_addr;
+                better_route_.current_best_addr = current_best;
+                better_route_.consecutive_cycles = 1;
+            }
+
+            if (better_route_.consecutive_cycles >= SWITCH_THRESHOLD_CYCLES)
+            {
+                uint16_t result = better_route_.candidate_addr;
+                better_route_ = {}; /* reset after switch */
+                return {true, result};
+            }
+        }
+        else
+        {
+            better_route_ = {}; /* reset — no sustained improvement */
+        }
+
+        return {false, 0};
+    }
+
     size_t serialize(uint8_t *buf, size_t max_len) const
     {
         /*
          * Format: [count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1,
-         * flags:1}*N] flags: bit0=espnow_reachable, bit1=lora_reachable,
-         * bit2=has_internet
+         * flags:1, queue_load:1}*N] flags: bit0=espnow_reachable,
+         * bit1=lora_reachable, bit2=has_internet
          */
-        size_t needed = 1 + count_ * 6;
+        size_t needed = 1 + count_ * 7;
         if (needed > max_len)
         {
             return 0;
@@ -433,7 +541,7 @@ class RouteTable
         buf[0] = count_;
         for (uint8_t i = 0; i < count_; i++)
         {
-            size_t off = 1 + i * 6;
+            size_t off = 1 + i * 7;
             memcpy(buf + off, &neighbors_[i].addr, 2); /* little-endian on ESP32 */
             buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
             buf[off + 3] = neighbors_[i].hop_count;
@@ -452,6 +560,7 @@ class RouteTable
                 flags |= ROUTE_FLAG_INTERNET;
             }
             buf[off + 5] = flags;
+            buf[off + 6] = neighbors_[i].queue_load;
         }
         return needed;
     }
@@ -475,8 +584,16 @@ class RouteTable
     }
 
   private:
+    struct BetterRouteCandidate
+    {
+        uint16_t candidate_addr = 0;
+        uint16_t current_best_addr = 0;
+        uint8_t consecutive_cycles = 0;
+    };
+
     NeighborEntry neighbors_[MAX_NEIGHBORS] = {};
     uint8_t count_ = 0;
+    BetterRouteCandidate better_route_ = {};
 };
 
 } /* namespace flp */

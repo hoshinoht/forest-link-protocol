@@ -12,6 +12,7 @@
 void reset_fec(void);
 void reset_route_table(void);
 void reset_buffer_pool(void);
+void reset_mesh_improvements(void);
 
 /* Single global setUp/tearDown required by Unity */
 void setUp(void)
@@ -19,6 +20,7 @@ void setUp(void)
     reset_fec();
     reset_route_table();
     reset_buffer_pool();
+    reset_mesh_improvements();
 }
 void tearDown(void) {}
 
@@ -29,6 +31,7 @@ void run_fec_decoder_tests(void);
 void run_route_table_tests(void);
 void run_buffer_pool_tests(void);
 void run_selective_repeat_tests(void);
+void run_mesh_improvement_tests(void);
 
 extern "C" void app_main(void)
 {
@@ -40,6 +43,7 @@ extern "C" void app_main(void)
     run_route_table_tests();
     run_buffer_pool_tests();
     run_selective_repeat_tests();
+    run_mesh_improvement_tests();
 
     UNITY_END();
 }
