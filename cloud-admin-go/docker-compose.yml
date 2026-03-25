@@ -6,8 +6,12 @@ services:
       - "0.0.0.0:9001:9001"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./passwd:/mosquitto/config/passwd:ro
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      test: ["CMD-SHELL", "mosquitto_sub -u $${MQTT_ADMIN_USER:-flp-admin} -P $${MQTT_ADMIN_PASS} -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+    environment:
+      - MQTT_ADMIN_USER=flp-admin
+      - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
       interval: 30s
       timeout: 5s
       retries: 3
@@ -24,6 +28,7 @@ services:
     depends_on:
       mosquitto:
         condition: service_healthy
+    command: ["--broker", "mosquitto", "--port", "1883", "--mqtt-user", "flp-admin", "--mqtt-pass", "${MQTT_ADMIN_PASS}"]
     restart: unless-stopped
 
   cloudflared:

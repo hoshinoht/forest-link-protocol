@@ -61,6 +61,8 @@ void MqttClient::init()
 #if !CONFIG_FLP_WIFI_DISABLED
     mqtt_cfg.broker.address.uri = CONFIG_FLP_MQTT_BROKER_URI;
     mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    mqtt_cfg.credentials.username = CONFIG_FLP_MQTT_USERNAME;
+    mqtt_cfg.credentials.authentication.password = CONFIG_FLP_MQTT_PASSWORD;
 #endif
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);

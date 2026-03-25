@@ -79,6 +79,20 @@ menu "Forest Link Protocol"
             URI of the MQTT broker for cloud gateway connectivity.
             Use wss:// for MQTT over WebSocket with TLS (Cloudflare Tunnel).
 
+    config FLP_MQTT_USERNAME
+        string "MQTT Username"
+        default "flp-node"
+        depends on !FLP_WIFI_DISABLED
+        help
+            Username for MQTT broker authentication.
+
+    config FLP_MQTT_PASSWORD
+        string "MQTT Password"
+        default ""
+        depends on !FLP_WIFI_DISABLED
+        help
+            Password for MQTT broker authentication.
+
     menu "UART Ingest API"
         config FLP_UART_TX_PIN
             int "TX GPIO"

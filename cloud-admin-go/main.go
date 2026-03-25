@@ -17,6 +17,8 @@ func main() {
 	webPort := flag.Int("web-port", 5050, "HTTP dashboard port")
 	srWindow := flag.Int("sr-window", 8, "Selective Repeat window size")
 	srTimeout := flag.Float64("sr-timeout", 5.0, "Selective Repeat timeout (seconds)")
+	mqttUser := flag.String("mqtt-user", "", "MQTT username")
+	mqttPass := flag.String("mqtt-pass", "", "MQTT password")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -37,7 +39,7 @@ func main() {
 
 	topo := NewTopologyAggregator()
 
-	mqttClient := NewMQTTClient(*broker, *port, metaCh, chunkCh, topoCh, metricCh)
+	mqttClient := NewMQTTClient(*broker, *port, *mqttUser, *mqttPass, metaCh, chunkCh, topoCh, metricCh)
 	if err := mqttClient.Connect(); err != nil {
 		log.Fatalf("[Main] Failed to connect to MQTT: %v", err)
 	}

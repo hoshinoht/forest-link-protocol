@@ -56,6 +56,8 @@ type MetricMsg struct {
 type MQTTClient struct {
 	broker   string
 	port     int
+	username string
+	password string
 	client   mqtt.Client
 	metaCh   chan FileMeta
 	chunkCh  chan FileChunk
@@ -63,10 +65,12 @@ type MQTTClient struct {
 	metricCh chan MetricMsg
 }
 
-func NewMQTTClient(broker string, port int, metaCh chan FileMeta, chunkCh chan FileChunk, topoCh chan TopoMsg, metricCh chan MetricMsg) *MQTTClient {
+func NewMQTTClient(broker string, port int, username, password string, metaCh chan FileMeta, chunkCh chan FileChunk, topoCh chan TopoMsg, metricCh chan MetricMsg) *MQTTClient {
 	return &MQTTClient{
 		broker:   broker,
 		port:     port,
+		username: username,
+		password: password,
 		metaCh:   metaCh,
 		chunkCh:  chunkCh,
 		topoCh:   topoCh,
@@ -80,6 +84,10 @@ func (m *MQTTClient) Connect() error {
 	opts.SetClientID("flp-admin")
 	opts.SetProtocolVersion(4) // MQTTv3.1.1
 	opts.SetKeepAlive(60)
+	if m.username != "" {
+		opts.SetUsername(m.username)
+		opts.SetPassword(m.password)
+	}
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(2 * time.Second)
