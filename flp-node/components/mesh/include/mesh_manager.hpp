@@ -165,6 +165,7 @@ class MeshManager
                   uint16_t peer_addr);
     void send_route_error(uint16_t dead_addr, uint16_t inet_origin,
                           uint16_t last_seq);
+    void broadcast_exit_offline();
 
     /*
      * Generic relay: publishes via MQTT if exit node, else routes

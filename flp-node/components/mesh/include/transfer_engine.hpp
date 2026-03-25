@@ -151,6 +151,15 @@ class TransferEngine
     /* Exit node status */
     bool is_exit_node() const { return is_exit_node_; }
 
+    /* Active session ID (0 if no transfer in progress) */
+    uint16_t active_session_id() const
+    {
+        return transfer_.active ? transfer_.session_id : 0;
+    }
+
+    /* Called when an exit node reports itself offline */
+    void handle_exit_offline(uint16_t exit_addr, uint16_t session_id);
+
     /* Set callback for forwarding fragments to MQTT */
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 

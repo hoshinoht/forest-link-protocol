@@ -896,6 +896,31 @@ void TransferEngine::exit_node_health_tick(uint32_t now_ms)
     }
 }
 
+void TransferEngine::handle_exit_offline(uint16_t exit_addr,
+                                         uint16_t session_id)
+{
+    if (!transfer_.active)
+    {
+        return;
+    }
+    if (session_id != 0 && session_id != transfer_.session_id)
+    {
+        return; /* different transfer session */
+    }
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (transfer_.exit_nodes[i] == exit_addr &&
+            transfer_.exit_node_alive[i])
+        {
+            ESP_LOGW(TAG,
+                     "Exit 0x%04X reported offline, redistributing",
+                     exit_addr);
+            redistribute_dead_exit(i);
+            return;
+        }
+    }
+}
+
 void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 {
     transfer_.exit_node_alive[dead_idx] = false;

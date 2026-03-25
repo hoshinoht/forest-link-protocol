@@ -81,9 +81,41 @@ void MeshManager::set_has_internet(bool v)
 {
     if (has_internet_ != v)
     {
+        /* Broadcast EXIT_OFFLINE when losing internet mid-transfer */
+        if (!v && has_internet_)
+        {
+            broadcast_exit_offline();
+        }
         has_internet_ = v;
         ESP_LOGI(TAG, "has_internet_ = %s", v ? "true" : "false");
     }
+}
+
+void MeshManager::broadcast_exit_offline()
+{
+    uint16_t session = transfer_engine_.active_session_id();
+
+    ExitOfflinePayload eop = {};
+    eop.session_id = session;
+    eop.exit_node_addr = my_addr_;
+
+    uint8_t buf[MAX_MTU];
+    PacketHeader hdr = {};
+    hdr.set_ver_type(PROTOCOL_VERSION, PacketType::EXIT_OFFLINE);
+    hdr.src_addr = my_addr_;
+    hdr.dst_addr = BROADCAST_ADDR;
+    hdr.set_ttl_hops(DEFAULT_TTL, 0);
+    hdr.seq_num = 0;
+    memcpy(buf, &hdr, PACKET_HEADER_SIZE);
+    memcpy(buf + PACKET_HEADER_SIZE, &eop, sizeof(eop));
+    size_t total = PACKET_HEADER_SIZE + sizeof(eop);
+
+    send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
+    send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
+
+    ESP_LOGW(TAG,
+             "EXIT_OFFLINE broadcast: session=%u addr=0x%04X",
+             session, my_addr_);
 }
 
 bool MeshManager::is_mqtt_connected() const
@@ -512,6 +544,15 @@ void MeshManager::process_slab(BufferSlab *slab)
             case PacketType::ROUTE_ERROR:
                 handle_route_error(hdr, payload, payload_len);
                 break;
+            case PacketType::EXIT_OFFLINE:
+                if (payload_len >= sizeof(ExitOfflinePayload))
+                {
+                    ExitOfflinePayload eop;
+                    memcpy(&eop, payload, sizeof(eop));
+                    transfer_engine_.handle_exit_offline(
+                        eop.exit_node_addr, eop.session_id);
+                }
+                break;
             default:
                 ESP_LOGD(TAG,
                          "Unhandled packet type 0x%02X",
@@ -643,6 +684,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
      */
     route_table_.update_inet_route(
         hdr.src_addr, disc.hops_to_internet, disc.inet_seq, disc.inet_origin);
+    route_table_.set_queue_load(hdr.src_addr, disc.queue_load);
 
     /*
      * Respond to discovery requests only. Unicast discovery packets are already
@@ -768,7 +810,8 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
         bool high_priority = (t == PacketType::ACK || t == PacketType::NACK ||
                               t == PacketType::ROUTE_ERROR ||
                               t == PacketType::TRANSFER_ACK ||
-                              t == PacketType::TRANSFER_AD);
+                              t == PacketType::TRANSFER_AD ||
+                              t == PacketType::EXIT_OFFLINE);
         if (!high_priority)
         {
             ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X",
@@ -786,20 +829,33 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
      * Normal unicast forwarding only reaches one exit, breaking multi-exit
      * election when the sensor is behind relay node(s).
      */
-    if (hdr.type() == PacketType::TRANSFER_AD)
+    if (hdr.type() == PacketType::TRANSFER_AD ||
+        hdr.type() == PacketType::EXIT_OFFLINE)
     {
-        ESP_LOGD(TAG, "Broadcasting TRANSFER_AD from 0x%04X, ttl=%u",
+        ESP_LOGD(TAG, "Broadcasting %s from 0x%04X, ttl=%u",
+                 hdr.type() == PacketType::TRANSFER_AD ? "TRANSFER_AD"
+                                                       : "EXIT_OFFLINE",
                  hdr.src_addr, fwd_hdr->ttl());
         send_raw(Transport::ESPNOW, slab->data, slab->len, BROADCAST_ADDR);
         send_raw(Transport::LORA, slab->data, slab->len, BROADCAST_ADDR);
         return;
     }
 
-    uint16_t next = route_table_.next_hop(hdr.dst_addr);
+    uint16_t next = route_table_.next_hop(hdr.dst_addr, my_addr_);
     if (next == BROADCAST_ADDR)
     {
         ESP_LOGW(TAG, "No route to 0x%04X, dropping", hdr.dst_addr);
         return;
+    }
+
+    /* Piggyback congestion signal on forwarded ACK/NACK packets.
+     * Set the high bit of the 2-byte seq payload when our queues are
+     * more than 75% full. The sender uses this to throttle fragment rate. */
+    if ((hdr.type() == PacketType::ACK || hdr.type() == PacketType::NACK) &&
+        slab->len >= PACKET_HEADER_SIZE + 2 && congested)
+    {
+        uint8_t *seq_bytes = slab->data + PACKET_HEADER_SIZE;
+        seq_bytes[1] |= 0x80; /* set congestion flag */
     }
 
     NeighborEntry neighbor;
@@ -849,6 +905,14 @@ void MeshManager::send_discovery()
         auto best = route_table_.best_inet_route();
         disc.inet_seq = best.seq;
         disc.inet_origin = best.origin;
+    }
+
+    /* Populate queue load for load-aware routing */
+    {
+        UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
+        UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
+        uint32_t total = hi_used + lo_used;
+        disc.queue_load = (total > 255) ? 255 : static_cast<uint8_t>(total);
     }
 
     /* Step 7c: Encode current SF in flags bits 5-7 */
