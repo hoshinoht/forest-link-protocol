@@ -199,6 +199,9 @@ class MeshManager
     /* Step 1d: DSDV sequence number for internet route */
     uint16_t my_inet_seq_ = 0;
 
+    /* Hysteresis: track current preferred parent for check_better_route() */
+    uint16_t preferred_parent_ = BROADCAST_ADDR;
+
     /* Fix 2: track current WiFi channel to avoid redundant set_channel calls */
     uint8_t current_channel_ = 0;
 

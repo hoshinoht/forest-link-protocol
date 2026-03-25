@@ -481,6 +481,13 @@ void TransferEngine::transfer_tick()
         return;
     }
 
+    /* Congestion backoff: skip fragment feeding for one tick per signal */
+    if (congestion_backoff_ticks_ > 0)
+    {
+        congestion_backoff_ticks_--;
+        return;
+    }
+
     /* Local-exit selective-repeat ARQ: sliding window with cloud ACK/NACK */
     if (local_exit_)
     {

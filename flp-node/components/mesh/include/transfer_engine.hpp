@@ -160,6 +160,10 @@ class TransferEngine
     /* Called when an exit node reports itself offline */
     void handle_exit_offline(uint16_t exit_addr, uint16_t session_id);
 
+    /* Called when a relay signals congestion via the ACK/NACK high bit.
+     * Causes transfer_tick() to skip one cycle of fragment feeding. */
+    void signal_congestion() { congestion_backoff_ticks_++; }
+
     /* Set callback for forwarding fragments to MQTT */
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 
@@ -237,6 +241,9 @@ class TransferEngine
     /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
     uint8_t redist_count_ = 0;
+
+    /* Congestion backoff: each signal_congestion() call adds one skip tick */
+    uint8_t congestion_backoff_ticks_ = 0;
 };
 
 } /* namespace flp */

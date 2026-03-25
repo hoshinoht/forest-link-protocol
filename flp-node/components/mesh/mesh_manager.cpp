@@ -103,7 +103,7 @@ void MeshManager::broadcast_exit_offline()
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, PacketType::EXIT_OFFLINE);
     hdr.src_addr = my_addr_;
-    hdr.dst_addr = BROADCAST_ADDR;
+    hdr.dst_addr = EXIT_ANY_ADDR; /* NOT BROADCAST — must enter forwarding path */
     hdr.set_ttl_hops(DEFAULT_TTL, 0);
     hdr.seq_num = 0;
     memcpy(buf, &hdr, PACKET_HEADER_SIZE);
@@ -505,6 +505,20 @@ void MeshManager::process_slab(BufferSlab *slab)
     const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
     size_t payload_len = slab->len - PACKET_HEADER_SIZE;
 
+    /*
+     * EXIT_OFFLINE must be consumed by ALL nodes — sensor nodes need it
+     * to redistribute fragments away from the dead exit.  Process before
+     * the for_us gate so non-exit nodes also handle it.
+     */
+    if (hdr.type() == PacketType::EXIT_OFFLINE &&
+        payload_len >= sizeof(ExitOfflinePayload))
+    {
+        ExitOfflinePayload eop;
+        memcpy(&eop, payload, sizeof(eop));
+        transfer_engine_.handle_exit_offline(
+            eop.exit_node_addr, eop.session_id);
+    }
+
     /* EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others. */
     bool is_exit = has_internet_ && mqtt_client_;
     bool for_us = (hdr.dst_addr == my_addr_) ||
@@ -530,11 +544,27 @@ void MeshManager::process_slab(BufferSlab *slab)
                 transfer_engine_.handle_data(hdr, payload, payload_len);
                 break;
             case PacketType::ACK:
-                transfer_engine_.handle_ack(hdr.seq_num, hdr.src_addr);
+            {
+                bool cong = seq_has_congestion(hdr.seq_num);
+                uint16_t seq = seq_strip_congestion(hdr.seq_num);
+                transfer_engine_.handle_ack(seq, hdr.src_addr);
+                if (cong)
+                {
+                    transfer_engine_.signal_congestion();
+                }
                 break;
+            }
             case PacketType::NACK:
-                transfer_engine_.handle_nack(hdr.seq_num, hdr.src_addr);
+            {
+                bool cong = seq_has_congestion(hdr.seq_num);
+                uint16_t seq = seq_strip_congestion(hdr.seq_num);
+                transfer_engine_.handle_nack(seq, hdr.src_addr);
+                if (cong)
+                {
+                    transfer_engine_.signal_congestion();
+                }
                 break;
+            }
             case PacketType::MESH_PUB:
                 handle_mesh_pub(hdr, payload, payload_len);
                 break;
@@ -543,15 +573,6 @@ void MeshManager::process_slab(BufferSlab *slab)
                 break;
             case PacketType::ROUTE_ERROR:
                 handle_route_error(hdr, payload, payload_len);
-                break;
-            case PacketType::EXIT_OFFLINE:
-                if (payload_len >= sizeof(ExitOfflinePayload))
-                {
-                    ExitOfflinePayload eop;
-                    memcpy(&eop, payload, sizeof(eop));
-                    transfer_engine_.handle_exit_offline(
-                        eop.exit_node_addr, eop.session_id);
-                }
                 break;
             default:
                 ESP_LOGD(TAG,
@@ -717,6 +738,14 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
             resp.inet_origin = best.origin;
         }
 
+        /* Populate queue load for load-aware routing (same as broadcast) */
+        {
+            UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
+            UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
+            uint32_t ql = hi_used + lo_used;
+            resp.queue_load = (ql > 255) ? 255 : static_cast<uint8_t>(ql);
+        }
+
         /* Step 7c: Encode current SF in flags bits 5-7 */
         uint8_t sf_enc =
             static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
@@ -849,13 +878,12 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
     }
 
     /* Piggyback congestion signal on forwarded ACK/NACK packets.
-     * Set the high bit of the 2-byte seq payload when our queues are
-     * more than 75% full. The sender uses this to throttle fragment rate. */
+     * Set the high bit of hdr.seq_num (bit 15). Safe because the max
+     * fragment count is 2200 (0x0898) — bit 15 is always clear. */
     if ((hdr.type() == PacketType::ACK || hdr.type() == PacketType::NACK) &&
-        slab->len >= PACKET_HEADER_SIZE + 2 && congested)
+        congested)
     {
-        uint8_t *seq_bytes = slab->data + PACKET_HEADER_SIZE;
-        seq_bytes[1] |= 0x80; /* set congestion flag */
+        fwd_hdr->seq_num |= CONGESTION_FLAG;
     }
 
     NeighborEntry neighbor;
@@ -961,6 +989,29 @@ void MeshManager::send_discovery()
              disc.hops_to_internet,
              (unsigned) route_table_.get_espnow_neighbor_count(),
              lora_tx ? "yes" : "no");
+
+    /* Hysteresis: track preferred parent and only switch after sustained
+     * improvement across SWITCH_THRESHOLD_CYCLES (default 3) discovery
+     * cycles, preventing route flapping in marginal link conditions. */
+    if (!has_internet_)
+    {
+        uint16_t current = (preferred_parent_ != BROADCAST_ADDR)
+                               ? preferred_parent_
+                               : route_table_.next_hop(EXIT_ANY_ADDR, my_addr_);
+        auto result = route_table_.check_better_route(current, my_addr_);
+        if (result.should_switch)
+        {
+            ESP_LOGI(TAG,
+                     "Hysteresis: switching preferred parent 0x%04X -> 0x%04X",
+                     preferred_parent_, result.new_addr);
+            preferred_parent_ = result.new_addr;
+        }
+        else if (preferred_parent_ == BROADCAST_ADDR && current != BROADCAST_ADDR)
+        {
+            /* First time: adopt the current best without hysteresis delay */
+            preferred_parent_ = current;
+        }
+    }
 }
 
 /* -- Mesh relay layer --------------------------------------------------------- */
@@ -1300,7 +1351,7 @@ void MeshManager::send_packet(uint16_t dst,
          * (peer MAC not in table). LoRa accidentally works because it
          * ignores peer_addr and always broadcasts.
          */
-        uint16_t radio_dst = route_table_.next_hop(dst);
+        uint16_t radio_dst = route_table_.next_hop(dst, my_addr_);
         if (radio_dst == BROADCAST_ADDR)
         {
             /* No route known — broadcast if targeting EXIT_ANY_ADDR

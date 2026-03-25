@@ -8,13 +8,14 @@ import (
 )
 
 type neighbor struct {
-	Addr          string `json:"addr"`
-	RSSI          int8   `json:"rssi"`
-	Hops          uint8  `json:"hops"`
-	HopsToInternet uint8 `json:"hops_to_internet"`
-	BLE           bool   `json:"ble"`
-	LoRa          bool   `json:"lora"`
-	HasInternet   bool   `json:"has_internet"`
+	Addr           string `json:"addr"`
+	RSSI           int8   `json:"rssi"`
+	Hops           uint8  `json:"hops"`
+	HopsToInternet uint8  `json:"hops_to_internet"`
+	BLE            bool   `json:"ble"`
+	LoRa           bool   `json:"lora"`
+	HasInternet    bool   `json:"has_internet"`
+	QueueLoad      uint8  `json:"queue_load"`
 }
 
 type heapInfo struct {
@@ -55,8 +56,8 @@ func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
 	neighbors := make([]neighbor, 0, count)
 
 	for i := 0; i < count; i++ {
-		off := 1 + i*6
-		if off+6 > len(payload) {
+		off := 1 + i*7
+		if off+7 > len(payload) {
 			break
 		}
 		addr := binary.LittleEndian.Uint16(payload[off:])
@@ -64,6 +65,7 @@ func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
 		hops := payload[off+3]
 		hopsInet := payload[off+4]
 		flags := payload[off+5]
+		queueLoad := payload[off+6]
 
 		neighbors = append(neighbors, neighbor{
 			Addr:           fmt.Sprintf("%04X", addr),
@@ -73,6 +75,7 @@ func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
 			BLE:            flags&0x01 != 0,
 			LoRa:           flags&0x02 != 0,
 			HasInternet:    flags&0x04 != 0,
+			QueueLoad:      queueLoad,
 		})
 	}
 
