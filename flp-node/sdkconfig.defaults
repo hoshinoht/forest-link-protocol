@@ -39,4 +39,4 @@ CONFIG_FLP_WIFI_PASSWORD="K0piP3ng"
 
 
 # Mqtt gateway
-CONFIG_FLP_MQTT_BROKER_URI="mqtt://172.20.10.13"
+CONFIG_FLP_MQTT_BROKER_URI="wss://mqtt.hoshinoht.dev"

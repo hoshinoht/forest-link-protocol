@@ -1,0 +1,4 @@
+ingress:
+  - hostname: mqtt.hoshinoht.dev
+    service: http://mosquitto:9001
+  - service: http_status:404

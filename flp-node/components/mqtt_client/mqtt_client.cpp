@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
@@ -59,6 +60,7 @@ void MqttClient::init()
     esp_mqtt_client_config_t mqtt_cfg = {};
 #if !CONFIG_FLP_WIFI_DISABLED
     mqtt_cfg.broker.address.uri = CONFIG_FLP_MQTT_BROKER_URI;
+    mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
 #endif
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
