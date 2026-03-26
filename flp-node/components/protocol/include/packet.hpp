@@ -107,6 +107,13 @@ struct __attribute__((packed)) DiscoveryPayload
     uint16_t inet_origin;    /* address of the exit node this route comes from */
     uint8_t queue_load;      /* forwarding queue utilisation (hi_used + lo_used) */
 };
+
+/* Discovery flags bit layout constants */
+static constexpr uint8_t kDiscoveryInternetFlag = 0x01;
+static constexpr uint8_t kDiscoveryChShift = 1;
+static constexpr uint8_t kDiscoveryChMask = 0x0F;
+static constexpr uint8_t kDiscoverySfShift = 5;
+static constexpr uint8_t kDiscoverySfMask = 0x07;
 static_assert(sizeof(DiscoveryPayload) == 8, "DiscoveryPayload must be 8 bytes");
 
 struct __attribute__((packed)) RouteErrorPayload
@@ -127,6 +134,11 @@ struct __attribute__((packed)) TransferAdPayload
     char filename[32];        /* filename, not null-terminated in wire format */
 };
 static_assert(sizeof(TransferAdPayload) == 46, "TransferAdPayload must be 46 bytes");
+
+/* Minimum wire size of a TransferAdPayload (without filename) */
+static constexpr size_t MIN_TRANSFER_AD_LEN =
+    sizeof(TransferAdPayload) - sizeof(TransferAdPayload::filename)
+                               - sizeof(TransferAdPayload::filename_len);
 
 struct __attribute__((packed)) TransferAckPayload
 {

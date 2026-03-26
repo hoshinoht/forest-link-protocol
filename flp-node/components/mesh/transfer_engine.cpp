@@ -55,7 +55,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                                         size_t payload_len,
                                         bool has_internet)
 {
-    if (payload_len < 13) /* minimum: legacy ad without filename */
+    if (payload_len < MIN_TRANSFER_AD_LEN)
     {
         return;
     }
@@ -115,47 +115,35 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         /* Set up ACK path: arq_[0] for sending ACKs back to source */
         arq_[0].set_peer_addr(hdr.src_addr);
 
-        /* Extract filename from ad (embedded since v2, fallback for compat) */
+        /* Extract filename from ad */
         if (ad.filename_len > 0 &&
             ad.filename_len <= sizeof(ad.filename) &&
             ad.filename_len < sizeof(transfer_.filename))
         {
             memcpy(transfer_.filename, ad.filename, ad.filename_len);
             transfer_.filename[ad.filename_len] = '\0';
-            pending_meta_.waiting = false;
-
-            /* Publish transfer meta immediately */
-            if (forward_meta_fn_)
-            {
-                forward_meta_fn_(ad.session_id,
-                                 transfer_.filename,
-                                 hdr.src_addr,
-                                 ad.file_size,
-                                 frag_count,
-                                 frag_size,
-                                 ad.crc32);
-            }
-            ESP_LOGI(TAG,
-                     "Exit node mode: session=%u source=0x%04X file=%s",
-                     active_session_id_,
-                     source_addr_,
-                     transfer_.filename);
         }
         else
         {
-            /* Fallback: wait for filename in fragment 0 (legacy senders) */
-            pending_meta_.file_size = ad.file_size;
-            pending_meta_.fragment_count = frag_count;
-            pending_meta_.fragment_size = frag_size;
-            pending_meta_.crc32 = ad.crc32;
-            pending_meta_.waiting = true;
             transfer_.filename[0] = '\0';
-
-            ESP_LOGI(TAG,
-                     "Exit node mode: session=%u source=0x%04X (awaiting filename)",
-                     active_session_id_,
-                     source_addr_);
         }
+
+        /* Publish transfer meta immediately */
+        if (forward_meta_fn_)
+        {
+            forward_meta_fn_(ad.session_id,
+                             transfer_.filename,
+                             hdr.src_addr,
+                             ad.file_size,
+                             frag_count,
+                             frag_size,
+                             ad.crc32);
+        }
+        ESP_LOGI(TAG,
+                 "Exit node mode: session=%u source=0x%04X file=%s",
+                 active_session_id_,
+                 source_addr_,
+                 transfer_.filename);
     }
 }
 
@@ -311,8 +299,9 @@ void TransferEngine::start_file_transfer(const char *filename,
         static_cast<uint16_t>((size + frag_payload - 1) / frag_payload);
     transfer_.next_fragment = 0;
     transfer_.active = true;
-    transfer_.session_id =
-        static_cast<uint16_t>(esp_timer_get_time() / 1000);
+    static uint16_t s_session_counter = 0;
+    transfer_.session_id = ++s_session_counter ? s_session_counter
+                                               : ++s_session_counter; /* skip 0 */
     strncpy(transfer_.filename, filename, sizeof(transfer_.filename) - 1);
     transfer_.filename[sizeof(transfer_.filename) - 1] = '\0';
 
@@ -411,6 +400,10 @@ void TransferEngine::start_file_transfer(const char *filename,
      * spurious retransmissions when round-trip exceeds 700ms. */
     uint32_t arq_timeout = BASE_ARQ_TIMEOUT_MS +
         (hops_to_internet * PER_HOP_ARQ_TIMEOUT_MS);
+    if (arq_timeout > MAX_ARQ_TIMEOUT_MS)
+    {
+        arq_timeout = MAX_ARQ_TIMEOUT_MS;
+    }
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
         arq_[i].set_timeout(arq_timeout);
@@ -446,6 +439,7 @@ void TransferEngine::tick(uint32_t now_ms)
                 ESP_LOGE(TAG, "Transfer aborted: ARQ[%u] max retries exceeded", i);
                 transfer_.active = false;
                 is_exit_node_ = false;
+                local_exit_ = false;
                 transfer_.exit_node_count = 0;
                 for (uint8_t j = 0; j < MAX_EXIT_NODES; j++)
                 {
@@ -609,16 +603,16 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
-            uint8_t frag_buf[MAX_MTU];
-            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-            if (!forward_to_mqtt_fn_(transfer_.session_id,
+            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+            if (!forward_to_mqtt_fn_ ||
+                !forward_to_mqtt_fn_(transfer_.session_id,
                                      seq,
                                      my_addr_,
-                                     frag_buf,
+                                     frag_buf_,
                                      got,
                                      transfer_.filename))
             {
-                break; /* queue full, retry next tick */
+                break; /* queue full or no callback, retry next tick */
             }
             ESP_LOGI(TAG, "Retransmitted seq=%u", seq);
             sent++;
@@ -658,16 +652,16 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
-            uint8_t frag_buf[MAX_MTU];
-            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-            if (!forward_to_mqtt_fn_(transfer_.session_id,
+            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+            if (!forward_to_mqtt_fn_ ||
+                !forward_to_mqtt_fn_(transfer_.session_id,
                                      seq,
                                      my_addr_,
-                                     frag_buf,
+                                     frag_buf_,
                                      got,
                                      transfer_.filename))
             {
-                break; /* queue full, retry next tick */
+                break; /* queue full or no callback, retry next tick */
             }
             cloud_next_send_++;
             sent++;
@@ -745,9 +739,8 @@ void TransferEngine::transfer_tick()
                 size_t frag_len = (remain < transfer_.fragment_size)
                                       ? remain
                                       : transfer_.fragment_size;
-                uint8_t frag_buf[MAX_MTU];
-                size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-                arq_[target].send_fragment(seq, frag_buf, got);
+                size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+                arq_[target].send_fragment(seq, frag_buf_, got);
             }
             else
             {
@@ -837,15 +830,14 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
-            uint8_t frag_buf[MAX_MTU];
-            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
+            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
 
-            int ret = arq_[arq_idx].send_fragment(seq, frag_buf, got);
+            int ret = arq_[arq_idx].send_fragment(seq, frag_buf_, got);
             if (ret < 0)
             {
                 break;
             }
-            fec_encoder_.ingest(frag_buf, got);
+            fec_encoder_.ingest(frag_buf_, got);
         }
 
         transfer_.next_fragment++;
@@ -969,6 +961,14 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
     uint16_t redistributed = 0;
     for (uint16_t seq = base; seq < next; seq++)
     {
+        /* Skip parity slots — parity cannot be reconstructed here without
+         * re-XOR-ing all group members.  The receiver either has all data
+         * fragments or will get them via normal ARQ retransmit. */
+        if (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE)
+        {
+            continue;
+        }
+
         uint8_t target = first_alive;
         uint8_t rr = seq % alive_count;
         uint8_t count = 0;
@@ -993,9 +993,8 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 
         if (!arq_[target].sender_window_full())
         {
-            uint8_t frag_buf[MAX_MTU];
-            size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
-            arq_[target].send_fragment(seq, frag_buf, got);
+            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+            arq_[target].send_fragment(seq, frag_buf_, got);
             redistributed++;
         }
         else if (redist_count_ <
@@ -1025,7 +1024,7 @@ void TransferEngine::broadcast_retry_tick(uint32_t now_ms)
     {
         return;
     }
-    if (now_ms < broadcast_retry_.next_send_ms)
+    if (static_cast<int32_t>(now_ms - broadcast_retry_.next_send_ms) < 0)
     {
         return;
     }
