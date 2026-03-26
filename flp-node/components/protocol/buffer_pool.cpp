@@ -13,6 +13,13 @@ namespace flp
 
 void BufferPool::init()
 {
+    /* Idempotent: free previous allocation if re-initialised */
+    if (slabs_)
+    {
+        heap_caps_free(slabs_);
+        slabs_ = nullptr;
+    }
+
     /* Allocate slab array in PSRAM (falls back to internal if unavailable) */
     slabs_ = static_cast<BufferSlab *>(heap_caps_calloc(
         POOL_SIZE, sizeof(BufferSlab),
@@ -25,88 +32,100 @@ void BufferPool::init()
     }
     assert(slabs_);
 
-    freelist_ = static_cast<int8_t *>(heap_caps_calloc(
-        POOL_SIZE, sizeof(int8_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!freelist_)
-    {
-        freelist_ = static_cast<int8_t *>(
-            heap_caps_calloc(POOL_SIZE, sizeof(int8_t), MALLOC_CAP_8BIT));
-    }
-    assert(freelist_);
-
+    /*
+     * Construct each slab (starts C++ object lifetime for the atomics)
+     * and build the Treiber free-stack: slab[0] -> slab[1] -> ... -> slab[N-1].
+     * top_ points to the last slab (stack grows toward index 0).
+     */
     for (uint8_t i = 0; i < POOL_SIZE; i++)
     {
-        /* placement-new to initialise atomics in calloc'd memory */
-        new (&slabs_[i].refcount) std::atomic<uint8_t>(0);
-        slabs_[i].len = 0;
-        freelist_[i] = static_cast<int8_t>(i);
+        new (&slabs_[i]) BufferSlab{};
+        slabs_[i].next_free.store(
+            (i + 1 < POOL_SIZE) ? static_cast<int32_t>(i + 1) : -1,
+            std::memory_order_relaxed);
     }
-    top_.store(POOL_SIZE - 1, std::memory_order_release);
+    /* Head of free list is slab[0] */
+    top_.store(0, std::memory_order_release);
+
     ESP_LOGI(TAG,
              "BufferPool initialized: %u slabs (~%u bytes) in %s",
              POOL_SIZE,
-             (unsigned) (POOL_SIZE * sizeof(BufferSlab)),
+             (unsigned)(POOL_SIZE * sizeof(BufferSlab)),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM"
                                                              : "internal");
 }
 
 BufferSlab *BufferPool::acquire()
 {
-    int8_t t = top_.load(std::memory_order_acquire);
+    int32_t t = top_.load(std::memory_order_acquire);
     while (t >= 0)
     {
-        if (top_.compare_exchange_weak(t, t - 1, std::memory_order_acq_rel))
+        int32_t next = slabs_[t].next_free.load(std::memory_order_relaxed);
+        if (top_.compare_exchange_weak(
+                t, next, std::memory_order_acq_rel, std::memory_order_relaxed))
         {
-            int8_t idx = freelist_[t];
-            slabs_[idx].refcount.store(1, std::memory_order_relaxed);
-            slabs_[idx].len = 0;
-            return &slabs_[idx];
+            slabs_[t].refcount.store(1, std::memory_order_relaxed);
+            slabs_[t].len = 0;
+            return &slabs_[t];
         }
+        /* CAS failed, t was reloaded by compare_exchange_weak — retry */
     }
-    /* Fix 12: Do not call ESP_LOGW here — acquire() is called from the ESP-NOW
+    /*
+     * Do not call ESP_LOGW here — acquire() is called from the ESP-NOW
      * receive callback (WiFi driver task), and ESP_LOGW takes a logging mutex
-     * which can cause priority inversion. Increment the atomic counter instead;
-     * the mesh task logs it periodically via get_exhaustion_count(). */
+     * which can cause priority inversion.  The mesh task logs the counter
+     * periodically via get_exhaustion_count().
+     */
     pool_exhaustion_count_.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
 }
 
 void BufferPool::release(BufferSlab *slab)
 {
-    if (!slab)
+    if (!slab || !slabs_)
     {
         return;
     }
 
-    /* Load before fetch_sub: if already 0, do not decrement (would wrap to 255
-     * on uint8_t, causing the slab to escape the freelist undetected). */
-    if (slab->refcount.load(std::memory_order_acquire) == 0)
+    /* Bounds check: slab must be within our pool */
+    ptrdiff_t offset = slab - slabs_;
+    if (offset < 0 || offset >= static_cast<ptrdiff_t>(POOL_SIZE))
     {
-        ESP_LOGW(TAG, "release called on slab with refcount=0");
+        pool_overflow_count_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
-    uint8_t prev = slab->refcount.fetch_sub(1, std::memory_order_acq_rel);
-
-    if (prev == 1)
+    /*
+     * CAS-loop decrement: atomically refuse to decrement past zero.
+     * Prevents the TOCTOU race where two concurrent release() calls both
+     * see refcount != 0, both fetch_sub, and one wraps uint8_t to 255.
+     */
+    uint8_t cur = slab->refcount.load(std::memory_order_relaxed);
+    while (cur > 0)
     {
-        /* Return to pool */
-        int8_t idx = static_cast<int8_t>(slab - slabs_);
-        int8_t t = top_.load(std::memory_order_acquire);
-        int8_t new_top;
-        do
+        if (slab->refcount.compare_exchange_weak(
+                cur, cur - 1,
+                std::memory_order_acq_rel, std::memory_order_relaxed))
         {
-            new_top = t + 1;
-            if (new_top >= POOL_SIZE)
+            if (cur == 1)
             {
-                ESP_LOGW(TAG, "pool overflow while releasing slab");
-                return;
+                /* Refcount reached zero — push back onto Treiber stack */
+                int32_t idx = static_cast<int32_t>(offset);
+                int32_t old_top = top_.load(std::memory_order_relaxed);
+                do
+                {
+                    slabs_[idx].next_free.store(
+                        old_top, std::memory_order_relaxed);
+                } while (!top_.compare_exchange_weak(
+                    old_top, idx,
+                    std::memory_order_acq_rel, std::memory_order_relaxed));
             }
-            freelist_[new_top] = idx;
-        } while (
-            !top_.compare_exchange_weak(t, new_top, std::memory_order_acq_rel));
+            return;
+        }
+        /* CAS failed, cur was reloaded — retry */
     }
+    /* refcount was already 0 — do not log (may be WiFi task context) */
+    pool_overflow_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void BufferPool::add_ref(BufferSlab *slab)

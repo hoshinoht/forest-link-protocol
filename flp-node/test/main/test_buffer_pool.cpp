@@ -22,7 +22,7 @@ void reset_buffer_pool(void)
  * Acquisition and capacity
  * ====================================================================== */
 
-/* After init(), POOL_SIZE (24) slabs must be acquirable. */
+/* After init(), POOL_SIZE (48) slabs must be acquirable. */
 static void test_buffer_pool_can_acquire_all_slabs(void)
 {
     BufferSlab *slabs[BufferPool::POOL_SIZE];
@@ -36,7 +36,7 @@ static void test_buffer_pool_can_acquire_all_slabs(void)
     }
 }
 
-/* The 25th acquire after init must return nullptr (pool exhausted). */
+/* The (POOL_SIZE+1)th acquire after init must return nullptr (pool exhausted). */
 static void test_buffer_pool_25th_acquire_returns_null(void)
 {
     BufferSlab *slabs[BufferPool::POOL_SIZE];
