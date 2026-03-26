@@ -160,6 +160,15 @@ void TransferEngine::handle_transfer_ack(const PacketHeader &hdr,
     TransferAckPayload ack;
     memcpy(&ack, payload, sizeof(ack));
 
+    /* Dedup: ignore duplicate responses from the same exit node */
+    for (uint8_t i = 0; i < candidate_count_; i++)
+    {
+        if (candidates_[i].addr == ack.exit_node_addr)
+        {
+            return;
+        }
+    }
+
     if (candidate_count_ < candidates_.size())
     {
         candidates_[candidate_count_] = {
@@ -410,6 +419,26 @@ void TransferEngine::tick(uint32_t now_ms)
     for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
     {
         arq_[i].tick();
+    }
+
+    /* Abort transfer if any ARQ instance has fatally failed */
+    if (transfer_.active && !local_exit_)
+    {
+        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+        {
+            if (arq_[i].is_sender_failed())
+            {
+                ESP_LOGE(TAG, "Transfer aborted: ARQ[%u] max retries exceeded", i);
+                transfer_.active = false;
+                is_exit_node_ = false;
+                transfer_.exit_node_count = 0;
+                for (uint8_t j = 0; j < MAX_EXIT_NODES; j++)
+                {
+                    arq_[j].reset_sender();
+                }
+                return;
+            }
+        }
     }
 
     /* Broadcast retry */
