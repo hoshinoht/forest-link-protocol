@@ -4,7 +4,7 @@
 
 /* Task stack sizes (bytes) */
 #define FLP_MESH_TASK_STACK 8192
-#define FLP_MQTT_TASK_STACK 6144
+#define FLP_MQTT_TASK_STACK 8192
 
 /* Task priorities (higher = more urgent) */
 #define FLP_LORA_RX_TASK_PRIORITY \

@@ -80,6 +80,21 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
     /* If we have internet, respond as exit node candidate */
     if (has_internet)
     {
+        /* Dedup: if already set up for this session, just re-send ACK */
+        if (is_exit_node_ && active_session_id_ == ad.session_id)
+        {
+            TransferAckPayload ack = {};
+            ack.session_id = ad.session_id;
+            ack.exit_node_addr = my_addr_;
+            ack.hops_to_gw = 0;
+            ack.rssi_to_gw = 0;
+            send_fn_(hdr.src_addr,
+                     PacketType::TRANSFER_ACK,
+                     reinterpret_cast<const uint8_t *>(&ack),
+                     sizeof(ack), 0);
+            return;
+        }
+
         TransferAckPayload ack = {};
         ack.session_id = ad.session_id;
         ack.exit_node_addr = my_addr_;

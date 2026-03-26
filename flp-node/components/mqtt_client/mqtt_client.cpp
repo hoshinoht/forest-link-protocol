@@ -38,13 +38,19 @@ void MqttClient::notify()
 
 void MqttClient::init()
 {
-    /* Create publish queues */
-    publish_queue_ =
-        xQueueCreate(MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem));
+    /*
+     * Large queues (MqttPublishItem=526B, FragmentPublishRequest=546B) are
+     * allocated in PSRAM to free ~44 KB of internal SRAM.  Small queues
+     * (ACK/NACK/CMD, 2-68 bytes per item) stay in internal RAM.
+     */
+    publish_queue_ = xQueueCreateWithCaps(
+        MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem),
+        MALLOC_CAP_SPIRAM);
     file_publish_queue_ =
         xQueueCreate(MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest));
-    fragment_publish_queue_ =
-        xQueueCreate(MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest));
+    fragment_publish_queue_ = xQueueCreateWithCaps(
+        MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest),
+        MALLOC_CAP_SPIRAM);
     ack_queue_ = xQueueCreate(MQTT_ACK_QUEUE_DEPTH, sizeof(CloudAckItem));
     nack_queue_ = xQueueCreate(MQTT_NACK_QUEUE_DEPTH, sizeof(CloudNackItem));
     cmd_queue_ = xQueueCreate(MQTT_CMD_QUEUE_DEPTH, sizeof(MeshCmdItem));
@@ -64,6 +70,14 @@ void MqttClient::init()
     mqtt_cfg.credentials.username = CONFIG_FLP_MQTT_USERNAME;
     mqtt_cfg.credentials.authentication.password = CONFIG_FLP_MQTT_PASSWORD;
 #endif
+    /*
+     * The default ESP-MQTT internal task stack (6144) is too small for WSS
+     * transport (mbedtls + WebSocket + VFS select). Stack overflow corrupts
+     * adjacent heap metadata, causing "free() target pointer is outside heap
+     * areas" in usb_serial_jtag_end_select during esp_vfs_select().
+     */
+    mqtt_cfg.task.stack_size = 8192;
+    mqtt_cfg.outbox.limit = 8192; /* default 4096 too small for burst publishes */
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(

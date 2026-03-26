@@ -13,16 +13,16 @@ import (
 // ---------------------------------------------------------------------------
 
 type TransferProgress struct {
-	mu          sync.RWMutex
-	SessionID   string  `json:"session_id"`
-	Filename    string  `json:"filename"`
-	TotalSize   int     `json:"total_size"`
-	ChunkCount  int     `json:"chunk_count"`
-	Received    int     `json:"received"`
-	Progress    float64 `json:"progress"`
-	Active      bool    `json:"active"`
-	StartedAt   float64 `json:"started_at"`
-	ElapsedSec  float64 `json:"elapsed_sec"`
+	mu         sync.RWMutex
+	SessionID  string  `json:"session_id"`
+	Filename   string  `json:"filename"`
+	TotalSize  int     `json:"total_size"`
+	ChunkCount int     `json:"chunk_count"`
+	Received   int     `json:"received"`
+	Progress   float64 `json:"progress"`
+	Active     bool    `json:"active"`
+	StartedAt  float64 `json:"started_at"`
+	ElapsedSec float64 `json:"elapsed_sec"`
 }
 
 func NewTransferProgress() *TransferProgress {
@@ -332,6 +332,7 @@ func RunTransferEngine(
 					completeTransfer(true)
 				} else {
 					log.Printf("[transfer] CRC mismatch for session %s", tq.ActiveTransfer.SessionID)
+					reassembler.DiagnoseCRC()
 					completeTransfer(false)
 				}
 			}

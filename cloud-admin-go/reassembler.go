@@ -121,16 +121,16 @@ func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) []byte {
 // FileReassembler collects chunks into a contiguous buffer and optionally
 // uses FEC to recover lost data fragments.
 type FileReassembler struct {
-	SessionID     string
-	Filename      string
-	TotalSize     int
-	ChunkCount    int
-	ChunkSize     int
-	ExpectedCRC   uint32
-	Buffer        []byte
-	Bitmap        []byte
+	SessionID      string
+	Filename       string
+	TotalSize      int
+	ChunkCount     int
+	ChunkSize      int
+	ExpectedCRC    uint32
+	Buffer         []byte
+	Bitmap         []byte
 	ChunksReceived int
-	fec           *FecDecoder
+	fec            *FecDecoder
 }
 
 // NewFileReassembler creates a reassembler for the given transfer session parameters.
@@ -227,6 +227,84 @@ func (r *FileReassembler) IsComplete() bool {
 func (r *FileReassembler) VerifyCRC() bool {
 	actual := crc32.ChecksumIEEE(r.Buffer[:r.TotalSize])
 	return actual == r.ExpectedCRC
+}
+
+// DiagnoseCRC logs detailed diagnostic info when CRC verification fails.
+func (r *FileReassembler) DiagnoseCRC() {
+	actual := crc32.ChecksumIEEE(r.Buffer[:r.TotalSize])
+	fmt.Printf("[diag] CRC expected=%d (0x%08X) actual=%d (0x%08X)\n",
+		r.ExpectedCRC, r.ExpectedCRC, actual, actual)
+	fmt.Printf("[diag] Buffer size=%d ChunkSize=%d ChunkCount=%d Received=%d\n",
+		r.TotalSize, r.ChunkSize, r.ChunkCount, r.ChunksReceived)
+
+	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
+	fmt.Printf("[diag] DataChunkCount=%d FECActive=%v\n",
+		dataChunkCount, r.ChunkCount > dataChunkCount)
+
+	// Check bitmap — which data seqs are present?
+	missing := []int{}
+	for seq := 0; seq < r.ChunkCount; seq++ {
+		if r.Bitmap[seq/8]&(1<<uint(seq%8)) == 0 {
+			missing = append(missing, seq)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Printf("[diag] Missing seqs (%d): %v\n", len(missing), missing)
+	} else {
+		fmt.Printf("[diag] All %d seqs received\n", r.ChunkCount)
+	}
+
+	// Check for zero-filled gaps in the buffer (indicates missing data)
+	zeroRuns := 0
+	for i := 0; i < r.TotalSize; i += r.ChunkSize {
+		end := i + r.ChunkSize
+		if end > r.TotalSize {
+			end = r.TotalSize
+		}
+		allZero := true
+		for j := i; j < end; j++ {
+			if r.Buffer[j] != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			zeroRuns++
+			fmt.Printf("[diag] Zero-filled chunk at offset %d (dataIdx=%d)\n", i, i/r.ChunkSize)
+		}
+	}
+	if zeroRuns == 0 {
+		fmt.Printf("[diag] No zero-filled gaps in buffer\n")
+	}
+
+	// Print first 64 bytes
+	n := 64
+	if n > r.TotalSize {
+		n = r.TotalSize
+	}
+	fmt.Printf("[diag] First %d bytes: %q\n", n, r.Buffer[:n])
+
+	// Print expected pattern for fallback payload (A-Z repeating)
+	expected := make([]byte, n)
+	for i := 0; i < n; i++ {
+		expected[i] = byte('A' + (i % 26))
+	}
+	fmt.Printf("[diag] Expected first %d: %q\n", n, expected)
+
+	// Find first mismatch
+	for i := 0; i < r.TotalSize; i++ {
+		exp := byte('A' + (i % 26))
+		if r.Buffer[i] != exp {
+			end := i + 32
+			if end > r.TotalSize {
+				end = r.TotalSize
+			}
+			fmt.Printf("[diag] First mismatch at byte %d: got=0x%02X expected=0x%02X (seq~%d offset_in_chunk=%d)\n",
+				i, r.Buffer[i], exp, i/r.ChunkSize, i%r.ChunkSize)
+			fmt.Printf("[diag] Context [%d..%d]: %q\n", i, end, r.Buffer[i:end])
+			break
+		}
+	}
 }
 
 // Save writes the reassembled file to outputDir/<filename> and returns the

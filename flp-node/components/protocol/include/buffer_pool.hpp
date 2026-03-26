@@ -21,7 +21,12 @@ struct BufferSlab
 class BufferPool
 {
   public:
-    static constexpr uint8_t POOL_SIZE = 24;
+    /*
+     * 48 slabs in PSRAM (~12.5 KB).  Doubled from 24 to reduce packet drops
+     * during heavy transfers.  PSRAM is fine here — slabs are memcpy'd, not
+     * DMA-accessed.
+     */
+    static constexpr uint8_t POOL_SIZE = 48;
 
     void init();
     BufferSlab *acquire();
@@ -41,8 +46,8 @@ class BufferPool
 
   private:
     std::atomic<uint32_t> pool_exhaustion_count_{0};
-    BufferSlab slabs_[POOL_SIZE];
-    int8_t freelist_[POOL_SIZE];
+    BufferSlab *slabs_ = nullptr;   /* heap_caps_calloc'd in PSRAM */
+    int8_t *freelist_ = nullptr;    /* heap_caps_calloc'd in PSRAM */
     std::atomic<int8_t> top_{-1};
 };
 

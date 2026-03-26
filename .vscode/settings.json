@@ -31,6 +31,9 @@
   },
 
   // ── clangd configuration ──
+  "clangd.arguments": [
+    "--query-driver=/Users/cantabile/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-*"
+  ],
   "clangd.fallbackFlags": [
     "-std=c++17"
   ],
