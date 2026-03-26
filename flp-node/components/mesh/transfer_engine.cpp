@@ -55,13 +55,14 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                                         size_t payload_len,
                                         bool has_internet)
 {
-    if (payload_len < sizeof(TransferAdPayload))
+    if (payload_len < 13) /* minimum: legacy ad without filename */
     {
         return;
     }
 
-    TransferAdPayload ad;
-    memcpy(&ad, payload, sizeof(ad));
+    TransferAdPayload ad = {};
+    size_t copy_len = (payload_len < sizeof(ad)) ? payload_len : sizeof(ad);
+    memcpy(&ad, payload, copy_len);
 
     uint16_t frag_size = static_cast<uint16_t>(ad.fragment_size_d8) * 8;
     uint16_t frag_count = ad.fragment_count;
@@ -99,21 +100,47 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         /* Set up ACK path: arq_[0] for sending ACKs back to source */
         arq_[0].set_peer_addr(hdr.src_addr);
 
-        /*
-         * Defer meta publication until fragment 0 arrives with filename.
-         * Store ad info for later.
-         */
-        pending_meta_.file_size = ad.file_size;
-        pending_meta_.fragment_count = frag_count;
-        pending_meta_.fragment_size = frag_size;
-        pending_meta_.crc32 = ad.crc32;
-        pending_meta_.waiting = true;
-        transfer_.filename[0] = '\0'; /* will be filled by frag 0 */
+        /* Extract filename from ad (embedded since v2, fallback for compat) */
+        if (ad.filename_len > 0 &&
+            ad.filename_len <= sizeof(ad.filename) &&
+            ad.filename_len < sizeof(transfer_.filename))
+        {
+            memcpy(transfer_.filename, ad.filename, ad.filename_len);
+            transfer_.filename[ad.filename_len] = '\0';
+            pending_meta_.waiting = false;
 
-        ESP_LOGI(TAG,
-                 "Exit node mode: session=%u source=0x%04X (awaiting filename)",
-                 active_session_id_,
-                 source_addr_);
+            /* Publish transfer meta immediately */
+            if (forward_meta_fn_)
+            {
+                forward_meta_fn_(ad.session_id,
+                                 transfer_.filename,
+                                 hdr.src_addr,
+                                 ad.file_size,
+                                 frag_count,
+                                 frag_size,
+                                 ad.crc32);
+            }
+            ESP_LOGI(TAG,
+                     "Exit node mode: session=%u source=0x%04X file=%s",
+                     active_session_id_,
+                     source_addr_,
+                     transfer_.filename);
+        }
+        else
+        {
+            /* Fallback: wait for filename in fragment 0 (legacy senders) */
+            pending_meta_.file_size = ad.file_size;
+            pending_meta_.fragment_count = frag_count;
+            pending_meta_.fragment_size = frag_size;
+            pending_meta_.crc32 = ad.crc32;
+            pending_meta_.waiting = true;
+            transfer_.filename[0] = '\0';
+
+            ESP_LOGI(TAG,
+                     "Exit node mode: session=%u source=0x%04X (awaiting filename)",
+                     active_session_id_,
+                     source_addr_);
+        }
     }
 }
 
@@ -153,44 +180,6 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 {
     if (is_exit_node_)
     {
-        const uint8_t *fwd_data = payload;
-        size_t fwd_len = payload_len;
-
-        /*
-         * Fragment 0 carries filename prefix: [len:1][filename:N][data...]
-         * Extract filename and publish deferred meta.
-         */
-        if (hdr.seq_num == 0 && pending_meta_.waiting && payload_len >= 2)
-        {
-            uint8_t name_len = payload[0];
-            if (name_len > 0 && (1U + name_len) <= payload_len &&
-                name_len < sizeof(transfer_.filename))
-            {
-                memcpy(transfer_.filename, payload + 1, name_len);
-                transfer_.filename[name_len] = '\0';
-
-                /* Advance past filename prefix for MQTT forwarding */
-                fwd_data = payload + 1 + name_len;
-                fwd_len = payload_len - 1 - name_len;
-
-                /* Now publish the deferred transfer meta */
-                if (forward_meta_fn_)
-                {
-                    forward_meta_fn_(active_session_id_,
-                                     transfer_.filename,
-                                     source_addr_,
-                                     pending_meta_.file_size,
-                                     pending_meta_.fragment_count,
-                                     pending_meta_.fragment_size,
-                                     pending_meta_.crc32);
-                }
-                pending_meta_.waiting = false;
-
-                ESP_LOGI(TAG, "Extracted filename from frag 0: %s",
-                         transfer_.filename);
-            }
-        }
-
         /*
          * P5 fix: Only ACK after fragment is successfully queued for MQTT.
          * If the queue is full, send NACK so the sender retransmits later.
@@ -202,8 +191,8 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
             queued = forward_to_mqtt_fn_(active_session_id_,
                                          hdr.seq_num,
                                          source_addr_,
-                                         fwd_data,
-                                         fwd_len,
+                                         payload,
+                                         payload_len,
                                          transfer_.filename);
         }
 
@@ -368,13 +357,16 @@ void TransferEngine::start_file_transfer(const char *filename,
         transfer_.fragment_count,
         transfer_.session_id);
 
-    /* Build TRANSFER_AD with full CRC32 and total fragment count */
+    /* Build TRANSFER_AD with full CRC32, fragment count, and filename */
     TransferAdPayload ad = {};
     ad.session_id = transfer_.session_id;
     ad.file_size = static_cast<uint32_t>(size);
     ad.fragment_size_d8 = static_cast<uint8_t>(transfer_.fragment_size / 8);
     ad.crc32 = crc;
     ad.fragment_count = transfer_.fragment_count;
+    ad.filename_len = static_cast<uint8_t>(
+        strnlen(filename, sizeof(ad.filename)));
+    memcpy(ad.filename, filename, ad.filename_len);
 
     /* Start election with adaptive timeout */
     candidate_count_ = 0;
@@ -801,41 +793,15 @@ void TransferEngine::transfer_tick()
                                   ? remain
                                   : transfer_.fragment_size;
 
-            /*
-             * Fragment 0 (seq=0): prepend filename so exit node
-             * can publish transfer meta after receiving it.
-             */
             uint8_t frag_buf[MAX_MTU];
             size_t got = transfer_.read_chunk(frag_buf, offset, frag_len);
 
-            if (seq == 0)
+            int ret = arq_[arq_idx].send_fragment(seq, frag_buf, got);
+            if (ret < 0)
             {
-                uint8_t name_len = static_cast<uint8_t>(
-                    strnlen(transfer_.filename, sizeof(transfer_.filename) - 1));
-                uint8_t frag0_buf[MAX_MTU];
-                frag0_buf[0] = name_len;
-                memcpy(frag0_buf + 1, transfer_.filename, name_len);
-                memcpy(frag0_buf + 1 + name_len, frag_buf, got);
-                size_t total_len = 1 + name_len + got;
-
-                int ret = arq_[arq_idx].send_fragment(
-                    seq, frag0_buf, total_len);
-                if (ret < 0)
-                {
-                    break;
-                }
-                fec_encoder_.ingest(frag_buf, got);
+                break;
             }
-            else
-            {
-                int ret = arq_[arq_idx].send_fragment(
-                    seq, frag_buf, got);
-                if (ret < 0)
-                {
-                    break;
-                }
-                fec_encoder_.ingest(frag_buf, got);
-            }
+            fec_encoder_.ingest(frag_buf, got);
         }
 
         transfer_.next_fragment++;
