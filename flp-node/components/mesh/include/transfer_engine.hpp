@@ -34,11 +34,25 @@ struct ExitCandidate
     uint8_t hops_to_gw;
 };
 
+/* Per-exit-path quality statistics for weighted scheduling (Phase 3).
+ * Updated from ACK/NACK handling; used by tick_mesh_arq() to select
+ * the best exit node for each fragment. */
+struct ExitPathStats
+{
+    float ewma_rtt_ms   = 500.0f; /* EWMA of round-trip time */
+    float ewma_loss     = 0.0f;   /* EWMA of loss rate [0,1] */
+    uint32_t sent       = 0;
+    uint32_t acked      = 0;
+    uint32_t nacked     = 0;
+    float weight        = 1.0f;   /* normalized scheduling weight */
+};
+
 /* Active file transfer state (sender side) */
 struct ActiveTransfer
 {
     ReadChunkFn read_chunk;
     size_t size = 0;
+    uint32_t crc32 = 0; /* stored for periodic meta re-publish */
     uint16_t fragment_count = 0;
     uint16_t fragment_size = 0;
     uint16_t next_fragment = 0;
@@ -186,6 +200,7 @@ class TransferEngine
     void election_timeout_tick(uint32_t now_ms);
     void exit_node_health_tick(uint32_t now_ms);
     void redistribute_dead_exit(uint8_t dead_idx);
+    void recompute_weights();
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
                                    size_t payload_len,
@@ -244,6 +259,22 @@ class TransferEngine
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;
+
+    /* Cloud ACK stall detection for local-exit and exit-node timeouts.
+     * If no cloud ACK arrives within this period, abort the transfer so
+     * auto-demo or a new TRANSFER_AD can proceed. */
+    static constexpr uint32_t CLOUD_STALL_TIMEOUT_MS = 30000;
+    uint32_t last_cloud_activity_ms_ = 0;
+
+    /* Periodic meta re-publish: if the cloud restarts mid-transfer, it has
+     * no session state. Re-publishing meta lets it pick up the session. */
+    static constexpr uint32_t META_REPUBLISH_INTERVAL_MS = 10000;
+    uint32_t last_meta_publish_ms_ = 0;
+
+    /* Phase 3: per-exit-path quality stats for weighted scheduling */
+    ExitPathStats path_stats_[MAX_EXIT_NODES] = {};
+    uint16_t weight_recompute_counter_ = 0;
+    static constexpr uint16_t WEIGHT_RECOMPUTE_INTERVAL = 16; /* every N frags */
 };
 
 } /* namespace flp */

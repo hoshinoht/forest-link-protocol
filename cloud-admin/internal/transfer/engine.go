@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -141,8 +142,45 @@ func RunEngine(
 	var reassembler *FileReassembler
 	var lastChunkTime float64
 
+	// B7 fix: staging buffer for chunks that arrive before meta
+	const maxPendingChunks = 512
+	pendingChunks := make([]mqtt.FileChunk, 0, 256)
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
+	// processChunk handles a single chunk against the active reassembler.
+	// Returns (complete, success): complete=true means transfer finished.
+	processChunk := func(chunk mqtt.FileChunk) (bool, bool) {
+		seq := int(chunk.SeqNum)
+		isNew := reassembler.WriteChunk(seq, chunk.Data)
+		if isNew {
+			sr.OnChunkReceived(seq)
+			lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
+			s := tq.ActiveTransfer
+			progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
+				reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
+		}
+
+		if reassembler.IsComplete() {
+			if reassembler.VerifyCRC() {
+				path, err := reassembler.Save(outputDir)
+				if err != nil {
+					log.Printf("[transfer] failed to save file: %v", err)
+				} else {
+					log.Printf("[transfer] saved %s", path)
+				}
+				return true, true
+			}
+			log.Printf("[transfer] CRC mismatch for session %s", tq.ActiveTransfer.SessionID)
+			reassembler.DiagnoseCRC()
+			return true, false
+		}
+		return false, false
+	}
+
+	// Forward-declare so setupActive and completeTransfer can reference each other.
+	var completeTransfer func(bool)
 
 	setupActive := func() {
 		s := tq.ActiveTransfer
@@ -154,7 +192,8 @@ func RunEngine(
 		}
 		sr = NewSelectiveRepeat(srWindow, srTimeout)
 		sr.AckCallback = func(msgType string, seq int) {
-			mqttClient.PublishACK(msgType, seq)
+			// D2 fix: session-scoped ACK topic
+			mqttClient.PublishACK(s.SessionID, msgType, seq)
 		}
 		sr.StartSession(s.ChunkCount)
 		reassembler = NewFileReassembler(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, s.CRC32, s.FragmentSize)
@@ -162,9 +201,33 @@ func RunEngine(
 		progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, 0, 0, true, s.StartedAt)
 		log.Printf("[transfer] started session %s (%s, %d bytes, %d chunks)",
 			s.SessionID, s.Filename, s.TotalSize, s.ChunkCount)
+
+		// B7 fix: replay staged chunks that match this session
+		if len(pendingChunks) > 0 {
+			kept := pendingChunks[:0]
+			replayed := 0
+			completed := false
+			for _, c := range pendingChunks {
+				cSID := fmt.Sprintf("%d", c.SessionID)
+				if cSID != s.SessionID || completed {
+					kept = append(kept, c) // wrong session or already done
+					continue
+				}
+				complete, success := processChunk(c)
+				replayed++
+				if complete {
+					completeTransfer(success)
+					completed = true
+				}
+			}
+			if replayed > 0 {
+				log.Printf("[transfer] replayed %d staged chunks for session %s", replayed, s.SessionID)
+			}
+			pendingChunks = kept
+		}
 	}
 
-	completeTransfer := func(success bool) {
+	completeTransfer = func(success bool) {
 		s := tq.ActiveTransfer
 		if s == nil {
 			return
@@ -221,33 +284,23 @@ func RunEngine(
 			}
 
 		case chunk := <-chunkCh:
+			// B7 fix: stage chunks if no active session yet
 			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
+				if len(pendingChunks) < maxPendingChunks {
+					pendingChunks = append(pendingChunks, chunk)
+				}
 				continue
 			}
-			seq := int(chunk.SeqNum)
-			isNew := reassembler.WriteChunk(seq, chunk.Data)
-			if isNew {
-				sr.OnChunkReceived(seq)
-				lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
-				s := tq.ActiveTransfer
-				progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
-					reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
+
+			// B4 fix: filter stale chunks from wrong session
+			chunkSID := fmt.Sprintf("%d", chunk.SessionID)
+			if chunkSID != tq.ActiveTransfer.SessionID {
+				continue
 			}
 
-			if reassembler.IsComplete() {
-				if reassembler.VerifyCRC() {
-					path, err := reassembler.Save(outputDir)
-					if err != nil {
-						log.Printf("[transfer] failed to save file: %v", err)
-					} else {
-						log.Printf("[transfer] saved %s", path)
-					}
-					completeTransfer(true)
-				} else {
-					log.Printf("[transfer] CRC mismatch for session %s", tq.ActiveTransfer.SessionID)
-					reassembler.DiagnoseCRC()
-					completeTransfer(false)
-				}
+			complete, success := processChunk(chunk)
+			if complete {
+				completeTransfer(success)
 			}
 
 		case <-ticker.C:
@@ -258,6 +311,28 @@ func RunEngine(
 				now := float64(time.Now().UnixMilli()) / 1000.0
 				if now-lastChunkTime > transferTimeoutSec {
 					completeTransfer(false)
+				}
+			}
+			// D1+B3 fix: stall-based end-to-end NACK bridge.
+			// If no chunks arrived for 5s but transfer is incomplete,
+			// publish missing seqs so exit nodes can re-request from source.
+			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
+				gaps := sr.CheckStall(lastChunkTime, 5.0)
+				if len(gaps) > 0 {
+					mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)
+					log.Printf("[transfer] stall detected, published %d NACKs for session %s",
+						len(gaps), tq.ActiveTransfer.SessionID)
+				}
+			}
+			// B7: garbage-collect stale pending chunks (>30s old is impossible
+			// since sessions time out at 60s; just cap the buffer)
+			if tq.ActiveTransfer == nil && len(pendingChunks) > 0 {
+				now := float64(time.Now().UnixMilli()) / 1000.0
+				if now-lastChunkTime > 30 {
+					if len(pendingChunks) > 0 {
+						log.Printf("[transfer] discarding %d orphan staged chunks", len(pendingChunks))
+						pendingChunks = pendingChunks[:0]
+					}
 				}
 			}
 		}

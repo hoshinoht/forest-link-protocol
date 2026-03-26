@@ -73,6 +73,11 @@ bool SelectiveRepeat::sender_window_full() const
     return (next_seq_ - base_seq_) >= window_size_;
 }
 
+uint16_t SelectiveRepeat::sender_window_used() const
+{
+    return next_seq_ - base_seq_;
+}
+
 int SelectiveRepeat::send_fragment(uint16_t seq,
                                    const uint8_t *data,
                                    size_t len)

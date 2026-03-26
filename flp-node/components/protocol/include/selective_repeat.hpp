@@ -58,7 +58,16 @@ class SelectiveRepeat
         return next_seq_;
     }
     bool sender_window_full() const;
+    uint16_t sender_window_used() const;
     void reset_sender();
+
+    /* Phase 3: get send timestamp for RTT computation */
+    uint32_t get_send_time(uint16_t seq) const
+    {
+        if (!window_) return 0;
+        uint8_t idx = seq % window_size_;
+        return window_[idx].send_time_ms;
+    }
 
     /* Receiver API */
     bool init_receiver(uint16_t total_fragments,

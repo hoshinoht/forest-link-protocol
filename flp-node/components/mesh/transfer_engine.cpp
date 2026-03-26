@@ -111,6 +111,16 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         is_exit_node_ = true;
         active_session_id_ = ad.session_id;
         source_addr_ = hdr.src_addr;
+        transfer_.size = ad.file_size;
+        transfer_.fragment_count = frag_count;
+        transfer_.fragment_size = frag_size;
+        transfer_.crc32 = ad.crc32;
+        {
+            uint32_t now_ts =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            last_cloud_activity_ms_ = now_ts;
+            last_meta_publish_ms_ = now_ts;
+        }
 
         /* Set up ACK path: arq_[0] for sending ACKs back to source */
         arq_[0].set_peer_addr(hdr.src_addr);
@@ -211,6 +221,8 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
         if (queued)
         {
             send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
+            last_cloud_activity_ms_ =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000);
         }
         else
         {
@@ -230,9 +242,21 @@ void TransferEngine::handle_ack(uint16_t seq, uint16_t from_addr)
     int8_t idx = arq_index_for_peer(from_addr);
     if (idx >= 0)
     {
+        /* Phase 3: compute RTT sample from send timestamp */
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        uint32_t send_time = arq_[idx].get_send_time(seq);
+        if (send_time > 0 && now > send_time)
+        {
+            float rtt_sample = static_cast<float>(now - send_time);
+            constexpr float ALPHA = 0.3f;
+            path_stats_[idx].ewma_rtt_ms =
+                ALPHA * rtt_sample +
+                (1.0f - ALPHA) * path_stats_[idx].ewma_rtt_ms;
+        }
+        path_stats_[idx].acked++;
+
         arq_[idx].handle_ack(seq);
-        transfer_.last_ack_ms[idx] =
-            static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        transfer_.last_ack_ms[idx] = now;
     }
 }
 
@@ -241,6 +265,7 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     int8_t idx = arq_index_for_peer(from_addr);
     if (idx >= 0)
     {
+        path_stats_[idx].nacked++; /* Phase 3 */
         arq_[idx].handle_nack(seq);
     }
 }
@@ -322,6 +347,10 @@ void TransferEngine::start_file_transfer(const char *filename,
         }
     }
 
+    transfer_.crc32 = crc;
+    last_meta_publish_ms_ =
+        static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
     /* Local-exit fast path: source node has internet + MQTT, skip mesh entirely */
     local_exit_ = (has_internet && has_mqtt && forward_to_mqtt_fn_);
     if (local_exit_)
@@ -342,6 +371,8 @@ void TransferEngine::start_file_transfer(const char *filename,
         cloud_base_seq_ = 0;
         cloud_next_send_ = 0;
         cloud_retx_count_ = 0;
+        last_cloud_activity_ms_ =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
         /* Publish transfer meta directly */
         if (forward_meta_fn_)
@@ -450,6 +481,79 @@ void TransferEngine::tick(uint32_t now_ms)
         }
     }
 
+    /* Periodic meta re-publish: if the cloud restarted mid-transfer, it
+     * has no session state. Re-publishing meta lets it pick up the session
+     * and replay any staged chunks. */
+    if (forward_meta_fn_ && last_meta_publish_ms_ > 0 &&
+        (now_ms - last_meta_publish_ms_) > META_REPUBLISH_INTERVAL_MS)
+    {
+        bool should_republish =
+            (local_exit_ && transfer_.active) || is_exit_node_;
+        if (should_republish)
+        {
+            uint16_t sid = local_exit_ ? transfer_.session_id
+                                       : active_session_id_;
+            uint16_t src = local_exit_ ? my_addr_ : source_addr_;
+            forward_meta_fn_(sid,
+                             transfer_.filename,
+                             src,
+                             static_cast<uint32_t>(transfer_.size),
+                             transfer_.fragment_count,
+                             transfer_.fragment_size,
+                             transfer_.crc32);
+            last_meta_publish_ms_ = now_ms;
+            ESP_LOGI(TAG, "Re-published transfer meta (session=%u)", sid);
+        }
+    }
+
+    /* Cloud stall timeout: if the cloud hasn't ACK'd anything for
+     * CLOUD_STALL_TIMEOUT_MS, abort local-exit transfer or exit-node role.
+     * Prevents the firmware from being stuck forever when the cloud is
+     * down, restarted, or unreachable. */
+    if (last_cloud_activity_ms_ > 0 &&
+        (now_ms - last_cloud_activity_ms_) > CLOUD_STALL_TIMEOUT_MS)
+    {
+        if (local_exit_ && transfer_.active)
+        {
+            ESP_LOGW(TAG,
+                     "Local-exit cloud stall: no ACK for %" PRIu32
+                     "ms, aborting transfer",
+                     now_ms - last_cloud_activity_ms_);
+            transfer_.active = false;
+            transfer_.read_chunk = nullptr;
+            local_exit_ = false;
+            memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
+            cloud_base_seq_ = 0;
+            cloud_next_send_ = 0;
+            cloud_retx_count_ = 0;
+            last_cloud_activity_ms_ = 0;
+            xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
+            return;
+        }
+        if (is_exit_node_)
+        {
+            ESP_LOGW(TAG,
+                     "Exit node cloud stall: no activity for %" PRIu32
+                     "ms, clearing exit-node role",
+                     now_ms - last_cloud_activity_ms_);
+            is_exit_node_ = false;
+            active_session_id_ = 0;
+            last_cloud_activity_ms_ = 0;
+        }
+    }
+
+    /* D1+B3 fix: exit node drains cloud transfer NACKs and forwards as
+     * mesh NACKs to source, bridging the end-to-end reliability gap. */
+    if (is_exit_node_ && drain_cloud_nack_fn_)
+    {
+        uint16_t nack_seq = 0;
+        while (drain_cloud_nack_fn_(nack_seq))
+        {
+            send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
+            ESP_LOGI(TAG, "Exit->source NACK for seq=%u", nack_seq);
+        }
+    }
+
     /* Broadcast retry */
     broadcast_retry_tick(now_ms);
 
@@ -485,19 +589,82 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
     }
     else
     {
-        /* Use ALL candidates as exit nodes */
-        transfer_.exit_node_count = candidate_count_;
-        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        /* Phase 3: Quality-filtered election.
+         * Score each candidate using RSSI and hops, then reject candidates
+         * whose score is more than 2x worse than the best. */
+
+        /* 1. Score candidates: higher is better */
+        int16_t scores[MAX_EXIT_NODES] = {};
+        int16_t best_score = -32000;
         for (uint8_t i = 0; i < candidate_count_; i++)
         {
-            transfer_.exit_nodes[i] = candidates_[i].addr;
-            transfer_.exit_node_alive[i] = true;
-            transfer_.last_ack_ms[i] = now;
-            arq_[i].reset_sender();
-            arq_[i].set_peer_addr(candidates_[i].addr);
-            arq_[i].set_exit_stride(candidate_count_, i);
+            scores[i] = static_cast<int16_t>(candidates_[i].rssi_to_gw) -
+                         static_cast<int16_t>(6 * candidates_[i].hops_to_gw);
+            if (scores[i] > best_score)
+            {
+                best_score = scores[i];
+            }
         }
-        ESP_LOGI(TAG, "Elected %u exit nodes", transfer_.exit_node_count);
+
+        /* 2. Simple insertion sort by score descending (max 4 elements) */
+        for (uint8_t i = 1; i < candidate_count_; i++)
+        {
+            ExitCandidate tc = candidates_[i];
+            int16_t ts = scores[i];
+            int8_t j = static_cast<int8_t>(i) - 1;
+            while (j >= 0 && scores[j] < ts)
+            {
+                candidates_[j + 1] = candidates_[j];
+                scores[j + 1] = scores[j];
+                j--;
+            }
+            candidates_[j + 1] = tc;
+            scores[j + 1] = ts;
+        }
+
+        /* 3. Accept candidates within quality threshold */
+        int16_t threshold = best_score / 2;
+        uint8_t accepted = 0;
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        for (uint8_t i = 0; i < candidate_count_ && accepted < MAX_EXIT_NODES; i++)
+        {
+            if (scores[i] >= threshold)
+            {
+                transfer_.exit_nodes[accepted] = candidates_[i].addr;
+                transfer_.exit_node_alive[accepted] = true;
+                transfer_.last_ack_ms[accepted] = now;
+                arq_[accepted].reset_sender();
+                arq_[accepted].set_peer_addr(candidates_[i].addr);
+
+                /* Initialize path stats prior from election info */
+                path_stats_[accepted] = ExitPathStats{};
+                path_stats_[accepted].ewma_rtt_ms =
+                    static_cast<float>(BASE_ARQ_TIMEOUT_MS +
+                        candidates_[i].hops_to_gw * PER_HOP_ARQ_TIMEOUT_MS);
+
+                accepted++;
+                ESP_LOGI(TAG, "Accepted exit #%u: 0x%04X score=%d rtt_prior=%.0f",
+                         accepted, candidates_[i].addr, scores[i],
+                         path_stats_[accepted - 1].ewma_rtt_ms);
+            }
+            else
+            {
+                ESP_LOGI(TAG, "Rejected exit 0x%04X: score=%d < threshold=%d",
+                         candidates_[i].addr, scores[i], threshold);
+            }
+        }
+
+        transfer_.exit_node_count = accepted;
+        weight_recompute_counter_ = 0;
+
+        /* Set stride for multi-exit ARQ ownership */
+        for (uint8_t i = 0; i < accepted; i++)
+        {
+            arq_[i].set_exit_stride(accepted, i);
+        }
+
+        ESP_LOGI(TAG, "Elected %u exit nodes (of %u candidates)",
+                 accepted, candidate_count_);
 
         xEventGroupSetBits(events_, FLP_EVT_EXIT_NODE_ELECTED);
         transfer_.next_fragment = 0;
@@ -544,6 +711,8 @@ void TransferEngine::tick_local_exit_arq()
             {
                 cloud_ack_bitmap_[ack_seq / 8] |=
                     static_cast<uint8_t>(1U << (ack_seq % 8));
+                last_cloud_activity_ms_ =
+                    static_cast<uint32_t>(esp_timer_get_time() / 1000);
                 ESP_LOGD(TAG, "Cloud ACK: seq=%u", ack_seq);
             }
         }
@@ -706,7 +875,50 @@ void TransferEngine::compact_retx_queue(uint8_t sent)
 }
 
 /* --------------------------------------------------------------------------
- * Mesh-path multi-exit round-robin: feed fragments across alive exit nodes
+ * Phase 3: Recompute per-exit scheduling weights from EWMA RTT and loss.
+ * Score = 1 / (rtt * (1 + loss * penalty)). Weights are normalized [0,1].
+ * ----------------------------------------------------------------------- */
+void TransferEngine::recompute_weights()
+{
+    float total_score = 0;
+    float scores[MAX_EXIT_NODES] = {};
+    constexpr float LOSS_PENALTY = 5.0f;
+    constexpr float ALPHA = 0.3f;
+
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (!transfer_.exit_node_alive[i])
+        {
+            continue;
+        }
+        auto &s = path_stats_[i];
+
+        /* Update loss EWMA from recent counters */
+        float loss = (s.sent > 0)
+                         ? static_cast<float>(s.nacked) /
+                               static_cast<float>(s.sent)
+                         : 0.0f;
+        s.ewma_loss = ALPHA * loss + (1.0f - ALPHA) * s.ewma_loss;
+
+        /* Guard: minimum RTT of 10ms to avoid division by near-zero */
+        float rtt = (s.ewma_rtt_ms > 10.0f) ? s.ewma_rtt_ms : 10.0f;
+        scores[i] = 1.0f / (rtt * (1.0f + s.ewma_loss * LOSS_PENALTY));
+        total_score += scores[i];
+    }
+
+    if (total_score > 0)
+    {
+        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+        {
+            path_stats_[i].weight = transfer_.exit_node_alive[i]
+                                        ? scores[i] / total_score
+                                        : 0.0f;
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Mesh-path multi-exit: feed fragments across alive exit nodes
  * via SelectiveRepeat ARQ over the mesh network.
  * ----------------------------------------------------------------------- */
 void TransferEngine::tick_mesh_arq()
@@ -758,8 +970,12 @@ void TransferEngine::tick_mesh_arq()
 
             if (!arq_[target].sender_window_full())
             {
+                /* B2 fix: map seq to data index (skip parity slots) */
+                uint16_t rgroup = seq / (FEC_GROUP_SIZE + 1);
+                uint16_t ridx   = seq % (FEC_GROUP_SIZE + 1);
+                uint16_t data_idx = rgroup * FEC_GROUP_SIZE + ridx;
                 size_t offset =
-                    static_cast<size_t>(seq) * transfer_.fragment_size;
+                    static_cast<size_t>(data_idx) * transfer_.fragment_size;
                 size_t remain = transfer_.size - offset;
                 size_t frag_len = (remain < transfer_.fragment_size)
                                       ? remain
@@ -776,51 +992,45 @@ void TransferEngine::tick_mesh_arq()
     }
 
     /*
-     * Round-robin fragment assignment across alive exit nodes.
-     * Fragment 0 carries a filename prefix: [len:1][filename:N][data...]
+     * Phase 3: Window-aware weighted fragment assignment.
+     * Replaces blind round-robin with score = weight * free_window_slots.
+     * Combines long-term quality (EWMA RTT+loss via weight) with transient
+     * load awareness (current ARQ window occupancy).
      */
+
+    /* Periodically recompute weights from accumulated stats */
+    if (weight_recompute_counter_ >= WEIGHT_RECOMPUTE_INTERVAL)
+    {
+        recompute_weights();
+        weight_recompute_counter_ = 0;
+    }
+
     while (transfer_.next_fragment < transfer_.fragment_count)
     {
-        /* Find next alive exit node for this fragment */
-        uint8_t arq_idx = transfer_.next_fragment % transfer_.exit_node_count;
-        if (!transfer_.exit_node_alive[arq_idx])
+        /* Score all alive exits: weight * free_slots */
+        uint8_t arq_idx = 0;
+        float best_score = -1.0f;
+        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
         {
-            bool found = false;
-            for (uint8_t j = 1; j < transfer_.exit_node_count; j++)
+            if (!transfer_.exit_node_alive[i])
             {
-                uint8_t try_idx = (arq_idx + j) % transfer_.exit_node_count;
-                if (transfer_.exit_node_alive[try_idx])
-                {
-                    arq_idx = try_idx;
-                    found = true;
-                    break;
-                }
+                continue;
             }
-            if (!found)
+            uint16_t used = arq_[i].sender_window_used();
+            uint16_t free_slots = (used < ARQ_WINDOW) ?
+                static_cast<uint16_t>(ARQ_WINDOW - used) : 0;
+            float score = path_stats_[i].weight *
+                          static_cast<float>(free_slots);
+            if (score > best_score)
             {
-                break;
+                best_score = score;
+                arq_idx = i;
             }
         }
-        if (arq_[arq_idx].sender_window_full())
+
+        if (best_score <= 0)
         {
-            /* Primary exit full — try next alive exit with window space.
-             * This avoids starving other exits when one is congested. */
-            bool found_alt = false;
-            for (uint8_t j = 1; j < transfer_.exit_node_count; j++)
-            {
-                uint8_t try_idx = (arq_idx + j) % transfer_.exit_node_count;
-                if (transfer_.exit_node_alive[try_idx] &&
-                    !arq_[try_idx].sender_window_full())
-                {
-                    arq_idx = try_idx;
-                    found_alt = true;
-                    break;
-                }
-            }
-            if (!found_alt)
-            {
-                break; /* ALL alive exits full, wait for ACKs */
-            }
+            break; /* all windows full or no alive exits, wait for ACKs */
         }
 
         uint16_t seq = transfer_.next_fragment;
@@ -865,6 +1075,9 @@ void TransferEngine::tick_mesh_arq()
             fec_encoder_.ingest(frag_buf_, got);
         }
 
+        /* Phase 3: track per-exit send count and weight recompute interval */
+        path_stats_[arq_idx].sent++;
+        weight_recompute_counter_++;
         transfer_.next_fragment++;
     }
 
@@ -900,7 +1113,10 @@ void TransferEngine::tick_mesh_arq()
 
 void TransferEngine::exit_node_health_tick(uint32_t now_ms)
 {
-    if (!transfer_.active || election_active_ || transfer_.exit_node_count <= 1)
+    /* D5 fix: removed exit_node_count <= 1 guard so single-exit transfers
+     * get fast failure detection (10s timeout) instead of waiting for
+     * per-fragment ARQ MAX_RETRIES cascade (~67s). */
+    if (!transfer_.active || election_active_ || transfer_.exit_node_count == 0)
     {
         return;
     }
@@ -1010,7 +1226,11 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
             }
         }
 
-        size_t offset = static_cast<size_t>(seq) * transfer_.fragment_size;
+        /* B2 fix: map seq to data index (skip parity slots) */
+        uint16_t rgroup = seq / (FEC_GROUP_SIZE + 1);
+        uint16_t ridx   = seq % (FEC_GROUP_SIZE + 1);
+        uint16_t data_idx = rgroup * FEC_GROUP_SIZE + ridx;
+        size_t offset = static_cast<size_t>(data_idx) * transfer_.fragment_size;
         size_t remain = transfer_.size - offset;
         size_t frag_len = (remain < transfer_.fragment_size)
                               ? remain

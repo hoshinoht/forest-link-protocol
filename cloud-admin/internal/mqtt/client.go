@@ -127,15 +127,17 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 
 		case "data":
 			payload := msg.Payload()
-			if len(payload) < 2 {
-				log.Printf("[mqtt] file data too short from %s", nodeID)
+			// B4 fix: wire format is now [session_id:2LE][seq:2LE][data]
+			if len(payload) < 4 {
+				log.Printf("[mqtt] file data too short from %s (%d bytes)", nodeID, len(payload))
 				return
 			}
-			seq := binary.LittleEndian.Uint16(payload[:2])
-			data := make([]byte, len(payload)-2)
-			copy(data, payload[2:])
+			sessionID := binary.LittleEndian.Uint16(payload[:2])
+			seq := binary.LittleEndian.Uint16(payload[2:4])
+			data := make([]byte, len(payload)-4)
+			copy(data, payload[4:])
 			select {
-			case c.chunkCh <- FileChunk{NodeID: nodeID, SeqNum: seq, Data: data}:
+			case c.chunkCh <- FileChunk{NodeID: nodeID, SessionID: sessionID, SeqNum: seq, Data: data}:
 			default:
 				log.Printf("[mqtt] chunkCh full, dropping chunk seq=%d from %s", seq, nodeID)
 			}
@@ -176,16 +178,33 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 	}
 }
 
-// PublishACK publishes an acknowledgement message to flp/admin/ack.
-func (c *Client) PublishACK(msgType string, seq int) {
+// PublishACK publishes an acknowledgement message to flp/admin/ack/<sessionID>.
+// D2 fix: session-scoped topic prevents ambiguity in multi-transfer scenarios.
+func (c *Client) PublishACK(sessionID string, msgType string, seq int) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"type": msgType,
 		"seq":  seq,
 	})
-	tok := c.client.Publish("flp/admin/ack", 1, false, payload)
+	topic := fmt.Sprintf("flp/admin/ack/%s", sessionID)
+	tok := c.client.Publish(topic, 1, false, payload)
 	tok.Wait()
 	if tok.Error() != nil {
 		log.Printf("[mqtt] publish ack error: %v", tok.Error())
+	}
+}
+
+// PublishTransferNACK publishes missing seq numbers so exit nodes can re-request
+// retransmission from the source. D1+B3 fix: bridges the end-to-end gap.
+func (c *Client) PublishTransferNACK(sessionID string, seqs []int) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"session_id": sessionID,
+		"seqs":       seqs,
+	})
+	topic := fmt.Sprintf("flp/admin/transfer_nack/%s", sessionID)
+	tok := c.client.Publish(topic, 1, false, payload)
+	tok.Wait()
+	if tok.Error() != nil {
+		log.Printf("[mqtt] publish transfer_nack error: %v", tok.Error())
 	}
 }
 

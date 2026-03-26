@@ -16,9 +16,10 @@ type FileMeta struct {
 
 // FileChunk is received on flp/+/file/data.
 type FileChunk struct {
-	NodeID string
-	SeqNum uint16
-	Data   []byte
+	NodeID    string
+	SessionID uint16 // B4 fix: session ID from wire format
+	SeqNum    uint16
+	Data      []byte
 }
 
 // TopoMsg carries raw topology bytes from flp/+/topology.

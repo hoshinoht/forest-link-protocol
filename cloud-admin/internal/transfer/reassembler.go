@@ -27,22 +27,28 @@ type fecGroup struct {
 	count int
 }
 
+// fecRecovery holds a single recovered fragment returned inline from Ingest.
+// B5 fix: replaces the unbounded recovered map with a single return value.
+type fecRecovery struct {
+	Seq  int
+	Data []byte
+}
+
 // FecDecoder accumulates chunks and attempts single-erasure recovery per group.
 type FecDecoder struct {
-	groups    map[int]*fecGroup
-	recovered map[int][]byte
+	groups map[int]*fecGroup
 }
 
 // NewFecDecoder creates a new decoder.
 func NewFecDecoder() *FecDecoder {
 	return &FecDecoder{
-		groups:    make(map[int]*fecGroup),
-		recovered: make(map[int][]byte),
+		groups: make(map[int]*fecGroup),
 	}
 }
 
 // Ingest stores a chunk and attempts recovery.
-func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) []byte {
+// B5 fix: returns the recovered fragment inline instead of accumulating in a map.
+func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) (rec *fecRecovery) {
 	groupID := seq / (FECGroupSize + 1)
 	idx := seq % (FECGroupSize + 1)
 
@@ -67,7 +73,7 @@ func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) []byte {
 	return nil
 }
 
-func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) []byte {
+func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) *fecRecovery {
 	missing := -1
 	for i := 0; i <= FECGroupSize; i++ {
 		if !g.slots[i].present {
@@ -102,8 +108,7 @@ func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) []byte {
 	g.count++
 
 	recoveredSeq := groupID*(FECGroupSize+1) + missing
-	f.recovered[recoveredSeq] = recovered
-	return recovered
+	return &fecRecovery{Seq: recoveredSeq, Data: recovered}
 }
 
 // ---------------------------------------------------------------------------
@@ -113,16 +118,17 @@ func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) []byte {
 // FileReassembler collects chunks into a contiguous buffer and optionally
 // uses FEC to recover lost data fragments.
 type FileReassembler struct {
-	SessionID      string
-	Filename       string
-	TotalSize      int
-	ChunkCount     int
-	ChunkSize      int
-	ExpectedCRC    uint32
-	Buffer         []byte
-	Bitmap         []byte
-	ChunksReceived int
-	fec            *FecDecoder
+	SessionID          string
+	Filename           string
+	TotalSize          int
+	ChunkCount         int
+	ChunkSize          int
+	ExpectedCRC        uint32
+	Buffer             []byte
+	Bitmap             []byte
+	ChunksReceived     int // total chunks (data + parity), for progress display
+	DataChunksReceived int // B1 fix: data-only counter, for completion check
+	fec                *FecDecoder
 }
 
 // NewFileReassembler creates a reassembler for the given transfer session.
@@ -159,34 +165,38 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 
 	if fecActive {
 		isParity := (seq % (FECGroupSize + 1)) == FECGroupSize
-		recovered := r.fec.Ingest(seq, data, isParity)
+
+		// B5 fix: Ingest returns a single recovered fragment inline
+		rec := r.fec.Ingest(seq, data, isParity)
 
 		if !isParity {
 			group := seq / (FECGroupSize + 1)
 			idxInGroup := seq % (FECGroupSize + 1)
 			dataIdx := group*FECGroupSize + idxInGroup
 			r.writeToBufferAt(dataIdx, data)
+			r.DataChunksReceived++ // B1 fix: only count data chunks
 		}
 
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
 		r.ChunksReceived++
 
-		if recovered != nil {
-			for recSeq, recData := range r.fec.recovered {
-				if r.Bitmap[recSeq/8]&(1<<uint(recSeq%8)) == 0 {
-					recGroup := recSeq / (FECGroupSize + 1)
-					recIdx := recSeq % (FECGroupSize + 1)
-					recDataIdx := recGroup*FECGroupSize + recIdx
-					r.writeToBufferAt(recDataIdx, recData)
-					r.Bitmap[recSeq/8] |= 1 << uint(recSeq%8)
-					r.ChunksReceived++
-				}
+		// B5 fix: process the single recovered fragment inline
+		if rec != nil {
+			if r.Bitmap[rec.Seq/8]&(1<<uint(rec.Seq%8)) == 0 {
+				recGroup := rec.Seq / (FECGroupSize + 1)
+				recIdx := rec.Seq % (FECGroupSize + 1)
+				recDataIdx := recGroup*FECGroupSize + recIdx
+				r.writeToBufferAt(recDataIdx, rec.Data)
+				r.Bitmap[rec.Seq/8] |= 1 << uint(rec.Seq%8)
+				r.ChunksReceived++
+				r.DataChunksReceived++ // recovered fragments are always data
 			}
 		}
 	} else {
 		r.writeToBufferAt(seq, data)
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
 		r.ChunksReceived++
+		r.DataChunksReceived++ // B1 fix: no FEC, every chunk is data
 	}
 	return true
 }
@@ -201,9 +211,10 @@ func (r *FileReassembler) writeToBufferAt(dataIdx int, data []byte) {
 }
 
 // IsComplete returns true when all data chunks have been received or recovered.
+// B1 fix: uses DataChunksReceived (excludes parity) instead of ChunksReceived.
 func (r *FileReassembler) IsComplete() bool {
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
-	return r.ChunksReceived >= dataChunkCount
+	return r.DataChunksReceived >= dataChunkCount
 }
 
 // VerifyCRC computes CRC32 of the reassembled payload and compares to expected.
@@ -298,16 +309,12 @@ func (r *FileReassembler) Save(outputDir string) (string, error) {
 }
 
 // Progress returns the fraction of data chunks received (0.0 - 1.0).
+// B6 fix: uses DataChunksReceived counter instead of scanning bitmap positions
+// that don't correspond to data seqs under FEC.
 func (r *FileReassembler) Progress() float64 {
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
 	if dataChunkCount == 0 {
 		return 0
 	}
-	received := 0
-	for seq := 0; seq < dataChunkCount; seq++ {
-		if r.Bitmap[seq/8]&(1<<uint(seq%8)) != 0 {
-			received++
-		}
-	}
-	return float64(received) / float64(dataChunkCount)
+	return float64(r.DataChunksReceived) / float64(dataChunkCount)
 }

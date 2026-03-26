@@ -94,6 +94,27 @@ func (sr *SelectiveRepeat) CheckTimeouts() {
 	}
 }
 
+// CheckStall returns missing seq numbers when no data has arrived for stallSec.
+// D1+B3 fix: enables the cloud to request retransmission for fragments lost
+// between exit node and MQTT broker (the end-to-end reliability gap).
+func (sr *SelectiveRepeat) CheckStall(lastChunkTime float64, stallSec float64) []int {
+	if sr.bitmap == nil {
+		return nil
+	}
+	now := float64(time.Now().UnixMilli()) / 1000.0
+	if now-lastChunkTime < stallSec {
+		return nil // still receiving, don't fire yet
+	}
+	const maxGaps = 32
+	var missing []int
+	for seq := sr.expectedBase; seq < sr.totalChunks && len(missing) < maxGaps; seq++ {
+		if !sr.isReceived(seq) {
+			missing = append(missing, seq)
+		}
+	}
+	return missing
+}
+
 // IsComplete returns true when every chunk has been received.
 func (sr *SelectiveRepeat) IsComplete() bool {
 	return sr.expectedBase >= sr.totalChunks
