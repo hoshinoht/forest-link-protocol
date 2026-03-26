@@ -2,7 +2,9 @@
 
 #include <cstdint>
 
-#include "ssd1306.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "lvgl.h"
 
 namespace flp
 {
@@ -33,25 +35,66 @@ class OledDisplay
 
     bool is_initialized() const { return initialized_; }
 
+    /* LVGL requires periodic ticking from the application */
+    static void tick_timer_cb(void *arg);
+
+    /* Public for flush callback access */
+    esp_lcd_panel_io_handle_t io_handle_ = nullptr;
+    esp_lcd_panel_handle_t panel_handle_ = nullptr;
+    lv_display_t *display_ = nullptr;
+    static constexpr int OLED_W = 128;
+    static constexpr int OLED_H = 64;
+    uint8_t oled_buf_[OLED_W * OLED_H / 8] = {};
+
   private:
     enum class State : uint8_t { SPLASH, STATUS, TRANSFER };
 
-    void render_splash(const NodeStatus &s);
-    void render_status(const NodeStatus &s);
-    void render_transfer(const NodeStatus &s);
-    void draw_title_bar(const char *text);
-    void draw_progress_bar(int page, uint8_t pct);
+    void create_splash_screen();
+    void create_status_screen();
+    void create_transfer_screen();
 
-    SSD1306_t dev_ = {};
+    void show_splash(const NodeStatus &s);
+    void show_status(const NodeStatus &s);
+    void show_transfer(const NodeStatus &s);
+
+    /* LVGL screens */
+    lv_obj_t *scr_splash_ = nullptr;
+    lv_obj_t *scr_status_ = nullptr;
+    lv_obj_t *scr_transfer_ = nullptr;
+
+    /* Splash screen widgets */
+    lv_obj_t *splash_addr_label_ = nullptr;
+    lv_obj_t *splash_title_label_ = nullptr;
+    lv_obj_t *splash_version_label_ = nullptr;
+
+    /* Status screen widgets */
+    lv_obj_t *status_title_label_ = nullptr;
+    lv_obj_t *status_wifi_label_ = nullptr;
+    lv_obj_t *status_mesh_label_ = nullptr;
+    lv_obj_t *status_transfer_label_ = nullptr;
+    lv_obj_t *status_cmd_label_ = nullptr;
+    lv_obj_t *status_heap_label_ = nullptr;
+    lv_obj_t *status_uptime_label_ = nullptr;
+
+    /* Transfer screen widgets */
+    lv_obj_t *xfer_title_label_ = nullptr;
+    lv_obj_t *xfer_filename_label_ = nullptr;
+    lv_obj_t *xfer_pct_label_ = nullptr;
+    lv_obj_t *xfer_bar_ = nullptr;
+    lv_obj_t *xfer_mesh_label_ = nullptr;
+    lv_obj_t *xfer_heap_label_ = nullptr;
+
     bool initialized_ = false;
-
     State state_ = State::SPLASH;
     int64_t splash_start_us_ = 0;
+    bool splash_anim_started_ = false;
     bool dimmed_ = false;
-    int scroll_offset_ = 0;
     bool transfer_was_active_ = false;
     bool show_complete_ = false;
     int64_t transfer_done_us_ = 0;
+
+    /* LVGL API mutex (LVGL is not thread-safe) */
+    static _lock_t lvgl_lock_;
 };
 
 } /* namespace flp */

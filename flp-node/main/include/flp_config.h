@@ -35,8 +35,8 @@
 #define FLP_BUTTON_TASK_PRIORITY 5
 #define FLP_BUTTON_DEBOUNCE_MS   2000
 
-/* OLED display */
-#define FLP_DISPLAY_TASK_STACK    3072
+/* OLED display — LVGL needs ~6KB+ for lv_timer_handler */
+#define FLP_DISPLAY_TASK_STACK    8192
 #define FLP_DISPLAY_TASK_PRIORITY 3
 #define FLP_DISPLAY_UPDATE_MS     500
 
