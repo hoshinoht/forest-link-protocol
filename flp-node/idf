@@ -1,14 +1,163 @@
 #!/usr/bin/env bash
 # Wrapper to source ESP-IDF environment and run idf.py commands
-# Usage: ./idf build | ./idf flash | ./idf monitor | ./idf fresh | etc.
+#
+# Two modes (determined by FLP_WIFI_DISABLED):
+#   exit node (default) — WiFi + MQTT enabled, connects to AP & cloud
+#   relay               — WiFi STA only (no AP), ESP-NOW/LoRa mesh relay
+#
+# Usage:
+#   ./idf build              Build as exit node (default)
+#   ./idf relay build        Build as relay node
+#   ./idf flash              Flash (prompts for port if not specified)
+#   ./idf flash -p /dev/...  Flash to specific port
+#   ./idf monitor            Open serial monitor
+#   ./idf fresh              Full clean + build + erase + flash
+#   ./idf relay fresh        Full clean + relay build + erase + flash
 source "$HOME/esp/esp-idf-v5.5.3/export.sh" >/dev/null 2>&1
 
-if [ "$1" = "fresh" ]; then
-    set -e
-    idf.py fullclean
-    idf.py build
-    idf.py erase-flash
-    idf.py flash "${@:2}"
+BUILD_MODE_FILE="build/.flp_mode"
+
+# ── Mode prefix ─────────────────────────────────────────────────
+MODE="exit"
+IDF_ARGS=()
+if [ "${1:-}" = "relay" ]; then
+    MODE="relay"
+    shift
+    OVERLAY="sdkconfig.defaults.relay"
+    if [ ! -f "$OVERLAY" ]; then
+        echo "Error: overlay file '$OVERLAY' not found"
+        exit 1
+    fi
+    IDF_ARGS+=(-D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;$OVERLAY")
 else
-    exec idf.py "$@"
+    # Explicitly set defaults for exit mode to override any cached
+    # relay SDKCONFIG_DEFAULTS in build/CMakeCache.txt
+    IDF_ARGS+=(-D "SDKCONFIG_DEFAULTS=sdkconfig.defaults")
 fi
+
+# Always clear cached sdkconfig on build/fresh so mode switch is clean.
+# All real config lives in sdkconfig.defaults* — nothing is lost.
+case "${1:-}" in
+    build|fresh)
+        rm -f sdkconfig
+        echo ">> Mode: $MODE"
+        ;;
+esac
+
+# ── Port picker (for flash/monitor/fresh when -p not given) ─────
+needs_port() {
+    case "${1:-}" in
+        flash|monitor|fresh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+has_port_flag() {
+    for arg in "$@"; do
+        [ "$arg" = "-p" ] || [ "$arg" = "--port" ] && return 0
+    done
+    return 1
+}
+
+pick_port() {
+    local ports=()
+    for p in /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.SLAB*; do
+        [ -e "$p" ] && ports+=("$p")
+    done
+
+    if [ ${#ports[@]} -eq 0 ]; then
+        echo "Error: No ESP32 USB serial ports found." >&2
+        exit 1
+    fi
+
+    if [ ${#ports[@]} -eq 1 ]; then
+        echo ">> Using ${ports[0]}"
+        PICKED_PORT="${ports[0]}"
+        return
+    fi
+
+    echo ""
+    echo "Multiple ports detected:"
+    for i in "${!ports[@]}"; do
+        echo "  $((i + 1))) ${ports[$i]}"
+    done
+    echo ""
+    read -rp "Select port [1-${#ports[@]}]: " choice
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#ports[@]} ]; then
+        echo "Error: Invalid selection" >&2
+        exit 1
+    fi
+
+    PICKED_PORT="${ports[$((choice - 1))]}"
+    echo ">> Using $PICKED_PORT"
+}
+
+PICKED_PORT=""
+if needs_port "$1" && ! has_port_flag "$@"; then
+    pick_port
+fi
+
+PORT_ARGS=()
+if [ -n "$PICKED_PORT" ]; then
+    PORT_ARGS+=(-p "$PICKED_PORT")
+fi
+
+# ── Show build mode on flash/monitor ────────────────────────────
+show_build_mode() {
+    if [ -f "$BUILD_MODE_FILE" ]; then
+        local built_mode
+        built_mode=$(cat "$BUILD_MODE_FILE")
+        echo ">> Binary in build/ was built as: $built_mode"
+    else
+        echo ">> Binary in build/ has unknown mode (build first to track)"
+    fi
+}
+
+save_build_mode() {
+    mkdir -p build
+    echo "$MODE" > "$BUILD_MODE_FILE"
+}
+
+# ── Kill monitor session if it would hold the port ──────────────
+kill_monitor() {
+    if command -v tmux &>/dev/null && tmux has-session -t flp-monitor 2>/dev/null; then
+        echo ">> Killing flp-monitor tmux session (port busy)..."
+        tmux kill-session -t flp-monitor
+    fi
+}
+
+case "${1:-}" in
+    flash|fresh|erase-flash)
+        kill_monitor
+        ;;
+esac
+
+# ── Run command ─────────────────────────────────────────────────
+case "${1:-}" in
+    build)
+        save_build_mode
+        exec idf.py "${IDF_ARGS[@]}" "$@"
+        ;;
+    fresh)
+        set -e
+        save_build_mode
+        idf.py "${IDF_ARGS[@]}" fullclean
+        save_build_mode
+        idf.py "${IDF_ARGS[@]}" build
+        show_build_mode
+        idf.py "${PORT_ARGS[@]}" erase-flash
+        idf.py "${PORT_ARGS[@]}" flash "${@:2}"
+        ;;
+    flash)
+        show_build_mode
+        exec idf.py "${IDF_ARGS[@]}" "${PORT_ARGS[@]}" "$@"
+        ;;
+    monitor)
+        show_build_mode
+        exec idf.py "${IDF_ARGS[@]}" "${PORT_ARGS[@]}" "$@"
+        ;;
+    *)
+        exec idf.py "${IDF_ARGS[@]}" "${PORT_ARGS[@]}" "$@"
+        ;;
+esac

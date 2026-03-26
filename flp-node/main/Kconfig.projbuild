@@ -1,12 +1,5 @@
 menu "Forest Link Protocol"
 
-    config FLP_NODE_ROLE
-        int "Node role (0=sensor, 1=relay, 2=gateway)"
-        default 0
-        range 0 2
-        help
-            Determines the default role of this node in the mesh.
-
     menu "LoRa SPI Pins (LilyGo T3-S3 V1.2 / SX1280)"
         config FLP_LORA_MOSI
             int "MOSI GPIO"

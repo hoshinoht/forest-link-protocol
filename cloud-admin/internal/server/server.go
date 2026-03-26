@@ -1,4 +1,5 @@
-package main
+// Package server provides the HTTP dashboard and REST API.
+package server
 
 import (
 	"context"
@@ -15,15 +16,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"flp-admin/internal/metrics"
+	"flp-admin/internal/mqtt"
+	"flp-admin/internal/topology"
+	"flp-admin/internal/transfer"
 )
 
-//go:embed static
-var staticFS embed.FS
+// Assets must be set by the main package before calling Start.
+var (
+	StaticFS    embed.FS
+	BenchmarkFS embed.FS
+)
 
-//go:embed benchmarks
-var benchmarkFS embed.FS
-
-// jsonResponse writes data as JSON with the appropriate Content-Type header.
 func jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(data); err != nil {
@@ -31,14 +36,12 @@ func jsonResponse(w http.ResponseWriter, data interface{}) {
 	}
 }
 
-// errorResponse writes an error JSON response with the given HTTP status code.
 func errorResponse(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// basicAuth wraps a handler with HTTP Basic Authentication.
 func basicAuth(next http.Handler, password string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pass, ok := r.BasicAuth()
@@ -51,17 +54,15 @@ func basicAuth(next http.Handler, password string) http.Handler {
 	})
 }
 
-// StartHTTPServer registers HTTP handlers and runs the server until ctx is cancelled.
-func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, metrics *MetricsStore, mqttClient *MQTTClient, progress *TransferProgress, adminPass string) {
+// Start registers HTTP handlers and runs the server until ctx is cancelled.
+func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metrics.Store, mqttClient *mqtt.Client, progress *transfer.Progress, adminPass string) {
 	mux := http.NewServeMux()
 
-	// GET / — serve static/index.html (and other static assets)
-	staticSub, err := fs.Sub(staticFS, "static")
+	staticSub, err := fs.Sub(StaticFS, "static")
 	if err != nil {
 		log.Fatalf("[http] failed to create static sub-fs: %v", err)
 	}
-	fileServer := http.FileServer(http.FS(staticSub))
-	mux.Handle("/", fileServer)
+	mux.Handle("/", http.FileServer(http.FS(staticSub)))
 
 	// GET /api/topology
 	mux.HandleFunc("/api/topology", func(w http.ResponseWriter, r *http.Request) {
@@ -93,8 +94,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 				rangeSec = parsed
 			}
 		}
-		if metrics != nil {
-			data, err := metrics.QueryNode(nodeID, rangeSec)
+		if store != nil {
+			data, err := store.QueryNode(nodeID, rangeSec)
 			if err != nil {
 				errorResponse(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -111,8 +112,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if metrics != nil {
-			data, err := metrics.QueryTransfers()
+		if store != nil {
+			data, err := store.QueryTransfers()
 			if err != nil {
 				errorResponse(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -140,8 +141,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 				rangeSec = parsed
 			}
 		}
-		if metrics != nil {
-			data, err := metrics.QueryHeap(nodeID, rangeSec)
+		if store != nil {
+			data, err := store.QueryHeap(nodeID, rangeSec)
 			if err != nil {
 				errorResponse(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -163,8 +164,6 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			errorResponse(w, "node_id required", http.StatusBadRequest)
 			return
 		}
-
-		// Validate node_id: must be hex, 1-4 chars
 		if len(nodeID) < 1 || len(nodeID) > 4 {
 			errorResponse(w, "node_id must be 1-4 hex characters", http.StatusBadRequest)
 			return
@@ -203,12 +202,11 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			}
 			dataBytes, err = hex.DecodeString(hexStr)
 			if err != nil {
-				errorResponse(w, "data must be valid hex (e.g. 'F', '1A2B')", http.StatusBadRequest)
+				errorResponse(w, "data must be valid hex", http.StatusBadRequest)
 				return
 			}
 		}
 
-		// Build binary: [target:2LE][cmd_id:1][data:N]
 		payload := make([]byte, 3+len(dataBytes))
 		binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
 		payload[2] = byte(cmdID)
@@ -229,8 +227,6 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			errorResponse(w, "node_id required", http.StatusBadRequest)
 			return
 		}
-
-		// Validate node_id: must be hex, 1-4 chars
 		if len(nodeID) < 1 || len(nodeID) > 4 {
 			errorResponse(w, "node_id must be 1-4 hex characters", http.StatusBadRequest)
 			return
@@ -268,13 +264,12 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			}
 			dataBytes, err = hex.DecodeString(hexStr)
 			if err != nil {
-				errorResponse(w, "data must be valid hex (e.g. 'F', '1A2B')", http.StatusBadRequest)
+				errorResponse(w, "data must be valid hex", http.StatusBadRequest)
 				return
 			}
 		}
 
 		topicBytes := []byte(body.Topic)
-		// Build binary: [target:2LE][cmd_id=0x10:1][topic_len:1][topic:N][payload:M]
 		payload := make([]byte, 4+len(topicBytes)+len(dataBytes))
 		binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
 		payload[2] = 0x10
@@ -292,8 +287,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if metrics != nil {
-			data, err := metrics.QueryBenchmarks()
+		if store != nil {
+			data, err := store.QueryBenchmarks()
 			if err != nil {
 				errorResponse(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -313,10 +308,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 
 		var benchmarks []interface{}
 
-		// Read benchmark JSON files from embedded FS
-		entries, err := benchmarkFS.ReadDir("benchmarks")
+		entries, err := BenchmarkFS.ReadDir("benchmarks")
 		if err == nil {
-			// Sort entries by name for deterministic order
 			sort.Slice(entries, func(i, j int) bool {
 				return entries[i].Name() < entries[j].Name()
 			})
@@ -324,7 +317,7 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 					continue
 				}
-				data, err := benchmarkFS.ReadFile("benchmarks/" + entry.Name())
+				data, err := BenchmarkFS.ReadFile("benchmarks/" + entry.Name())
 				if err != nil {
 					log.Printf("[http] failed to read benchmark %s: %v", entry.Name(), err)
 					continue
@@ -338,9 +331,8 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			}
 		}
 
-		// Prepend FLP derived metrics if available
-		if metrics != nil {
-			flp, err := metrics.DerivedMetrics()
+		if store != nil {
+			flp, err := store.DerivedMetrics()
 			if err != nil {
 				log.Printf("[http] derived metrics error: %v", err)
 			} else if flp != nil {
@@ -379,10 +371,9 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 			}
 			payload := make([]byte, 3)
 			binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
-			payload[2] = 0x01 // REQUEST_TELEMETRY
+			payload[2] = 0x01
 			mqttClient.PublishCmd(payload)
 		}
-		// Broadcast to 0xFFFF for undiscovered nodes
 		bcast := []byte{0xFF, 0xFF, 0x01}
 		mqttClient.PublishCmd(bcast)
 

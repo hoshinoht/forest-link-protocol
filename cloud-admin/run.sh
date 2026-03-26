@@ -10,6 +10,6 @@ case "${1:-up}" in
   up)     docker compose up --build -d && echo "Dashboard: http://localhost:5050" ;;
   down)   docker compose down ;;
   logs)   docker compose logs -f admin ;;
-  build)  go build -o flp-admin . && echo "Built ./flp-admin" ;;
+  build)  go build -o flp-admin ./cmd/flp-admin && echo "Built ./flp-admin" ;;
   *)      echo "Usage: ./run.sh [up|down|logs|build]" ;;
 esac

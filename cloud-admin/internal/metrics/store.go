@@ -1,4 +1,5 @@
-package main
+// Package metrics provides SQLite-backed telemetry storage.
+package metrics
 
 import (
 	"database/sql"
@@ -10,15 +11,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// MetricsStore provides telemetry storage backed by SQLite.
+// Store provides telemetry storage backed by SQLite.
 // It maintains separate write and read connections for concurrent access.
-type MetricsStore struct {
+type Store struct {
 	writeDB *sql.DB
 	readDB  *sql.DB
 }
 
-// NewMetricsStore opens write and read connections to dbPath and initialises tables/indexes.
-func NewMetricsStore(dbPath string) (*MetricsStore, error) {
+// NewStore opens write and read connections to dbPath and initialises tables/indexes.
+func NewStore(dbPath string) (*Store, error) {
 	writeDB, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open write db: %w", err)
@@ -31,7 +32,7 @@ func NewMetricsStore(dbPath string) (*MetricsStore, error) {
 		return nil, fmt.Errorf("open read db: %w", err)
 	}
 
-	m := &MetricsStore{writeDB: writeDB, readDB: readDB}
+	m := &Store{writeDB: writeDB, readDB: readDB}
 	if err := m.initDB(); err != nil {
 		writeDB.Close()
 		readDB.Close()
@@ -40,7 +41,7 @@ func NewMetricsStore(dbPath string) (*MetricsStore, error) {
 	return m, nil
 }
 
-func (m *MetricsStore) initDB() error {
+func (m *Store) initDB() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS node_metrics (
 			timestamp REAL, node_id TEXT, transport TEXT,
@@ -78,13 +79,14 @@ func (m *MetricsStore) initDB() error {
 	return nil
 }
 
-// RecordNode parses a 48-byte payload containing BLE and LoRa counters and inserts two rows.
-func (m *MetricsStore) RecordNode(nodeID string, payload []byte) error {
+// RecordNode parses a 48-byte payload containing ESP-NOW and LoRa counters
+// and inserts two rows.
+func (m *Store) RecordNode(nodeID string, payload []byte) error {
 	if len(payload) < 48 {
 		return nil
 	}
 	now := float64(time.Now().UnixMilli()) / 1000.0
-	transports := []string{"BLE", "LoRa"}
+	transports := []string{"ESP-NOW", "LoRa"}
 
 	tx, err := m.writeDB.Begin()
 	if err != nil {
@@ -114,7 +116,7 @@ func (m *MetricsStore) RecordNode(nodeID string, payload []byte) error {
 }
 
 // RecordHeap parses a 20-byte payload of heap statistics and inserts one row.
-func (m *MetricsStore) RecordHeap(nodeID string, payload []byte) error {
+func (m *Store) RecordHeap(nodeID string, payload []byte) error {
 	if len(payload) < 20 {
 		return nil
 	}
@@ -132,72 +134,42 @@ func (m *MetricsStore) RecordHeap(nodeID string, payload []byte) error {
 	return err
 }
 
+// TransferRecord holds the data needed to record a completed transfer.
+type TransferRecord struct {
+	SessionID    string
+	NodeID       string
+	Filename     string
+	TotalSize    int
+	ChunkCount   int
+	FragmentSize int
+	StartedAt    float64
+	CompletedAt  float64
+	ExitNodes    map[string]bool
+}
+
 // RecordTransfer records a completed file transfer, computing goodput.
-func (m *MetricsStore) RecordTransfer(session *TransferSession, retransmits int) error {
-	elapsed := session.CompletedAt - session.StartedAt
+func (m *Store) RecordTransfer(r *TransferRecord, retransmits int) error {
+	elapsed := r.CompletedAt - r.StartedAt
 	var goodput float64
 	if elapsed > 0 {
-		goodput = float64(session.TotalSize) * 8.0 / elapsed
+		goodput = float64(r.TotalSize) * 8.0 / elapsed
 	}
 	_, err := m.writeDB.Exec(
 		"INSERT INTO transfer_metrics VALUES (?,?,?,?,?,?,?)",
-		session.SessionID, session.StartedAt, session.CompletedAt,
-		session.TotalSize, session.ChunkCount, retransmits, goodput,
+		r.SessionID, r.StartedAt, r.CompletedAt,
+		r.TotalSize, r.ChunkCount, retransmits, goodput,
 	)
 	return err
 }
 
-// QueryNode returns node metrics for the given node within the last rangeSec seconds.
-func (m *MetricsStore) QueryNode(nodeID string, rangeSec int) ([]map[string]interface{}, error) {
-	since := float64(time.Now().UnixMilli())/1000.0 - float64(rangeSec)
-	rows, err := m.readDB.Query(
-		"SELECT timestamp, node_id, transport, tx, rx, fail, retransmit, latency_ms, duty_cycle_ms FROM node_metrics WHERE node_id=? AND timestamp>? ORDER BY timestamp",
-		nodeID, since,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRows(rows)
-}
-
-// QueryHeap returns heap metrics for the given node within the last rangeSec seconds.
-func (m *MetricsStore) QueryHeap(nodeID string, rangeSec int) ([]map[string]interface{}, error) {
-	since := float64(time.Now().UnixMilli())/1000.0 - float64(rangeSec)
-	rows, err := m.readDB.Query(
-		"SELECT timestamp, node_id, free_internal, free_psram, min_internal, min_psram, largest_block FROM heap_metrics WHERE node_id=? AND timestamp>? ORDER BY timestamp",
-		nodeID, since,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRows(rows)
-}
-
-// QueryTransfers returns the 100 most recent transfer records.
-func (m *MetricsStore) QueryTransfers() ([]map[string]interface{}, error) {
-	rows, err := m.readDB.Query(
-		"SELECT session_id, start, end, size_bytes, chunks, retransmits, goodput_bps FROM transfer_metrics ORDER BY start DESC LIMIT 100",
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRows(rows)
-}
-
 // RecordBenchmark snapshots a self-contained benchmark row from a completed transfer.
-// PDR and latency are captured from the current node_metrics so the benchmark
-// row remains valid after the ephemeral telemetry is cleaned up.
-func (m *MetricsStore) RecordBenchmark(session *TransferSession, retransmits int) error {
-	elapsed := session.CompletedAt - session.StartedAt
+func (m *Store) RecordBenchmark(r *TransferRecord, retransmits int) error {
+	elapsed := r.CompletedAt - r.StartedAt
 	var goodput float64
 	if elapsed > 0 {
-		goodput = float64(session.TotalSize) * 8.0 / elapsed
+		goodput = float64(r.TotalSize) * 8.0 / elapsed
 	}
 
-	// Snapshot PDR from node_metrics.
 	var totalTx, totalFail sql.NullInt64
 	var avgLatency sql.NullFloat64
 	_ = m.readDB.QueryRow(
@@ -219,16 +191,56 @@ func (m *MetricsStore) RecordBenchmark(session *TransferSession, retransmits int
 			(session_id, timestamp, filename, file_size, chunk_count, fragment_size,
 			 duration_sec, goodput_bps, retransmits, exit_node_count, pdr, latency_ms, range_m, notes)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		session.SessionID, now, session.Filename, session.TotalSize,
-		session.ChunkCount, session.FragmentSize, elapsed, goodput,
-		retransmits, len(session.ExitNodes), pdr, lat, 1000,
+		r.SessionID, now, r.Filename, r.TotalSize,
+		r.ChunkCount, r.FragmentSize, elapsed, goodput,
+		retransmits, len(r.ExitNodes), pdr, lat, 1000,
 		"Auto-captured from live transfer",
 	)
 	return err
 }
 
+// QueryNode returns node metrics for the given node within the last rangeSec seconds.
+func (m *Store) QueryNode(nodeID string, rangeSec int) ([]map[string]interface{}, error) {
+	since := float64(time.Now().UnixMilli())/1000.0 - float64(rangeSec)
+	rows, err := m.readDB.Query(
+		"SELECT timestamp, node_id, transport, tx, rx, fail, retransmit, latency_ms, duty_cycle_ms FROM node_metrics WHERE node_id=? AND timestamp>? ORDER BY timestamp",
+		nodeID, since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// QueryHeap returns heap metrics for the given node within the last rangeSec seconds.
+func (m *Store) QueryHeap(nodeID string, rangeSec int) ([]map[string]interface{}, error) {
+	since := float64(time.Now().UnixMilli())/1000.0 - float64(rangeSec)
+	rows, err := m.readDB.Query(
+		"SELECT timestamp, node_id, free_internal, free_psram, min_internal, min_psram, largest_block FROM heap_metrics WHERE node_id=? AND timestamp>? ORDER BY timestamp",
+		nodeID, since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// QueryTransfers returns the 100 most recent transfer records.
+func (m *Store) QueryTransfers() ([]map[string]interface{}, error) {
+	rows, err := m.readDB.Query(
+		"SELECT session_id, start, end, size_bytes, chunks, retransmits, goodput_bps FROM transfer_metrics ORDER BY start DESC LIMIT 100",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
 // QueryBenchmarks returns all persistent benchmark rows, newest first.
-func (m *MetricsStore) QueryBenchmarks() ([]map[string]interface{}, error) {
+func (m *Store) QueryBenchmarks() ([]map[string]interface{}, error) {
 	rows, err := m.readDB.Query(
 		`SELECT id, session_id, timestamp, filename, file_size, chunk_count, fragment_size,
 			duration_sec, goodput_bps, retransmits, exit_node_count, pdr, latency_ms, range_m, notes
@@ -242,7 +254,7 @@ func (m *MetricsStore) QueryBenchmarks() ([]map[string]interface{}, error) {
 }
 
 // DerivedMetrics computes aggregate protocol metrics from persistent benchmark_results.
-func (m *MetricsStore) DerivedMetrics() (map[string]interface{}, error) {
+func (m *Store) DerivedMetrics() (map[string]interface{}, error) {
 	var avgGoodput, avgPDR, avgLatency sql.NullFloat64
 	var count int64
 	err := m.readDB.QueryRow(
@@ -275,7 +287,7 @@ func (m *MetricsStore) DerivedMetrics() (map[string]interface{}, error) {
 }
 
 // Cleanup deletes metrics older than 24 hours.
-func (m *MetricsStore) Cleanup() error {
+func (m *Store) Cleanup() error {
 	cutoff := float64(time.Now().UnixMilli())/1000.0 - 86400
 	for _, table := range []string{"node_metrics", "heap_metrics"} {
 		if _, err := m.writeDB.Exec(
@@ -291,7 +303,7 @@ func (m *MetricsStore) Cleanup() error {
 }
 
 // Close closes both database connections.
-func (m *MetricsStore) Close() error {
+func (m *Store) Close() error {
 	wErr := m.writeDB.Close()
 	rErr := m.readDB.Close()
 	if wErr != nil {

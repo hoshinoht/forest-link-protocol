@@ -1,4 +1,4 @@
-package main
+package transfer
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// FecDecoder
+// FEC decoder
 // ---------------------------------------------------------------------------
 
 type fecSlot struct {
@@ -23,14 +23,14 @@ type fecSlot struct {
 }
 
 type fecGroup struct {
-	slots [FECGroupSize + 1]fecSlot // indices 0..FECGroupSize; last is parity
+	slots [FECGroupSize + 1]fecSlot
 	count int
 }
 
 // FecDecoder accumulates chunks and attempts single-erasure recovery per group.
 type FecDecoder struct {
 	groups    map[int]*fecGroup
-	recovered map[int][]byte // seq → recovered data
+	recovered map[int][]byte
 }
 
 // NewFecDecoder creates a new decoder.
@@ -41,8 +41,7 @@ func NewFecDecoder() *FecDecoder {
 	}
 }
 
-// Ingest stores a chunk (data or parity) and attempts recovery when the group
-// has exactly FECGroupSize slots filled.
+// Ingest stores a chunk and attempts recovery.
 func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) []byte {
 	groupID := seq / (FECGroupSize + 1)
 	idx := seq % (FECGroupSize + 1)
@@ -54,7 +53,7 @@ func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) []byte {
 	}
 
 	if g.slots[idx].present {
-		return nil // duplicate
+		return nil
 	}
 
 	buf := make([]byte, len(data))
@@ -68,27 +67,20 @@ func (f *FecDecoder) Ingest(seq int, data []byte, isParity bool) []byte {
 	return nil
 }
 
-// tryRecover attempts to XOR-recover the single missing slot.
 func (f *FecDecoder) tryRecover(g *fecGroup, groupID int) []byte {
 	missing := -1
 	for i := 0; i <= FECGroupSize; i++ {
 		if !g.slots[i].present {
 			if missing != -1 {
-				return nil // more than one missing
+				return nil
 			}
 			missing = i
 		}
 	}
-	if missing == -1 {
-		return nil // nothing to recover
-	}
-
-	// If the missing slot is the parity slot, we don't need to recover it.
-	if missing == FECGroupSize {
+	if missing == -1 || missing == FECGroupSize {
 		return nil
 	}
 
-	// Determine max length across present slots.
 	maxLen := 0
 	for i := 0; i <= FECGroupSize; i++ {
 		if g.slots[i].present && len(g.slots[i].data) > maxLen {
@@ -133,7 +125,7 @@ type FileReassembler struct {
 	fec            *FecDecoder
 }
 
-// NewFileReassembler creates a reassembler for the given transfer session parameters.
+// NewFileReassembler creates a reassembler for the given transfer session.
 func NewFileReassembler(sessionID, filename string, totalSize, chunkCount int, expectedCRC uint32, fragmentSize int) *FileReassembler {
 	cs := fragmentSize
 	if cs <= 0 {
@@ -152,14 +144,12 @@ func NewFileReassembler(sessionID, filename string, totalSize, chunkCount int, e
 	}
 }
 
-// WriteChunk writes a chunk at the given sequence number. Returns true if the
-// chunk was new (not a duplicate).
+// WriteChunk writes a chunk at the given sequence number. Returns true if new.
 func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 	if seq < 0 || seq >= r.ChunkCount {
 		return false
 	}
 
-	// Check duplicate.
 	if r.Bitmap[seq/8]&(1<<uint(seq%8)) != 0 {
 		return false
 	}
@@ -172,18 +162,15 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 		recovered := r.fec.Ingest(seq, data, isParity)
 
 		if !isParity {
-			// Map seq to data index (skip parity slots in sequence)
 			group := seq / (FECGroupSize + 1)
 			idxInGroup := seq % (FECGroupSize + 1)
 			dataIdx := group*FECGroupSize + idxInGroup
 			r.writeToBufferAt(dataIdx, data)
 		}
 
-		// Mark this seq as received.
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
 		r.ChunksReceived++
 
-		// If FEC recovered a chunk, write it too.
 		if recovered != nil {
 			for recSeq, recData := range r.fec.recovered {
 				if r.Bitmap[recSeq/8]&(1<<uint(recSeq%8)) == 0 {
@@ -197,7 +184,6 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 			}
 		}
 	} else {
-		// No FEC — straight write.
 		r.writeToBufferAt(seq, data)
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
 		r.ChunksReceived++
@@ -205,7 +191,6 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 	return true
 }
 
-// writeToBufferAt copies chunk data into the buffer at the given data-index offset.
 func (r *FileReassembler) writeToBufferAt(dataIdx int, data []byte) {
 	offset := dataIdx * r.ChunkSize
 	end := offset + len(data)
@@ -215,9 +200,7 @@ func (r *FileReassembler) writeToBufferAt(dataIdx int, data []byte) {
 	copy(r.Buffer[offset:end], data)
 }
 
-// IsComplete returns true when all data chunks have been received (or recovered).
-// Fix: compare against data chunk count, not total chunk count (which includes
-// FEC parity chunks).
+// IsComplete returns true when all data chunks have been received or recovered.
 func (r *FileReassembler) IsComplete() bool {
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
 	return r.ChunksReceived >= dataChunkCount
@@ -241,7 +224,6 @@ func (r *FileReassembler) DiagnoseCRC() {
 	fmt.Printf("[diag] DataChunkCount=%d FECActive=%v\n",
 		dataChunkCount, r.ChunkCount > dataChunkCount)
 
-	// Check bitmap — which data seqs are present?
 	missing := []int{}
 	for seq := 0; seq < r.ChunkCount; seq++ {
 		if r.Bitmap[seq/8]&(1<<uint(seq%8)) == 0 {
@@ -254,7 +236,6 @@ func (r *FileReassembler) DiagnoseCRC() {
 		fmt.Printf("[diag] All %d seqs received\n", r.ChunkCount)
 	}
 
-	// Check for zero-filled gaps in the buffer (indicates missing data)
 	zeroRuns := 0
 	for i := 0; i < r.TotalSize; i += r.ChunkSize {
 		end := i + r.ChunkSize
@@ -277,21 +258,18 @@ func (r *FileReassembler) DiagnoseCRC() {
 		fmt.Printf("[diag] No zero-filled gaps in buffer\n")
 	}
 
-	// Print first 64 bytes
 	n := 64
 	if n > r.TotalSize {
 		n = r.TotalSize
 	}
 	fmt.Printf("[diag] First %d bytes: %q\n", n, r.Buffer[:n])
 
-	// Print expected pattern for fallback payload (A-Z repeating)
 	expected := make([]byte, n)
 	for i := 0; i < n; i++ {
 		expected[i] = byte('A' + (i % 26))
 	}
 	fmt.Printf("[diag] Expected first %d: %q\n", n, expected)
 
-	// Find first mismatch
 	for i := 0; i < r.TotalSize; i++ {
 		exp := byte('A' + (i % 26))
 		if r.Buffer[i] != exp {
@@ -307,8 +285,7 @@ func (r *FileReassembler) DiagnoseCRC() {
 	}
 }
 
-// Save writes the reassembled file to outputDir/<filename> and returns the
-// full path.
+// Save writes the reassembled file to outputDir/<filename>.
 func (r *FileReassembler) Save(outputDir string) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
@@ -320,7 +297,7 @@ func (r *FileReassembler) Save(outputDir string) (string, error) {
 	return path, nil
 }
 
-// Progress returns the fraction of data chunks received (0.0 – 1.0).
+// Progress returns the fraction of data chunks received (0.0 - 1.0).
 func (r *FileReassembler) Progress() float64 {
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
 	if dataChunkCount == 0 {
