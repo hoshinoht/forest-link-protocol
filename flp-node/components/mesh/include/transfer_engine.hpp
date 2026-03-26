@@ -179,6 +179,9 @@ class TransferEngine
 
   private:
     void transfer_tick();
+    void tick_local_exit_arq();
+    void tick_mesh_arq();
+    void compact_retx_queue(uint8_t sent);
     void broadcast_retry_tick(uint32_t now_ms);
     void election_timeout_tick(uint32_t now_ms);
     void exit_node_health_tick(uint32_t now_ms);

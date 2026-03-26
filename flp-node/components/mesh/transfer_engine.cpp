@@ -518,174 +518,199 @@ void TransferEngine::transfer_tick()
         return;
     }
 
-    /* Local-exit selective-repeat ARQ: sliding window with cloud ACK/NACK */
     if (local_exit_)
     {
-        /* 1. Drain cloud ACKs — mark in bitmap, advance base */
-        if (drain_cloud_ack_fn_)
+        tick_local_exit_arq();
+    }
+    else
+    {
+        tick_mesh_arq();
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Local-exit selective-repeat ARQ: sliding window with cloud ACK/NACK.
+ * Source node has internet + MQTT — fragments go directly to broker.
+ * ----------------------------------------------------------------------- */
+void TransferEngine::tick_local_exit_arq()
+{
+    /* 1. Drain cloud ACKs — mark in bitmap, advance base */
+    if (drain_cloud_ack_fn_)
+    {
+        uint16_t ack_seq = 0;
+        while (drain_cloud_ack_fn_(ack_seq))
         {
-            uint16_t ack_seq = 0;
-            while (drain_cloud_ack_fn_(ack_seq))
+            if (ack_seq < transfer_.fragment_count)
             {
-                if (ack_seq < transfer_.fragment_count)
-                {
-                    cloud_ack_bitmap_[ack_seq / 8] |=
-                        static_cast<uint8_t>(1U << (ack_seq % 8));
-                    ESP_LOGD(TAG, "Cloud ACK: seq=%u", ack_seq);
-                }
+                cloud_ack_bitmap_[ack_seq / 8] |=
+                    static_cast<uint8_t>(1U << (ack_seq % 8));
+                ESP_LOGD(TAG, "Cloud ACK: seq=%u", ack_seq);
             }
         }
+    }
 
-        /* Advance base past contiguously ACK'd fragments */
-        while (cloud_base_seq_ < transfer_.fragment_count)
+    /* Advance base past contiguously ACK'd fragments */
+    while (cloud_base_seq_ < transfer_.fragment_count)
+    {
+        uint16_t s = cloud_base_seq_;
+        if (cloud_ack_bitmap_[s / 8] & (1U << (s % 8)))
         {
-            uint16_t s = cloud_base_seq_;
-            if (cloud_ack_bitmap_[s / 8] & (1U << (s % 8)))
-            {
-                cloud_base_seq_++;
-            }
-            else
-            {
-                break;
-            }
+            cloud_base_seq_++;
         }
-
-        /* 2. Drain cloud NACKs — enqueue for retransmission */
-        if (drain_cloud_nack_fn_)
+        else
         {
-            uint16_t nack_seq = 0;
-            while (drain_cloud_nack_fn_(nack_seq))
-            {
-                if (nack_seq >= transfer_.fragment_count)
-                {
-                    continue;
-                }
-                /* Only retransmit if not already ACK'd */
-                if (cloud_ack_bitmap_[nack_seq / 8] & (1U << (nack_seq % 8)))
-                {
-                    continue;
-                }
-                /* Avoid duplicates in retransmit queue */
-                bool already_queued = false;
-                for (uint8_t i = 0; i < cloud_retx_count_; i++)
-                {
-                    if (cloud_retx_queue_[i] == nack_seq)
-                    {
-                        already_queued = true;
-                        break;
-                    }
-                }
-                if (!already_queued &&
-                    cloud_retx_count_ < CLOUD_RETX_QUEUE_SIZE)
-                {
-                    cloud_retx_queue_[cloud_retx_count_++] = nack_seq;
-                    ESP_LOGI(TAG, "Cloud NACK: queued retx seq=%u", nack_seq);
-                }
-            }
+            break;
         }
+    }
 
-        /* 3. Send retransmissions first (priority over new fragments) */
-        uint8_t sent = 0;
-        for (uint8_t i = 0; i < cloud_retx_count_ && sent < CLOUD_WINDOW_SIZE;
-             i++)
+    /* 2. Drain cloud NACKs — enqueue for retransmission */
+    if (drain_cloud_nack_fn_)
+    {
+        uint16_t nack_seq = 0;
+        while (drain_cloud_nack_fn_(nack_seq))
         {
-            uint16_t seq = cloud_retx_queue_[i];
-            /* Skip if already ACK'd in the meantime */
-            if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+            if (nack_seq >= transfer_.fragment_count)
             {
                 continue;
             }
-
-            size_t offset =
-                static_cast<size_t>(seq) * transfer_.fragment_size;
-            size_t remain = transfer_.size - offset;
-            size_t frag_len = (remain < transfer_.fragment_size)
-                                  ? remain
-                                  : transfer_.fragment_size;
-
-            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
-            if (!forward_to_mqtt_fn_ ||
-                !forward_to_mqtt_fn_(transfer_.session_id,
-                                     seq,
-                                     my_addr_,
-                                     frag_buf_,
-                                     got,
-                                     transfer_.filename))
+            /* Only retransmit if not already ACK'd */
+            if (cloud_ack_bitmap_[nack_seq / 8] & (1U << (nack_seq % 8)))
             {
-                break; /* queue full or no callback, retry next tick */
+                continue;
             }
-            ESP_LOGI(TAG, "Retransmitted seq=%u", seq);
-            sent++;
-        }
-        /* Remove sent retransmissions from queue (keep unsent ones) */
-        {
-            uint8_t kept = 0;
-            uint8_t skip = 0;
+            /* Avoid duplicates in retransmit queue */
+            bool already_queued = false;
             for (uint8_t i = 0; i < cloud_retx_count_; i++)
             {
-                uint16_t seq = cloud_retx_queue_[i];
-                if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+                if (cloud_retx_queue_[i] == nack_seq)
                 {
-                    continue; /* ACK'd, drop */
+                    already_queued = true;
+                    break;
                 }
-                if (skip < sent)
-                {
-                    skip++; /* was retransmitted this tick, drop from queue */
-                    continue;
-                }
-                cloud_retx_queue_[kept++] = seq;
             }
-            cloud_retx_count_ = kept;
-        }
-
-        /* 4. Send new fragments if window not full */
-        uint16_t window_end = cloud_base_seq_ + CLOUD_WINDOW_SIZE;
-        while (cloud_next_send_ < transfer_.fragment_count &&
-               cloud_next_send_ < window_end &&
-               sent < CLOUD_WINDOW_SIZE)
-        {
-            uint16_t seq = cloud_next_send_;
-            size_t offset =
-                static_cast<size_t>(seq) * transfer_.fragment_size;
-            size_t remain = transfer_.size - offset;
-            size_t frag_len = (remain < transfer_.fragment_size)
-                                  ? remain
-                                  : transfer_.fragment_size;
-
-            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
-            if (!forward_to_mqtt_fn_ ||
-                !forward_to_mqtt_fn_(transfer_.session_id,
-                                     seq,
-                                     my_addr_,
-                                     frag_buf_,
-                                     got,
-                                     transfer_.filename))
+            if (!already_queued &&
+                cloud_retx_count_ < CLOUD_RETX_QUEUE_SIZE)
             {
-                break; /* queue full or no callback, retry next tick */
+                cloud_retx_queue_[cloud_retx_count_++] = nack_seq;
+                ESP_LOGI(TAG, "Cloud NACK: queued retx seq=%u", nack_seq);
             }
-            cloud_next_send_++;
-            sent++;
         }
-
-        /* 5. Check completion: all fragments ACK'd */
-        if (cloud_base_seq_ >= transfer_.fragment_count)
-        {
-            ESP_LOGI(TAG,
-                     "Local-exit transfer complete (all ACK'd): %s",
-                     transfer_.filename);
-            transfer_.active = false;
-            transfer_.read_chunk = nullptr;
-            local_exit_ = false;
-            /* Reset cloud ARQ state */
-            memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
-            cloud_base_seq_ = 0;
-            cloud_next_send_ = 0;
-            cloud_retx_count_ = 0;
-            xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
-        }
-        return;
     }
 
+    /* 3. Send retransmissions first (priority over new fragments) */
+    uint8_t sent = 0;
+    for (uint8_t i = 0; i < cloud_retx_count_ && sent < CLOUD_WINDOW_SIZE;
+         i++)
+    {
+        uint16_t seq = cloud_retx_queue_[i];
+        /* Skip if already ACK'd in the meantime */
+        if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+        {
+            continue;
+        }
+
+        size_t offset =
+            static_cast<size_t>(seq) * transfer_.fragment_size;
+        size_t remain = transfer_.size - offset;
+        size_t frag_len = (remain < transfer_.fragment_size)
+                              ? remain
+                              : transfer_.fragment_size;
+
+        size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+        if (!forward_to_mqtt_fn_ ||
+            !forward_to_mqtt_fn_(transfer_.session_id,
+                                 seq,
+                                 my_addr_,
+                                 frag_buf_,
+                                 got,
+                                 transfer_.filename))
+        {
+            break; /* queue full or no callback, retry next tick */
+        }
+        ESP_LOGI(TAG, "Retransmitted seq=%u", seq);
+        sent++;
+    }
+    compact_retx_queue(sent);
+
+    /* 4. Send new fragments if window not full */
+    uint16_t window_end = cloud_base_seq_ + CLOUD_WINDOW_SIZE;
+    while (cloud_next_send_ < transfer_.fragment_count &&
+           cloud_next_send_ < window_end &&
+           sent < CLOUD_WINDOW_SIZE)
+    {
+        uint16_t seq = cloud_next_send_;
+        size_t offset =
+            static_cast<size_t>(seq) * transfer_.fragment_size;
+        size_t remain = transfer_.size - offset;
+        size_t frag_len = (remain < transfer_.fragment_size)
+                              ? remain
+                              : transfer_.fragment_size;
+
+        size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+        if (!forward_to_mqtt_fn_ ||
+            !forward_to_mqtt_fn_(transfer_.session_id,
+                                 seq,
+                                 my_addr_,
+                                 frag_buf_,
+                                 got,
+                                 transfer_.filename))
+        {
+            break; /* queue full or no callback, retry next tick */
+        }
+        cloud_next_send_++;
+        sent++;
+    }
+
+    /* 5. Check completion: all fragments ACK'd */
+    if (cloud_base_seq_ >= transfer_.fragment_count)
+    {
+        ESP_LOGI(TAG,
+                 "Local-exit transfer complete (all ACK'd): %s",
+                 transfer_.filename);
+        transfer_.active = false;
+        transfer_.read_chunk = nullptr;
+        local_exit_ = false;
+        /* Reset cloud ARQ state */
+        memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
+        cloud_base_seq_ = 0;
+        cloud_next_send_ = 0;
+        cloud_retx_count_ = 0;
+        xEventGroupSetBits(events_, FLP_EVT_TRANSFER_COMPLETE);
+    }
+}
+
+/*
+ * Remove sent retransmissions from the cloud retx queue.
+ * Entries that have been ACK'd or retransmitted this tick are dropped;
+ * unsent entries are compacted toward the front.
+ */
+void TransferEngine::compact_retx_queue(uint8_t sent)
+{
+    uint8_t kept = 0;
+    uint8_t skip = 0;
+    for (uint8_t i = 0; i < cloud_retx_count_; i++)
+    {
+        uint16_t seq = cloud_retx_queue_[i];
+        if (cloud_ack_bitmap_[seq / 8] & (1U << (seq % 8)))
+        {
+            continue; /* ACK'd, drop */
+        }
+        if (skip < sent)
+        {
+            skip++; /* was retransmitted this tick, drop from queue */
+            continue;
+        }
+        cloud_retx_queue_[kept++] = seq;
+    }
+    cloud_retx_count_ = kept;
+}
+
+/* --------------------------------------------------------------------------
+ * Mesh-path multi-exit round-robin: feed fragments across alive exit nodes
+ * via SelectiveRepeat ARQ over the mesh network.
+ * ----------------------------------------------------------------------- */
+void TransferEngine::tick_mesh_arq()
+{
     if (transfer_.exit_node_count == 0)
     {
         return;
