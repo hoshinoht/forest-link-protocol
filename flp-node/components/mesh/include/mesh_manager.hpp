@@ -213,9 +213,11 @@ class MeshManager
     /* Fix 7: deferred ESP-NOW peer update flag (set from WiFi event task) */
     std::atomic<bool> espnow_peer_update_pending_{false};
 
+    /* Deferred EXIT_OFFLINE broadcast (set from WiFi event task) */
+    std::atomic<bool> exit_offline_pending_{false};
+
     /* Heap monitor */
     HeapMonitor heap_monitor_;
-    uint32_t heap_timer_ms_ = 0;
 
     /* MQTT bridge */
     MqttClient *mqtt_client_ = nullptr;

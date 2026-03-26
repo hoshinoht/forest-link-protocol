@@ -41,7 +41,6 @@ constexpr uint32_t kNeighborStaleTimeoutMs = 30000;
 constexpr uint32_t kEarlyStaleTimeoutMs = 15000;
 constexpr uint32_t kBiasIntervalMs = 10000;
 constexpr uint32_t kTelemetryIntervalMs = 30000;
-constexpr uint8_t kDiscoveryInternetFlag = 0x01;
 constexpr int8_t kDefaultRssi = -90;
 constexpr float kLinkQualityPct = 100.0f;
 constexpr uint8_t kMeshCmdMaxDataLen = 64;
@@ -81,10 +80,14 @@ void MeshManager::set_has_internet(bool v)
 {
     if (has_internet_ != v)
     {
-        /* Broadcast EXIT_OFFLINE when losing internet mid-transfer */
+        /*
+         * Defer EXIT_OFFLINE broadcast to the mesh task.  This function
+         * runs on the WiFi event loop task; calling send_raw() here risks
+         * priority inversion (same bug class as Fix 1 and Fix 7).
+         */
         if (!v && has_internet_)
         {
-            broadcast_exit_offline();
+            exit_offline_pending_.store(true, std::memory_order_release);
         }
         has_internet_ = v;
         ESP_LOGI(TAG, "has_internet_ = %s", v ? "true" : "false");
@@ -322,6 +325,12 @@ void MeshManager::run()
             espnow_.update_broadcast_peer();
         }
 
+        /* Drain deferred EXIT_OFFLINE broadcast (same pattern as Fix 7) */
+        if (exit_offline_pending_.exchange(false, std::memory_order_acq_rel))
+        {
+            broadcast_exit_offline();
+        }
+
         /* Periodic tasks */
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
@@ -481,6 +490,24 @@ void MeshManager::process_slab(BufferSlab *slab)
         return;
     }
 
+    /*
+     * EXIT_OFFLINE must be consumed locally by ALL nodes — sensor nodes need
+     * it to redistribute fragments away from the dead exit.  Process BEFORE
+     * the TTL=0 gate: a relay that decrements TTL to 0 still needs to handle
+     * the packet locally even though it won't forward further.
+     */
+    const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
+    size_t payload_len = slab->len - PACKET_HEADER_SIZE;
+
+    if (hdr.type() == PacketType::EXIT_OFFLINE &&
+        payload_len >= sizeof(ExitOfflinePayload))
+    {
+        ExitOfflinePayload eop;
+        memcpy(&eop, payload, sizeof(eop));
+        transfer_engine_.handle_exit_offline(
+            eop.exit_node_addr, eop.session_id);
+    }
+
     if (hdr.ttl() == 0)
     {
         ESP_LOGD(TAG, "Dropping packet, TTL=0");
@@ -500,23 +527,6 @@ void MeshManager::process_slab(BufferSlab *slab)
         bool via_lora = (slab->source == RxTransport::LORA);
         route_table_.update_neighbor(
             hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
-    }
-
-    const uint8_t *payload = slab->data + PACKET_HEADER_SIZE;
-    size_t payload_len = slab->len - PACKET_HEADER_SIZE;
-
-    /*
-     * EXIT_OFFLINE must be consumed by ALL nodes — sensor nodes need it
-     * to redistribute fragments away from the dead exit.  Process before
-     * the for_us gate so non-exit nodes also handle it.
-     */
-    if (hdr.type() == PacketType::EXIT_OFFLINE &&
-        payload_len >= sizeof(ExitOfflinePayload))
-    {
-        ExitOfflinePayload eop;
-        memcpy(&eop, payload, sizeof(eop));
-        transfer_engine_.handle_exit_offline(
-            eop.exit_node_addr, eop.session_id);
     }
 
     /* EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others. */
@@ -640,18 +650,10 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
     DiscoveryPayload disc;
     memcpy(&disc, payload, sizeof(disc));
 
-    const char *rx_transport = "UNKNOWN";
-    if (source == RxTransport::ESPNOW)
-    {
-        rx_transport = "ESP-NOW";
-    }
-    else if (source == RxTransport::LORA)
-    {
-        rx_transport = "LoRa";
-    }
+    const char *rx_transport = rx_transport_name(source);
 
     /* Extract wifi channel from flags bits 1-4 */
-    uint8_t disc_wifi_ch = (disc.flags >> 1) & 0x0F;
+    uint8_t disc_wifi_ch = (disc.flags >> kDiscoveryChShift) & kDiscoveryChMask;
 
     ESP_LOGI(TAG,
              "Discovery from 0x%04X via %s: inet=%u hops_inet=%u rssi=%d "
@@ -723,7 +725,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         uint8_t resp_ch = 0;
         wifi_second_chan_t resp_sec = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&resp_ch, &resp_sec);
-        resp.flags |= (resp_ch & 0x0F) << 1;
+        resp.flags |= (resp_ch & kDiscoveryChMask) << kDiscoveryChShift;
 
         /* Step 1d: Populate sequence info */
         if (has_internet_)
@@ -749,7 +751,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         /* Step 7c: Encode current SF in flags bits 5-7 */
         uint8_t sf_enc =
             static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
-        resp.flags |= (sf_enc << 5);
+        resp.flags |= (sf_enc << kDiscoverySfShift);
 
         /*
          * Reply via the same transport the request arrived on.
@@ -920,7 +922,7 @@ void MeshManager::send_discovery()
     uint8_t ch = 0;
     wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&ch, &sec);
-    disc.flags |= (ch & 0x0F) << 1;
+    disc.flags |= (ch & kDiscoveryChMask) << kDiscoveryChShift;
 
     /* Step 1d: Populate DSDV sequence info */
     if (has_internet_)
@@ -946,7 +948,7 @@ void MeshManager::send_discovery()
     /* Step 7c: Encode current SF in flags bits 5-7 */
     uint8_t sf_enc =
         static_cast<uint8_t>(lora_.get_spreading_factor() - 5) & 0x07;
-    disc.flags |= (sf_enc << 5);
+    disc.flags |= (sf_enc << kDiscoverySfShift);
 
     /* Build raw packet for direct transport control */
     uint8_t buf[MAX_MTU];
@@ -1214,7 +1216,8 @@ void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
 void MeshManager::publish_all_telemetry()
 {
     /* Topology */
-    uint8_t topo_buf[128];
+    static constexpr size_t kTopoBufSize = 1 + MAX_NEIGHBORS * 7;
+    uint8_t topo_buf[kTopoBufSize];
     size_t topo_len = route_table_.serialize(topo_buf, sizeof(topo_buf));
     if (topo_len > 0)
     {
