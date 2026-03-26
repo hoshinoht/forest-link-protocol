@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/binary"
 	"encoding/hex"
@@ -37,8 +38,21 @@ func errorResponse(w http.ResponseWriter, msg string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// basicAuth wraps a handler with HTTP Basic Authentication.
+func basicAuth(next http.Handler, password string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, pass, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="FLP Admin"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // StartHTTPServer registers HTTP handlers and runs the server until ctx is cancelled.
-func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, metrics *MetricsStore, mqttClient *MQTTClient, progress *TransferProgress) {
+func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, metrics *MetricsStore, mqttClient *MQTTClient, progress *TransferProgress, adminPass string) {
 	mux := http.NewServeMux()
 
 	// GET / — serve static/index.html (and other static assets)
@@ -375,9 +389,15 @@ func StartHTTPServer(ctx context.Context, port int, topo *TopologyAggregator, me
 		jsonResponse(w, map[string]interface{}{"ok": true, "nodes_pinged": len(nodeIDs)})
 	})
 
+	var handler http.Handler = mux
+	if adminPass != "" {
+		handler = basicAuth(mux, adminPass)
+		log.Printf("[http] Basic Auth enabled (user: admin)")
+	}
+
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Handler: handler,
 	}
 
 	go func() {

@@ -9,13 +9,13 @@ services:
       - ./passwd:/mosquitto/config/passwd:ro
     healthcheck:
       test: ["CMD-SHELL", "mosquitto_sub -u $${MQTT_ADMIN_USER:-flp-admin} -P $${MQTT_ADMIN_PASS} -t '$$SYS/#' -C 1 -W 3 || exit 1"]
-    environment:
-      - MQTT_ADMIN_USER=flp-admin
-      - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 3s
+    environment:
+      - MQTT_ADMIN_USER=flp-admin
+      - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
     restart: unless-stopped
 
   admin:

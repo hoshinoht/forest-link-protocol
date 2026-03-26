@@ -70,7 +70,7 @@ func main() {
 	}()
 
 	// HTTP server
-	go StartHTTPServer(ctx, *webPort, topo, metrics, mqttClient, progress)
+	go StartHTTPServer(ctx, *webPort, topo, metrics, mqttClient, progress, *mqttPass)
 
 	fmt.Fprintf(os.Stderr, "[Admin] FLP Admin running. Dashboard at http://0.0.0.0:%d/\n", *webPort)
 
