@@ -63,7 +63,7 @@ static esp_err_t s_sd_err = ESP_OK;
 #endif
 
 #if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
-/* Auto demo mode: periodic transfer without button */
+/* Auto demo mode (exit node): waits for MQTT, then periodic transfer */
 static void auto_demo_task(void *arg)
 {
     auto *mgr = static_cast<flp::MeshManager *>(arg);
@@ -86,6 +86,37 @@ static void auto_demo_task(void *arg)
         if (!mgr->is_mqtt_connected())
         {
             ESP_LOGW(TAG, "Auto demo: MQTT disconnected, skipping transfer");
+            vTaskDelay(interval);
+            continue;
+        }
+        ESP_LOGI(TAG,
+                 "Auto demo transfer: demo.txt (%u bytes)",
+                 (unsigned) s_demo_size);
+        mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
+        vTaskDelay(interval);
+    }
+}
+#elif CONFIG_FLP_DEMO_AUTO && CONFIG_FLP_WIFI_DISABLED
+/* Auto demo mode (relay node): waits for gateway discovery, then periodic transfer */
+static void auto_demo_task(void *arg)
+{
+    auto *mgr = static_cast<flp::MeshManager *>(arg);
+    const TickType_t interval =
+        pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
+
+    ESP_LOGI(TAG, "Auto demo (relay): waiting for gateway discovery...");
+    while (mgr->get_hops_to_internet() >= 0xFF)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "Auto demo (relay): gateway found at %u hops, starting transfers",
+             mgr->get_hops_to_internet());
+
+    while (true)
+    {
+        if (mgr->get_hops_to_internet() >= 0xFF)
+        {
+            ESP_LOGW(TAG, "Auto demo (relay): no gateway, skipping transfer");
             vTaskDelay(interval);
             continue;
         }
@@ -396,8 +427,8 @@ extern "C" void app_main()
                 FLP_UART_TASK_PRIORITY,
                 nullptr);
 
-#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
-    /* Auto demo mode: periodic transfer task */
+#if CONFIG_FLP_DEMO_AUTO
+    /* Auto demo mode: periodic transfer task (both exit and relay) */
     xTaskCreate(auto_demo_task,
                 "auto_demo",
                 FLP_BUTTON_TASK_STACK,
@@ -445,7 +476,7 @@ extern "C" void app_main()
                 nullptr);
 #endif
 
-#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
+#if CONFIG_FLP_DEMO_AUTO
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, auto demo every %ds)",
              CONFIG_FLP_UART_TX_PIN,
