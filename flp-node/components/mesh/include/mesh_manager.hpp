@@ -116,7 +116,8 @@ class MeshManager
     uint8_t get_hops_to_internet() const
     {
         if (has_internet_) { return 0; }
-        return route_table_.min_hops_to_internet();
+        const uint8_t min_h = route_table_.min_hops_to_internet();
+        return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
     }
     bool has_recent_cloud_cmd() const
     {

@@ -2,4 +2,5 @@
 # Usage: idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" build
 
 CONFIG_FLP_WIFI_DISABLED=y
+CONFIG_FLP_DEMO_AUTO=n
 CONFIG_FLP_ESPNOW_CHANNEL=1
