@@ -7,6 +7,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
+#include "packet.hpp"
 #include "topic_table.hpp"
 
 namespace flp
@@ -20,16 +21,17 @@ using MqttRxCallback = void (*)(const char *topic,
 struct MqttPublishItem
 {
     uint16_t topic_id;
-    uint8_t data[512];
+    uint8_t data[MAX_MTU];
     size_t len;
     int qos;
 };
 
-/* Request to publish a file asynchronously (mesh task -> MQTT task) */
+/* Request to publish a file asynchronously (mesh task -> MQTT task).
+ * Data is COPIED into the struct — caller may free its buffer immediately. */
 struct FilePublishRequest
 {
-    const char *filename;
-    const uint8_t *data;
+    char filename[33];     /* 32 chars + NUL (matches wire format) */
+    uint8_t data[MAX_MTU]; /* chunk data (copied, not borrowed) */
     size_t size;
     uint16_t src_node;
 };
@@ -40,9 +42,9 @@ struct FragmentPublishRequest
     uint16_t session_id;
     uint16_t seq;
     uint16_t src_node;
-    uint8_t data[512];
+    uint8_t data[MAX_MTU];
     size_t len;
-    char filename[20];
+    char filename[33]; /* 32 chars + NUL (matches wire format) */
 };
 
 /* Cloud ACK/NACK for selective-repeat ARQ */
@@ -56,7 +58,7 @@ struct CloudNackItem
     uint16_t seq;
 };
 
-/* Inbound mesh command from cloud (MQTT → exit node → mesh) */
+/* Inbound mesh command from cloud (MQTT -> exit node -> mesh) */
 struct MeshCmdItem
 {
     uint16_t target_addr;
@@ -69,6 +71,8 @@ class MqttClient
 {
   public:
     MqttClient() = default;
+    MqttClient(const MqttClient &) = delete;
+    MqttClient &operator=(const MqttClient &) = delete;
 
     void init();
     void run();
@@ -142,10 +146,15 @@ class MqttClient
     QueueHandle_t ack_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
     QueueHandle_t cmd_queue_ = nullptr; /* inbound mesh commands from cloud */
-    TaskHandle_t task_ = nullptr; /* MQTT task handle for notifications */
+    std::atomic<TaskHandle_t> task_{nullptr};
     MqttRxCallback rx_callback_ = nullptr;
     std::atomic<bool> connected_{false};
     uint16_t node_addr_ = 0;
+
+    /* Captured topic IDs from register_default_topics() */
+    uint16_t status_topic_id_ = 0;
+    uint16_t file_data_topic_id_ = 0;
+    uint16_t file_meta_topic_id_ = 0;
 
     static void mqtt_event_handler(void *handler_args,
                                    esp_event_base_t base,
@@ -163,8 +172,6 @@ class MqttClient
 
     /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;
-    bool meta_published_ = false;
-    uint16_t last_meta_session_id_ = 0;
 };
 
 } /* namespace flp */

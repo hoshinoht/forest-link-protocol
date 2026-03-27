@@ -6,7 +6,9 @@
 #include "driver/gpio.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
@@ -49,7 +51,7 @@ esp_err_t flp::sdcard_init()
     bus_cfg.sclk_io_num = CONFIG_FLP_SD_SCK;
     bus_cfg.quadwp_io_num = -1;
     bus_cfg.quadhd_io_num = -1;
-    bus_cfg.max_transfer_sz = 4096;
+    bus_cfg.max_transfer_sz = SdReadCache::CACHE_SIZE;
 
     esp_err_t ret = spi_bus_initialize(
         static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -158,4 +160,177 @@ size_t flp::sdcard_read_chunk(const char *path,
     size_t got = fread(buf, 1, len, f);
     fclose(f);
     return got;
+}
+
+/* ── SdReadCache ──────────────────────────────────────────────────────── */
+
+flp::SdReadCache::~SdReadCache()
+{
+    if (file_)
+    {
+        fclose(file_);
+        file_ = nullptr;
+    }
+    if (cache_buf_)
+    {
+        heap_caps_free(cache_buf_);
+        cache_buf_ = nullptr;
+    }
+}
+
+esp_err_t flp::SdReadCache::open(const char *path)
+{
+    if (!s_mounted || path == nullptr)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        ESP_LOGE(TAG, "SdReadCache: cannot open %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0)
+    {
+        fclose(f);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* Allocate cache in PSRAM */
+    uint8_t *buf = static_cast<uint8_t *>(
+        heap_caps_malloc(CACHE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!buf)
+    {
+        ESP_LOGE(TAG, "SdReadCache: PSRAM alloc failed (%zu bytes)",
+                 CACHE_SIZE);
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Release any previous state */
+    if (file_)  { fclose(file_); }
+    if (cache_buf_) { heap_caps_free(cache_buf_); }
+
+    file_ = f;
+    file_size_ = static_cast<size_t>(fsize);
+    cache_buf_ = buf;
+    cache_start_ = 0;
+    cache_len_ = 0;
+    hits_ = 0;
+    misses_ = 0;
+
+    /* Prime the cache with the first block */
+    refill(0);
+
+    ESP_LOGI(TAG,
+             "SdReadCache: opened %s (%u bytes, %zu KB cache in PSRAM)",
+             path, (unsigned) file_size_, CACHE_SIZE / 1024);
+    return ESP_OK;
+}
+
+bool flp::SdReadCache::refill(size_t offset)
+{
+    if (!file_)
+    {
+        return false;
+    }
+
+    /* Align to CACHE_SIZE boundary for predictable sequential access */
+    size_t aligned = (offset / CACHE_SIZE) * CACHE_SIZE;
+    if (aligned >= file_size_)
+    {
+        return false;
+    }
+
+    int64_t t0 = esp_timer_get_time();
+
+    if (fseek(file_, static_cast<long>(aligned), SEEK_SET) != 0)
+    {
+        ESP_LOGE(TAG, "SdReadCache: fseek to %u failed", (unsigned) aligned);
+        return false;
+    }
+
+    size_t want = CACHE_SIZE;
+    if (aligned + want > file_size_)
+    {
+        want = file_size_ - aligned;
+    }
+
+    size_t got = fread(cache_buf_, 1, want, file_);
+    cache_start_ = aligned;
+    cache_len_ = got;
+
+    int64_t elapsed_us = esp_timer_get_time() - t0;
+    ESP_LOGD(TAG,
+             "SdReadCache: refill @ %u, %u bytes in %lld us",
+             (unsigned) aligned, (unsigned) got, elapsed_us);
+    return got > 0;
+}
+
+size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
+{
+    if (!cache_buf_ || !file_ || !buf || offset >= file_size_)
+    {
+        return 0;
+    }
+
+    /* Clamp to file boundary */
+    if (offset + len > file_size_)
+    {
+        len = file_size_ - offset;
+    }
+
+    /* Check if the request fits entirely within the cached window */
+    if (offset >= cache_start_ &&
+        (offset + len) <= (cache_start_ + cache_len_))
+    {
+        /* Cache hit — fast PSRAM memcpy */
+        memcpy(buf, cache_buf_ + (offset - cache_start_), len);
+        hits_++;
+        return len;
+    }
+
+    /* Cache miss — refill and retry */
+    misses_++;
+    if (!refill(offset))
+    {
+        return 0;
+    }
+
+    /* After refill the request should be within the new window */
+    if (offset >= cache_start_ &&
+        (offset + len) <= (cache_start_ + cache_len_))
+    {
+        memcpy(buf, cache_buf_ + (offset - cache_start_), len);
+        return len;
+    }
+
+    /* Edge case: request spans two cache windows (shouldn't happen with
+     * 240-byte fragments and 64 KB cache, but handle it defensively). */
+    size_t first = cache_start_ + cache_len_ - offset;
+    if (first > len) { first = len; }
+    memcpy(buf, cache_buf_ + (offset - cache_start_), first);
+
+    /* Refill for the remainder */
+    if (!refill(offset + first))
+    {
+        return first;
+    }
+    size_t second_off = offset + first;
+    size_t second_len = len - first;
+    if (second_off >= cache_start_ &&
+        (second_off + second_len) <= (cache_start_ + cache_len_))
+    {
+        memcpy(buf + first,
+               cache_buf_ + (second_off - cache_start_),
+               second_len);
+        return first + second_len;
+    }
+
+    return first;
 }

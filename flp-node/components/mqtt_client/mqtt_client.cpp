@@ -1,9 +1,12 @@
 #include "mqtt_client.hpp"
 
 #include <cinttypes>
+#include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
@@ -29,21 +32,28 @@ namespace flp
 
 void MqttClient::notify()
 {
-    if (task_)
+    TaskHandle_t t = task_.load(std::memory_order_relaxed);
+    if (t)
     {
-        xTaskNotifyGive(task_);
+        xTaskNotifyGive(t);
     }
 }
 
 void MqttClient::init()
 {
-    /* Create publish queues */
-    publish_queue_ =
-        xQueueCreate(MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem));
+    /*
+     * Large queues (MqttPublishItem=526B, FragmentPublishRequest=546B) are
+     * allocated in PSRAM to free ~44 KB of internal SRAM.  Small queues
+     * (ACK/NACK/CMD, 2-68 bytes per item) stay in internal RAM.
+     */
+    publish_queue_ = xQueueCreateWithCaps(
+        MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem),
+        MALLOC_CAP_SPIRAM);
     file_publish_queue_ =
         xQueueCreate(MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest));
-    fragment_publish_queue_ =
-        xQueueCreate(MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest));
+    fragment_publish_queue_ = xQueueCreateWithCaps(
+        MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest),
+        MALLOC_CAP_SPIRAM);
     ack_queue_ = xQueueCreate(MQTT_ACK_QUEUE_DEPTH, sizeof(CloudAckItem));
     nack_queue_ = xQueueCreate(MQTT_NACK_QUEUE_DEPTH, sizeof(CloudNackItem));
     cmd_queue_ = xQueueCreate(MQTT_CMD_QUEUE_DEPTH, sizeof(MeshCmdItem));
@@ -59,7 +69,18 @@ void MqttClient::init()
     esp_mqtt_client_config_t mqtt_cfg = {};
 #if !CONFIG_FLP_WIFI_DISABLED
     mqtt_cfg.broker.address.uri = CONFIG_FLP_MQTT_BROKER_URI;
+    mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    mqtt_cfg.credentials.username = CONFIG_FLP_MQTT_USERNAME;
+    mqtt_cfg.credentials.authentication.password = CONFIG_FLP_MQTT_PASSWORD;
 #endif
+    /*
+     * The default ESP-MQTT internal task stack (6144) is too small for WSS
+     * transport (mbedtls + WebSocket + VFS select). Stack overflow corrupts
+     * adjacent heap metadata, causing "free() target pointer is outside heap
+     * areas" in usb_serial_jtag_end_select during esp_vfs_select().
+     */
+    mqtt_cfg.task.stack_size = 8192;
+    mqtt_cfg.outbox.limit = 8192; /* default 4096 too small for burst publishes */
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(
@@ -83,21 +104,22 @@ void MqttClient::register_default_topics()
 
     /* Topic 1: flp/<node_id>/status (Node->Cloud, QoS 0) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/status", node_addr_);
-    topic_table_.register_topic(topic_buf);
+    status_topic_id_ = topic_table_.register_topic(topic_buf);
 
     /* Topic 2: flp/<node_id>/file/data (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/data", node_addr_);
-    topic_table_.register_topic(topic_buf);
+    file_data_topic_id_ = topic_table_.register_topic(topic_buf);
 
     /* Topic 3: flp/<node_id>/file/meta (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/meta", node_addr_);
-    topic_table_.register_topic(topic_buf);
+    file_meta_topic_id_ = topic_table_.register_topic(topic_buf);
 
     /* Topic 4: flp/admin/cmd (Cloud->Node, QoS 1) */
     topic_table_.register_topic("flp/admin/cmd");
 
-    /* Topic 5: flp/admin/ack (Cloud->Node, QoS 1) */
-    topic_table_.register_topic("flp/admin/ack");
+    /* Topic 5: flp/admin/ack/+ (Cloud->Node, QoS 1)
+     * D2 fix: session-scoped ACK topic — subscribe with wildcard */
+    topic_table_.register_topic("flp/admin/ack/+");
 }
 
 void MqttClient::mqtt_event_handler(void *handler_args,
@@ -125,7 +147,8 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             connected_ = true;
             /* Subscribe to admin topics */
             esp_mqtt_client_subscribe(client_, "flp/admin/cmd", 1);
-            esp_mqtt_client_subscribe(client_, "flp/admin/ack", 1);
+            /* D2 fix: session-scoped ACK topic */
+            esp_mqtt_client_subscribe(client_, "flp/admin/ack/+", 1);
             /* Fix 13: unblock any task waiting for first MQTT connection */
             if (connected_event_group_)
             {
@@ -191,9 +214,10 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 }
             }
 
-            /* Cloud ACK/NACK handler — parse {"type":"ACK"|"NACK","seq":N} */
-            if (strcmp(topic_buf, "flp/admin/ack") == 0 && event->data &&
-                event->data_len > 0)
+            /* Cloud ACK/NACK handler — parse {"type":"ACK"|"NACK","seq":N}
+             * D2 fix: topic is now flp/admin/ack/<session_id> */
+            else if (strncmp(topic_buf, "flp/admin/ack/", 14) == 0 &&
+                     event->data && event->data_len > 0)
             {
                 /* Null-terminate data for safe string operations */
                 char ack_buf[256];
@@ -206,9 +230,13 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 const char *seq_str = strstr(ack_buf, "\"seq\":");
                 if (seq_str)
                 {
-                    int seq_val = atoi(seq_str + 6);
-
-                    if (strstr(ack_buf, "\"ACK\""))
+                    char *end = nullptr;
+                    long seq_val = strtol(seq_str + 6, &end, 10);
+                    if (end == seq_str + 6 || seq_val < 0 || seq_val > UINT16_MAX)
+                    {
+                        ESP_LOGW(TAG, "Malformed seq in cloud ACK/NACK");
+                    }
+                    else if (strstr(ack_buf, "\"ACK\""))
                     {
                         CloudAckItem ack_item = {};
                         ack_item.seq = static_cast<uint16_t>(seq_val);
@@ -229,6 +257,57 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                                      "Cloud NACK received for seq=%u",
                                      nack.seq);
                         }
+                    }
+                }
+            }
+
+            /* D1+B3 fix: cloud-to-exit NACK bridge.
+             * Topic: flp/admin/transfer_nack/<session_id>
+             * Payload: {"session_id":"N","seqs":[s1,s2,...]}
+             * Enqueue each seq into nack_queue_ so TransferEngine can
+             * send mesh NACKs back to source for retransmission. */
+            else if (strncmp(topic_buf, "flp/admin/transfer_nack/", 24) == 0 &&
+                     event->data && event->data_len > 0)
+            {
+                char nack_buf[512];
+                size_t nlen = (event->data_len < sizeof(nack_buf) - 1)
+                                  ? static_cast<size_t>(event->data_len)
+                                  : sizeof(nack_buf) - 1;
+                memcpy(nack_buf, event->data, nlen);
+                nack_buf[nlen] = '\0';
+
+                /* Simple JSON array parser for "seqs":[...] */
+                const char *seqs_str = strstr(nack_buf, "\"seqs\":[");
+                if (seqs_str)
+                {
+                    const char *p = seqs_str + 8; /* skip "seqs":[ */
+                    int queued = 0;
+                    while (*p && *p != ']')
+                    {
+                        char *end = nullptr;
+                        long val = strtol(p, &end, 10);
+                        if (end == p)
+                        {
+                            p++;
+                            continue;
+                        }
+                        if (val >= 0 && val <= UINT16_MAX && nack_queue_)
+                        {
+                            CloudNackItem nack = {};
+                            nack.seq = static_cast<uint16_t>(val);
+                            if (xQueueSend(nack_queue_, &nack, 0) == pdTRUE)
+                            {
+                                queued++;
+                            }
+                        }
+                        p = end;
+                        if (*p == ',') p++;
+                    }
+                    if (queued > 0)
+                    {
+                        ESP_LOGI(TAG,
+                                 "Cloud transfer NACK: enqueued %d seqs for retx",
+                                 queued);
                     }
                 }
             }
@@ -325,7 +404,13 @@ void MqttClient::publish_file(const char *filename,
         return;
     }
 
-    FilePublishRequest req = {filename, data, size, src_node};
+    FilePublishRequest req = {};
+    strncpy(req.filename, filename, sizeof(req.filename) - 1);
+    req.filename[sizeof(req.filename) - 1] = '\0';
+    size_t copy_len = (size <= sizeof(req.data)) ? size : sizeof(req.data);
+    memcpy(req.data, data, copy_len);
+    req.size = copy_len;
+    req.src_node = src_node;
     if (xQueueSend(file_publish_queue_, &req, 0) != pdTRUE)
     {
         ESP_LOGW(TAG, "publish_file: file publish queue full, dropping");
@@ -367,6 +452,11 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
         req.src_node,
         crc);
 
+    if (meta_len <= 0 || meta_len >= (int)sizeof(meta_json))
+    {
+        ESP_LOGE(TAG, "process_file_publish: meta_json truncated or error");
+        return;
+    }
     esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
     ESP_LOGI(TAG,
              "Published file meta: %s (%zu bytes, %u chunks)",
@@ -427,14 +517,23 @@ void MqttClient::publish_transfer_meta(uint16_t session_id,
                             fragment_size,
                             crc32);
 
+    if (meta_len <= 0 || meta_len >= (int)sizeof(meta_json))
+    {
+        ESP_LOGE(TAG, "publish_transfer_meta: meta_json truncated or error");
+        return;
+    }
     if (connected_ && client_)
     {
         esp_mqtt_client_publish(client_, meta_topic, meta_json, meta_len, 1, 0);
-    }
 
-    /* Mark meta as published so process_fragment_publish doesn't re-publish */
-    meta_published_ = true;
-    last_meta_session_id_ = session_id;
+        /* D1+B3 fix: subscribe to cloud-to-exit NACK bridge topic so the
+         * cloud can request retransmission for fragments lost in transit. */
+        char nack_topic[64];
+        snprintf(nack_topic, sizeof(nack_topic),
+                 "flp/admin/transfer_nack/%u", session_id);
+        esp_mqtt_client_subscribe(client_, nack_topic, 1);
+        ESP_LOGI(TAG, "Subscribed to %s", nack_topic);
+    }
 
     ESP_LOGI(TAG,
              "Published transfer meta: session=%u"
@@ -465,6 +564,8 @@ bool MqttClient::publish_fragment(uint16_t session_id,
     req.src_node = src_node;
     if (len > MAX_MTU)
     {
+        ESP_LOGW(TAG,
+                 "publish_fragment: len %zu > MAX_MTU, truncating", len);
         len = MAX_MTU;
     }
     memcpy(req.data, data, len);
@@ -492,18 +593,22 @@ void MqttClient::process_fragment_publish()
     FragmentPublishRequest req;
     while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
-        /* Publish chunk: [2-byte seq_le][data] */
+        /* B4 fix: Publish chunk with session ID prefix:
+         * [session_id:2LE][seq:2LE][data] — enables cloud to filter
+         * stale chunks from previous sessions. */
         char data_topic[64];
         snprintf(
             data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
-        uint8_t chunk_buf[2 + MAX_MTU];
-        chunk_buf[0] = static_cast<uint8_t>(req.seq & 0xFF);
-        chunk_buf[1] = static_cast<uint8_t>((req.seq >> 8) & 0xFF);
-        memcpy(chunk_buf + 2, req.data, req.len);
+        uint8_t chunk_buf[4 + MAX_MTU];
+        chunk_buf[0] = static_cast<uint8_t>(req.session_id & 0xFF);
+        chunk_buf[1] = static_cast<uint8_t>((req.session_id >> 8) & 0xFF);
+        chunk_buf[2] = static_cast<uint8_t>(req.seq & 0xFF);
+        chunk_buf[3] = static_cast<uint8_t>((req.seq >> 8) & 0xFF);
+        memcpy(chunk_buf + 4, req.data, req.len);
 
         int msg_id = esp_mqtt_client_publish(
-            client_, data_topic, (const char *) chunk_buf, 2 + req.len, 1, 0);
+            client_, data_topic, (const char *) chunk_buf, 4 + req.len, 1, 0);
 
         if (msg_id < 0)
         {
@@ -511,7 +616,11 @@ void MqttClient::process_fragment_publish()
             ESP_LOGW(TAG,
                      "MQTT outbox full, deferring seq=%u",
                      req.seq);
-            xQueueSendToFront(fragment_publish_queue_, &req, 0);
+            if (xQueueSendToFront(fragment_publish_queue_, &req, 0) != pdTRUE)
+            {
+                ESP_LOGE(TAG,
+                         "Fragment re-queue failed, seq=%u dropped", req.seq);
+            }
             break;
         }
 
@@ -525,7 +634,7 @@ void MqttClient::process_fragment_publish()
 
 void MqttClient::run()
 {
-    task_ = xTaskGetCurrentTaskHandle();
+    task_.store(xTaskGetCurrentTaskHandle(), std::memory_order_relaxed);
 
     TickType_t last_status_tick = xTaskGetTickCount();
     const TickType_t status_interval = MQTT_HEARTBEAT_INTERVAL;
@@ -588,7 +697,7 @@ void MqttClient::run()
             if (connected_)
             {
                 const char *status_topic =
-                    topic_table_.lookup(1); /* topic ID 1 = status */
+                    topic_table_.lookup(status_topic_id_);
                 if (status_topic)
                 {
                     const char *msg = "online";

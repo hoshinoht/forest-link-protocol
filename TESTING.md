@@ -187,7 +187,7 @@ sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
 " | mosquitto_pub -t "flp/admin/cmd" -s
 ```
 
-Option B — via cloud-admin-go API (if running on Pi):
+Option B — via cloud-admin API (if running on Pi):
 ```bash
 # POST /api/cmd/<target_node_id> with cmd ID
 curl -X POST http://<pi_ip>:8080/api/cmd/<board2_addr> \
@@ -251,7 +251,7 @@ sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
 " | mosquitto_pub -t "flp/admin/cmd" -s
 ```
 
-Option B — via cloud-admin-go API:
+Option B — via cloud-admin API:
 ```bash
 curl -X POST http://<pi_ip>:8080/api/cmd/<board3_addr> \
   -H 'Content-Type: application/json' \
@@ -322,7 +322,7 @@ sys.stdout.buffer.write(struct.pack('<HB', target, 0x01))
 " | mosquitto_pub -t "flp/admin/cmd" -s
 ```
 
-Option B — via cloud-admin-go API:
+Option B — via cloud-admin API:
 ```bash
 curl -X POST http://<pi_ip>:8080/api/cmd/<board4_addr> \
   -H 'Content-Type: application/json' \

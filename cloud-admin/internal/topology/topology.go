@@ -1,4 +1,5 @@
-package main
+// Package topology maintains the live mesh graph from periodic neighbor reports.
+package topology
 
 import (
 	"encoding/binary"
@@ -7,16 +8,19 @@ import (
 	"time"
 )
 
+// neighbor mirrors one entry from the firmware's route_table::serialize().
 type neighbor struct {
-	Addr          string `json:"addr"`
-	RSSI          int8   `json:"rssi"`
-	Hops          uint8  `json:"hops"`
-	HopsToInternet uint8 `json:"hops_to_internet"`
-	BLE           bool   `json:"ble"`
-	LoRa          bool   `json:"lora"`
-	HasInternet   bool   `json:"has_internet"`
+	Addr           string `json:"addr"`
+	RSSI           int8   `json:"rssi"`
+	Hops           uint8  `json:"hops"`
+	HopsToInternet uint8  `json:"hops_to_internet"`
+	ESPNOW         bool   `json:"espnow"` // flag bit 0 = ROUTE_FLAG_ESPNOW
+	LoRa           bool   `json:"lora"`   // flag bit 1 = ROUTE_FLAG_LORA
+	HasInternet    bool   `json:"has_internet"`
+	QueueLoad      uint8  `json:"queue_load"`
 }
 
+// heapInfo mirrors the 20-byte heap snapshot from the firmware.
 type heapInfo struct {
 	FreeInternal uint32 `json:"free_internal"`
 	FreePSRAM    uint32 `json:"free_psram"`
@@ -31,13 +35,15 @@ type nodeState struct {
 	Heap      *heapInfo
 }
 
-type TopologyAggregator struct {
+// Aggregator collects topology reports and produces the JSON graph.
+type Aggregator struct {
 	mu    sync.RWMutex
 	nodes map[string]*nodeState
 }
 
-func NewTopologyAggregator() *TopologyAggregator {
-	return &TopologyAggregator{
+// NewAggregator creates an empty topology store.
+func NewAggregator() *Aggregator {
+	return &Aggregator{
 		nodes: make(map[string]*nodeState),
 	}
 }
@@ -46,7 +52,13 @@ func nowSeconds() float64 {
 	return float64(time.Now().UnixMilli()) / 1000.0
 }
 
-func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
+// Update parses a serialised neighbor table and records the node's state.
+//
+// Wire format (from firmware route_table::serialize):
+//
+//	[count:1][{addr:2(LE), rssi:1, hops:1, hops_inet:1, flags:1, queue_load:1} × N]
+//	flags: bit0 = ESP-NOW reachable, bit1 = LoRa reachable, bit2 = has internet
+func (a *Aggregator) Update(nodeID string, payload []byte) {
 	if len(payload) < 1 {
 		return
 	}
@@ -55,8 +67,8 @@ func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
 	neighbors := make([]neighbor, 0, count)
 
 	for i := 0; i < count; i++ {
-		off := 1 + i*6
-		if off+6 > len(payload) {
+		off := 1 + i*7
+		if off+7 > len(payload) {
 			break
 		}
 		addr := binary.LittleEndian.Uint16(payload[off:])
@@ -64,34 +76,37 @@ func (ta *TopologyAggregator) Update(nodeID string, payload []byte) {
 		hops := payload[off+3]
 		hopsInet := payload[off+4]
 		flags := payload[off+5]
+		queueLoad := payload[off+6]
 
 		neighbors = append(neighbors, neighbor{
 			Addr:           fmt.Sprintf("%04X", addr),
 			RSSI:           rssi,
 			Hops:           hops,
 			HopsToInternet: hopsInet,
-			BLE:            flags&0x01 != 0,
+			ESPNOW:         flags&0x01 != 0, // FIX: was mislabelled "BLE"
 			LoRa:           flags&0x02 != 0,
 			HasInternet:    flags&0x04 != 0,
+			QueueLoad:      queueLoad,
 		})
 	}
 
-	ta.mu.Lock()
-	defer ta.mu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
 	var existingHeap *heapInfo
-	if existing, ok := ta.nodes[nodeID]; ok {
+	if existing, ok := a.nodes[nodeID]; ok {
 		existingHeap = existing.Heap
 	}
 
-	ta.nodes[nodeID] = &nodeState{
+	a.nodes[nodeID] = &nodeState{
 		LastSeen:  nowSeconds(),
 		Neighbors: neighbors,
 		Heap:      existingHeap,
 	}
 }
 
-func (ta *TopologyAggregator) UpdateHeap(nodeID string, payload []byte) {
+// UpdateHeap records a 20-byte heap snapshot for a node.
+func (a *Aggregator) UpdateHeap(nodeID string, payload []byte) {
 	if len(payload) < 20 {
 		return
 	}
@@ -104,13 +119,13 @@ func (ta *TopologyAggregator) UpdateHeap(nodeID string, payload []byte) {
 		LargestBlock: binary.LittleEndian.Uint32(payload[16:]),
 	}
 
-	ta.mu.Lock()
-	defer ta.mu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-	if state, ok := ta.nodes[nodeID]; ok {
+	if state, ok := a.nodes[nodeID]; ok {
 		state.Heap = heap
 	} else {
-		ta.nodes[nodeID] = &nodeState{
+		a.nodes[nodeID] = &nodeState{
 			LastSeen:  nowSeconds(),
 			Neighbors: []neighbor{},
 			Heap:      heap,
@@ -119,26 +134,37 @@ func (ta *TopologyAggregator) UpdateHeap(nodeID string, payload []byte) {
 }
 
 // NodeIDs returns all known node IDs.
-func (ta *TopologyAggregator) NodeIDs() []string {
-	ta.mu.RLock()
-	defer ta.mu.RUnlock()
-	ids := make([]string, 0, len(ta.nodes))
-	for id := range ta.nodes {
+func (a *Aggregator) NodeIDs() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ids := make([]string, 0, len(a.nodes))
+	for id := range a.nodes {
 		ids = append(ids, id)
 	}
 	return ids
 }
 
-func (ta *TopologyAggregator) ToJSON() map[string]interface{} {
-	ta.mu.RLock()
-	defer ta.mu.RUnlock()
+// ToJSON builds the graph representation consumed by the frontend.
+//
+// Bug fixes vs. original:
+//  1. Transport label: flag bit 0 is ESP-NOW (not BLE). The firmware sets
+//     ROUTE_FLAG_ESPNOW (0x01) for ESP-NOW links.
+//  2. Inferred nodes: neighbors that haven't reported their own topology
+//     still appear as vertices so edges aren't dangling.
+func (a *Aggregator) ToJSON() map[string]interface{} {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 
 	now := nowSeconds()
 	nodes := []map[string]interface{}{}
 	edges := []map[string]interface{}{}
 	seenEdges := make(map[[2]string]bool)
+	seenNodes := make(map[string]bool)
 
-	for nid, info := range ta.nodes {
+	// First pass: reporting nodes (have sent topology data).
+	for nid, info := range a.nodes {
+		seenNodes[nid] = true
+
 		status := "online"
 		if now-info.LastSeen >= 60 {
 			status = "offline"
@@ -178,9 +204,10 @@ func (ta *TopologyAggregator) ToJSON() map[string]interface{} {
 			}
 			seenEdges[edgeKey] = true
 
+			// FIX: flag bit 0 is ESP-NOW, not BLE.
 			transport := "unknown"
-			if n.BLE {
-				transport = "BLE"
+			if n.ESPNOW {
+				transport = "ESP-NOW"
 			} else if n.LoRa {
 				transport = "LoRa"
 			}
@@ -190,6 +217,23 @@ func (ta *TopologyAggregator) ToJSON() map[string]interface{} {
 				"target":    n.Addr,
 				"rssi":      n.RSSI,
 				"transport": transport,
+			})
+		}
+	}
+
+	// Second pass: create inferred nodes for neighbors not yet seen.
+	// FIX: edges pointed to neighbor addresses that had no vertex entry,
+	// causing the frontend to silently drop them or show broken links.
+	for _, info := range a.nodes {
+		for _, n := range info.Neighbors {
+			if seenNodes[n.Addr] {
+				continue
+			}
+			seenNodes[n.Addr] = true
+			nodes = append(nodes, map[string]interface{}{
+				"id":               n.Addr,
+				"status":           "inferred",
+				"hops_to_internet": n.HopsToInternet,
 			})
 		}
 	}

@@ -259,12 +259,39 @@ void LoraTransport::rx_task_func(void *arg)
     while (true)
     {
         /* Fix 8: Use a bounded timeout so the task recovers if the radio
-         * stops asserting DIO1 (e.g. after a TX timeout or chip lockup). */
+         * stops asserting DIO1 (e.g. after a TX timeout or chip lockup).
+         *
+         * On timeout we distinguish three cases:
+         *   (a) Normal idle — no LoRa traffic nearby.
+         *   (b) Missed DIO1 edge — pin is still high, ISR did not fire.
+         *   (c) Radio left in wrong state (STDBY/TX after an error).
+         * For (b) we fall through to normal IRQ processing.
+         * For (a)/(c) we force standby → RX-continuous as recovery.    */
         if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) == 0)
         {
-            /* Timeout — no IRQ in 5 s. Log and loop; radio may recover. */
-            ESP_LOGW(TAG, "DIO1 IRQ timeout, radio may have hung");
-            continue;
+            if (gpio_get_level(self->dio1_pin_) == 1)
+            {
+                /* Case (b): DIO1 asserted but edge missed — process it */
+                ESP_LOGW(TAG, "DIO1 edge missed, recovering stale IRQ");
+                /* fall through to normal IRQ processing below */
+            }
+            else
+            {
+                /* Cases (a)/(c): re-enter RX as a precaution.
+                 * Cheap and harmless if already in RX-continuous. */
+                if (self->radio_op_mutex_ &&
+                    xSemaphoreTake(self->radio_op_mutex_,
+                                   pdMS_TO_TICKS(100)) == pdTRUE)
+                {
+                    uint8_t stdby = sx1280::STDBY_RC;
+                    self->write_command(
+                        sx1280::CMD_SET_STANDBY, &stdby, 1);
+                    self->enter_rx_continuous();
+                    xSemaphoreGive(self->radio_op_mutex_);
+                    ESP_LOGD(TAG, "RX refreshed after idle timeout");
+                }
+                continue;
+            }
         }
 
         /*

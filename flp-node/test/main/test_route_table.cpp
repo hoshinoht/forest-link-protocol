@@ -308,13 +308,13 @@ static void test_route_table_serialize_empty_returns_1(void)
     TEST_ASSERT_EQUAL_UINT8(0, buf[0]);
 }
 
-/* One neighbor: returns 7 (1 + 1*6). */
-static void test_route_table_serialize_one_neighbor_returns_7(void)
+/* One neighbor: returns 8 (1 + 1*7). */
+static void test_route_table_serialize_one_neighbor_returns_8(void)
 {
     g_rt.update_neighbor(0x1234, -70, 2, true, false);
     uint8_t buf[64] = {};
     size_t len = g_rt.serialize(buf, sizeof(buf));
-    TEST_ASSERT_EQUAL(7, (int)len);
+    TEST_ASSERT_EQUAL(8, (int)len);
     TEST_ASSERT_EQUAL_UINT8(1, buf[0]);
 }
 
@@ -324,7 +324,7 @@ static void test_route_table_serialize_flags_espnow_set(void)
     g_rt.update_neighbor(0x1234, -70, 2, /*espnow=*/true, /*lora=*/false);
     uint8_t buf[64] = {};
     g_rt.serialize(buf, sizeof(buf));
-    /* Entry at offset 1: [addr_lo, addr_hi, rssi, hops, hops_inet, flags] */
+    /* Entry at offset 1: [addr_lo, addr_hi, rssi, hops, hops_inet, flags, queue_load] */
     uint16_t addr_le;
     __builtin_memcpy(&addr_le, buf + 1, 2);
     TEST_ASSERT_EQUAL_HEX16(0x1234, addr_le);
@@ -351,7 +351,7 @@ static void test_route_table_serialize_flags_lora_and_internet(void)
 static void test_route_table_serialize_buffer_too_small_returns_0(void)
 {
     g_rt.update_neighbor(0x1001, -60, 1, true, false);
-    uint8_t buf[4] = {};  /* needs 7 bytes for 1 neighbor, only 4 available */
+    uint8_t buf[4] = {};  /* needs 8 bytes for 1 neighbor, only 4 available */
     size_t len = g_rt.serialize(buf, sizeof(buf));
     TEST_ASSERT_EQUAL(0, (int)len);
 }
@@ -478,7 +478,7 @@ void run_route_table_tests(void)
     RUN_TEST(test_route_table_prune_empty_table_noop);
 
     RUN_TEST(test_route_table_serialize_empty_returns_1);
-    RUN_TEST(test_route_table_serialize_one_neighbor_returns_7);
+    RUN_TEST(test_route_table_serialize_one_neighbor_returns_8);
     RUN_TEST(test_route_table_serialize_flags_espnow_set);
     RUN_TEST(test_route_table_serialize_flags_lora_and_internet);
     RUN_TEST(test_route_table_serialize_buffer_too_small_returns_0);

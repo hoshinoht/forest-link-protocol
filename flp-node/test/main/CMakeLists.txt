@@ -6,6 +6,7 @@ idf_component_register(
         "test_route_table.cpp"
         "test_buffer_pool.cpp"
         "test_selective_repeat.cpp"
+        "test_mesh_improvements.cpp"
         "../mocks/mock_impl.cpp"
         "../../components/protocol/buffer_pool.cpp"
         "../../components/protocol/selective_repeat.cpp"

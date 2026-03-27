@@ -58,7 +58,16 @@ class SelectiveRepeat
         return next_seq_;
     }
     bool sender_window_full() const;
+    uint16_t sender_window_used() const;
     void reset_sender();
+
+    /* Phase 3: get send timestamp for RTT computation */
+    uint32_t get_send_time(uint16_t seq) const
+    {
+        if (!window_) return 0;
+        uint8_t idx = seq % window_size_;
+        return window_[idx].send_time_ms;
+    }
 
     /* Receiver API */
     bool init_receiver(uint16_t total_fragments,
@@ -94,6 +103,12 @@ class SelectiveRepeat
         timeout_ms_ = timeout_ms;
     }
 
+    /* True if any fragment has exceeded MAX_RETRIES without ACK */
+    bool is_sender_failed() const
+    {
+        return sender_failed_;
+    }
+
     /* Configure stride for multi-exit round-robin: this ARQ only owns
      * sequences where (seq % stride == offset).  stride=1 means all. */
     void set_exit_stride(uint8_t stride, uint8_t offset)
@@ -118,6 +133,7 @@ class SelectiveRepeat
     /* Multi-exit stride: skip non-owned seqs in base advancement / tick */
     uint8_t exit_stride_ = 1;   /* total exit nodes (1 = single-exit) */
     uint8_t exit_offset_ = 0;   /* this ARQ's index */
+    bool sender_failed_ = false; /* set when any fragment exceeds MAX_RETRIES */
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

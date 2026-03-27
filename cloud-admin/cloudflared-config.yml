@@ -1,0 +1,6 @@
+ingress:
+  - hostname: mqtt.hoshinoht.dev
+    service: http://mosquitto:9001
+  - hostname: flp.hoshinoht.dev
+    service: http://admin:5050
+  - service: http_status:404

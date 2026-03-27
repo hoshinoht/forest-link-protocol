@@ -1,5 +1,10 @@
 # Relay node overlay — layer on top of sdkconfig.defaults
-# Usage: idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" build
+# Usage: ./idf relay build
 
 CONFIG_FLP_WIFI_DISABLED=y
 CONFIG_FLP_ESPNOW_CHANNEL=1
+
+# PSRAM safe on relay nodes (no WiFi PHY calibration)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y

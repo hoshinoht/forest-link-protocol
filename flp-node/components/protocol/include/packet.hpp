@@ -30,6 +30,7 @@ enum class PacketType : uint8_t
     TRANSFER_AD = 0x20, /* file transfer advertisement */
     TRANSFER_ACK = 0x21, /* exit node response to transfer ad */
     ROUTE_ERROR = 0x13, /* link failure notification */
+    EXIT_OFFLINE = 0x22, /* exit node going offline notification */
     MESH_PUB = 0x30, /* uplink relay: node → exit → MQTT */
     MESH_CMD = 0x31, /* downlink relay: MQTT → exit → node */
 };
@@ -104,8 +105,16 @@ struct __attribute__((packed)) DiscoveryPayload
     int8_t rssi;
     uint16_t inet_seq;       /* monotonic sequence from originating exit node */
     uint16_t inet_origin;    /* address of the exit node this route comes from */
+    uint8_t queue_load;      /* forwarding queue utilisation (hi_used + lo_used) */
 };
-static_assert(sizeof(DiscoveryPayload) == 7, "DiscoveryPayload must be 7 bytes");
+
+/* Discovery flags bit layout constants */
+static constexpr uint8_t kDiscoveryInternetFlag = 0x01;
+static constexpr uint8_t kDiscoveryChShift = 1;
+static constexpr uint8_t kDiscoveryChMask = 0x0F;
+static constexpr uint8_t kDiscoverySfShift = 5;
+static constexpr uint8_t kDiscoverySfMask = 0x07;
+static_assert(sizeof(DiscoveryPayload) == 8, "DiscoveryPayload must be 8 bytes");
 
 struct __attribute__((packed)) RouteErrorPayload
 {
@@ -121,8 +130,15 @@ struct __attribute__((packed)) TransferAdPayload
     uint8_t fragment_size_d8; /* actual = val * 8 */
     uint32_t crc32;           /* full CRC32 (was crc16, caused cloud mismatch) */
     uint16_t fragment_count;  /* total fragments including FEC parity */
+    uint8_t filename_len;     /* length of filename (0 = not present, for compat) */
+    char filename[32];        /* filename, not null-terminated in wire format */
 };
-static_assert(sizeof(TransferAdPayload) == 13, "TransferAdPayload must be 13 bytes");
+static_assert(sizeof(TransferAdPayload) == 46, "TransferAdPayload must be 46 bytes");
+
+/* Minimum wire size of a TransferAdPayload (without filename) */
+static constexpr size_t MIN_TRANSFER_AD_LEN =
+    sizeof(TransferAdPayload) - sizeof(TransferAdPayload::filename)
+                               - sizeof(TransferAdPayload::filename_len);
 
 struct __attribute__((packed)) TransferAckPayload
 {
@@ -130,8 +146,31 @@ struct __attribute__((packed)) TransferAckPayload
     uint16_t exit_node_addr;
     int8_t rssi_to_gw;
     uint8_t hops_to_gw;
+    uint8_t active_transfers; /* number of active transfers on this exit */
 };
-static_assert(sizeof(TransferAckPayload) == 6, "TransferAckPayload must be 6 bytes");
+static_assert(sizeof(TransferAckPayload) == 7, "TransferAckPayload must be 7 bytes");
+
+struct __attribute__((packed)) ExitOfflinePayload
+{
+    uint16_t session_id;     /* active transfer session (0 = none) */
+    uint16_t exit_node_addr; /* which exit is going offline */
+};
+static_assert(sizeof(ExitOfflinePayload) == 4, "ExitOfflinePayload must be 4 bytes");
+
+/* Congestion bit helpers — high bit of 16-bit seq in ACK/NACK payload */
+static constexpr uint16_t CONGESTION_FLAG = 0x8000;
+static inline uint16_t seq_with_congestion(uint16_t seq, bool congested)
+{
+    return congested ? (seq | CONGESTION_FLAG) : seq;
+}
+static inline bool seq_has_congestion(uint16_t raw)
+{
+    return (raw & CONGESTION_FLAG) != 0;
+}
+static inline uint16_t seq_strip_congestion(uint16_t raw)
+{
+    return raw & ~CONGESTION_FLAG;
+}
 
 /* Unified inbound packet used across transports and mesh manager */
 enum class RxTransport : uint8_t

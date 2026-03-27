@@ -34,18 +34,32 @@ struct ExitCandidate
     uint8_t hops_to_gw;
 };
 
+/* Per-exit-path quality statistics for weighted scheduling (Phase 3).
+ * Updated from ACK/NACK handling; used by tick_mesh_arq() to select
+ * the best exit node for each fragment. */
+struct ExitPathStats
+{
+    float ewma_rtt_ms   = 500.0f; /* EWMA of round-trip time */
+    float ewma_loss     = 0.0f;   /* EWMA of loss rate [0,1] */
+    uint32_t sent       = 0;
+    uint32_t acked      = 0;
+    uint32_t nacked     = 0;
+    float weight        = 1.0f;   /* normalized scheduling weight */
+};
+
 /* Active file transfer state (sender side) */
 struct ActiveTransfer
 {
     ReadChunkFn read_chunk;
     size_t size = 0;
+    uint32_t crc32 = 0; /* stored for periodic meta re-publish */
     uint16_t fragment_count = 0;
     uint16_t fragment_size = 0;
     uint16_t next_fragment = 0;
     uint16_t exit_nodes[MAX_EXIT_NODES] = {};
     uint8_t exit_node_count = 0;
     uint16_t session_id = 0;
-    char filename[20] = {};
+    char filename[33] = {}; /* 32 chars + NUL (matches wire format) */
     bool active = false;
     bool exit_node_alive[MAX_EXIT_NODES] = {true, true, true, true};
     uint32_t last_ack_ms[MAX_EXIT_NODES] = {};
@@ -65,7 +79,6 @@ struct BroadcastRetry
     bool active = false;
 };
 
-/* Callback for sending packets (TransferEngine -> MeshManager) */
 /* Callback for sending packets (TransferEngine -> MeshManager) */
 using SendPacketFn = std::function<void(uint16_t dst,
                                         PacketType type,
@@ -117,15 +130,17 @@ class TransferEngine
     void handle_nack(uint16_t seq, uint16_t from_addr);
 
     /*
-     * Start a file transfer (sender side)
+     * Start a file transfer (sender side).
      * If has_internet && has_mqtt, uses local-exit fast path (no mesh).
+     * Default hops_to_internet=1 (single hop); callers should pass the
+     * actual hop count from RouteTable.
      */
     void start_file_transfer(const char *filename,
                              size_t size,
                              ReadChunkFn read_chunk,
                              bool has_internet = false,
                              bool has_mqtt = false,
-                             uint8_t hops_to_internet = 0xFF);
+                             uint8_t hops_to_internet = 1);
 
     /* Helper: wrap a contiguous buffer as a ReadChunkFn */
     static ReadChunkFn make_buffer_reader(const uint8_t *data, size_t size);
@@ -151,6 +166,21 @@ class TransferEngine
     /* Exit node status */
     bool is_exit_node() const { return is_exit_node_; }
 
+    /* Active session ID (0 if no transfer in progress) */
+    uint16_t active_session_id() const
+    {
+        if (transfer_.active) return transfer_.session_id;
+        if (is_exit_node_)    return active_session_id_;
+        return 0;
+    }
+
+    /* Called when an exit node reports itself offline */
+    void handle_exit_offline(uint16_t exit_addr, uint16_t session_id);
+
+    /* Called when a relay signals congestion via the ACK/NACK high bit.
+     * Causes transfer_tick() to skip one cycle of fragment feeding. */
+    void signal_congestion() { congestion_backoff_ticks_++; }
+
     /* Set callback for forwarding fragments to MQTT */
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
 
@@ -163,10 +193,14 @@ class TransferEngine
 
   private:
     void transfer_tick();
+    void tick_local_exit_arq();
+    void tick_mesh_arq();
+    void compact_retx_queue(uint8_t sent);
     void broadcast_retry_tick(uint32_t now_ms);
     void election_timeout_tick(uint32_t now_ms);
     void exit_node_health_tick(uint32_t now_ms);
     void redistribute_dead_exit(uint8_t dead_idx);
+    void recompute_weights();
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
                                    size_t payload_len,
@@ -175,6 +209,7 @@ class TransferEngine
     int8_t arq_index_for_peer(uint16_t addr) const;
 
     static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 10000;
+    static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 3000;
     uint32_t election_timeout_ms_ = 3000; /* Step 6: adaptive election window */
 
     SelectiveRepeat arq_[MAX_EXIT_NODES];
@@ -201,6 +236,9 @@ class TransferEngine
     uint16_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
 
+    /* Reusable scratch buffer for fragment I/O (avoids 4x stack alloc) */
+    uint8_t frag_buf_[MAX_MTU] = {};
+
     /* Cloud selective-repeat ARQ state (local-exit path) */
     static constexpr uint8_t CLOUD_WINDOW_SIZE = 8;
     static constexpr uint16_t MAX_CLOUD_FRAGMENTS = 2200;
@@ -215,19 +253,28 @@ class TransferEngine
     uint16_t cloud_retx_queue_[CLOUD_RETX_QUEUE_SIZE] = {};
     uint8_t cloud_retx_count_ = 0;
 
-    /* Deferred meta: exit node stores ad info until fragment 0 delivers filename */
-    struct PendingMeta
-    {
-        uint32_t file_size;
-        uint16_t fragment_count;
-        uint16_t fragment_size;
-        uint32_t crc32;
-        bool waiting; /* true = waiting for frag 0 with filename */
-    } pending_meta_ = {};
-
     /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
     uint8_t redist_count_ = 0;
+
+    /* Congestion backoff: each signal_congestion() call adds one skip tick */
+    uint8_t congestion_backoff_ticks_ = 0;
+
+    /* Cloud ACK stall detection for local-exit and exit-node timeouts.
+     * If no cloud ACK arrives within this period, abort the transfer so
+     * auto-demo or a new TRANSFER_AD can proceed. */
+    static constexpr uint32_t CLOUD_STALL_TIMEOUT_MS = 30000;
+    uint32_t last_cloud_activity_ms_ = 0;
+
+    /* Periodic meta re-publish: if the cloud restarts mid-transfer, it has
+     * no session state. Re-publishing meta lets it pick up the session. */
+    static constexpr uint32_t META_REPUBLISH_INTERVAL_MS = 10000;
+    uint32_t last_meta_publish_ms_ = 0;
+
+    /* Phase 3: per-exit-path quality stats for weighted scheduling */
+    ExitPathStats path_stats_[MAX_EXIT_NODES] = {};
+    uint16_t weight_recompute_counter_ = 0;
+    static constexpr uint16_t WEIGHT_RECOMPUTE_INTERVAL = 16; /* every N frags */
 };
 
 } /* namespace flp */

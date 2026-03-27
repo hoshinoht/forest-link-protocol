@@ -116,7 +116,8 @@ class MeshManager
     uint8_t get_hops_to_internet() const
     {
         if (has_internet_) { return 0; }
-        return route_table_.min_hops_to_internet();
+        const uint8_t min_h = route_table_.min_hops_to_internet();
+        return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
     }
     bool has_recent_cloud_cmd() const
     {
@@ -165,6 +166,7 @@ class MeshManager
                   uint16_t peer_addr);
     void send_route_error(uint16_t dead_addr, uint16_t inet_origin,
                           uint16_t last_seq);
+    void broadcast_exit_offline();
 
     /*
      * Generic relay: publishes via MQTT if exit node, else routes
@@ -198,6 +200,9 @@ class MeshManager
     /* Step 1d: DSDV sequence number for internet route */
     uint16_t my_inet_seq_ = 0;
 
+    /* Hysteresis: track current preferred parent for check_better_route() */
+    uint16_t preferred_parent_ = BROADCAST_ADDR;
+
     /* Fix 2: track current WiFi channel to avoid redundant set_channel calls */
     uint8_t current_channel_ = 0;
 
@@ -208,9 +213,11 @@ class MeshManager
     /* Fix 7: deferred ESP-NOW peer update flag (set from WiFi event task) */
     std::atomic<bool> espnow_peer_update_pending_{false};
 
+    /* Deferred EXIT_OFFLINE broadcast (set from WiFi event task) */
+    std::atomic<bool> exit_offline_pending_{false};
+
     /* Heap monitor */
     HeapMonitor heap_monitor_;
-    uint32_t heap_timer_ms_ = 0;
 
     /* MQTT bridge */
     MqttClient *mqtt_client_ = nullptr;

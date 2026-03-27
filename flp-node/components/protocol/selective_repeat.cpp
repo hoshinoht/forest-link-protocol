@@ -61,6 +61,7 @@ void SelectiveRepeat::reset_sender()
     next_seq_ = 0;
     exit_stride_ = 1;
     exit_offset_ = 0;
+    sender_failed_ = false;
     if (window_)
     {
         memset(window_, 0, ARQ_WINDOW * sizeof(FragmentSlot));
@@ -70,6 +71,11 @@ void SelectiveRepeat::reset_sender()
 bool SelectiveRepeat::sender_window_full() const
 {
     return (next_seq_ - base_seq_) >= window_size_;
+}
+
+uint16_t SelectiveRepeat::sender_window_used() const
+{
+    return next_seq_ - base_seq_;
 }
 
 int SelectiveRepeat::send_fragment(uint16_t seq,
@@ -204,6 +210,7 @@ void SelectiveRepeat::tick()
             if (slot.retries >= MAX_RETRIES)
             {
                 ESP_LOGE(TAG, "Timeout seq=%u max retries exceeded", seq);
+                sender_failed_ = true;
                 continue;
             }
 

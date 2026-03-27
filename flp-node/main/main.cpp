@@ -60,10 +60,11 @@ static uint8_t s_fallback_payload[FALLBACK_PAYLOAD_SIZE];
 #if CONFIG_FLP_SD_ENABLED
 static const char *s_sd_status = "not attempted";
 static esp_err_t s_sd_err = ESP_OK;
+static flp::SdReadCache s_sd_cache;
 #endif
 
 #if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
-/* Auto demo mode: periodic transfer without button */
+/* Auto demo mode (exit node): waits for MQTT, then periodic transfer */
 static void auto_demo_task(void *arg)
 {
     auto *mgr = static_cast<flp::MeshManager *>(arg);
@@ -86,6 +87,37 @@ static void auto_demo_task(void *arg)
         if (!mgr->is_mqtt_connected())
         {
             ESP_LOGW(TAG, "Auto demo: MQTT disconnected, skipping transfer");
+            vTaskDelay(interval);
+            continue;
+        }
+        ESP_LOGI(TAG,
+                 "Auto demo transfer: demo.txt (%u bytes)",
+                 (unsigned) s_demo_size);
+        mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
+        vTaskDelay(interval);
+    }
+}
+#elif CONFIG_FLP_DEMO_AUTO && CONFIG_FLP_WIFI_DISABLED
+/* Auto demo mode (relay node): waits for gateway discovery, then periodic transfer */
+static void auto_demo_task(void *arg)
+{
+    auto *mgr = static_cast<flp::MeshManager *>(arg);
+    const TickType_t interval =
+        pdMS_TO_TICKS(CONFIG_FLP_DEMO_AUTO_INTERVAL_S * 1000);
+
+    ESP_LOGI(TAG, "Auto demo (relay): waiting for gateway discovery...");
+    while (mgr->get_hops_to_internet() >= 0xFF)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "Auto demo (relay): gateway found at %u hops, starting transfers",
+             mgr->get_hops_to_internet());
+
+    while (true)
+    {
+        if (mgr->get_hops_to_internet() >= 0xFF)
+        {
+            ESP_LOGW(TAG, "Auto demo (relay): no gateway, skipping transfer");
             vTaskDelay(interval);
             continue;
         }
@@ -304,25 +336,22 @@ extern "C" void app_main()
     s_sd_err = flp::sdcard_init();
     if (s_sd_err == ESP_OK)
     {
-        size_t file_size = 0;
-        FILE *f = flp::sdcard_open("/sdcard/demo.txt", &file_size);
-        if (f != nullptr)
+        esp_err_t cache_err = s_sd_cache.open("/sdcard/demo.txt");
+        if (cache_err == ESP_OK)
         {
-            s_demo_size = file_size;
-            s_demo_read_chunk = [f](uint8_t *buf,
-                                    size_t offset,
-                                    size_t len) -> size_t
+            s_demo_size = s_sd_cache.file_size();
+            s_demo_read_chunk = [](uint8_t *buf,
+                                   size_t offset,
+                                   size_t len) -> size_t
             {
-                if (fseek(f, static_cast<long>(offset), SEEK_SET) != 0)
-                {
-                    return 0;
-                }
-                return fread(buf, 1, len, f);
+                return s_sd_cache.read(buf, offset, len);
             };
             s_sd_status = "OK";
             ESP_LOGI(TAG,
-                     "Loaded demo.txt from SD card: %u bytes (streaming)",
-                     (unsigned) s_demo_size);
+                     "Loaded demo.txt from SD card: %u bytes "
+                     "(PSRAM read-ahead cache, %zu KB)",
+                     (unsigned) s_demo_size,
+                     flp::SdReadCache::CACHE_SIZE / 1024);
         }
         else
         {
@@ -396,8 +425,8 @@ extern "C" void app_main()
                 FLP_UART_TASK_PRIORITY,
                 nullptr);
 
-#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
-    /* Auto demo mode: periodic transfer task */
+#if CONFIG_FLP_DEMO_AUTO
+    /* Auto demo mode: periodic transfer task (both exit and relay) */
     xTaskCreate(auto_demo_task,
                 "auto_demo",
                 FLP_BUTTON_TASK_STACK,
@@ -445,7 +474,7 @@ extern "C" void app_main()
                 nullptr);
 #endif
 
-#if CONFIG_FLP_DEMO_AUTO && !CONFIG_FLP_WIFI_DISABLED
+#if CONFIG_FLP_DEMO_AUTO
     ESP_LOGI(TAG,
              "All tasks created (UART on GPIO %d/%d, auto demo every %ds)",
              CONFIG_FLP_UART_TX_PIN,
