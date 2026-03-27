@@ -146,6 +146,9 @@ func RunEngine(
 	const maxPendingChunks = 512
 	pendingChunks := make([]mqtt.FileChunk, 0, 256)
 
+	// Stall NACK cooldown: don't flood every second
+	var lastStallNACKTime float64
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -250,6 +253,9 @@ func RunEngine(
 		} else {
 			log.Printf("[transfer] aborted session %s (timeout)", s.SessionID)
 		}
+		// Clear staged chunks on completion to prevent stale data
+		// from being replayed into a future session with the same ID
+		pendingChunks = pendingChunks[:0]
 		tq.CompleteActive()
 		setupActive()
 	}
@@ -316,12 +322,17 @@ func RunEngine(
 			// D1+B3 fix: stall-based end-to-end NACK bridge.
 			// If no chunks arrived for 5s but transfer is incomplete,
 			// publish missing seqs so exit nodes can re-request from source.
+			// Cooldown: only fire once per 10s to avoid flooding MQTT.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
-				gaps := sr.CheckStall(lastChunkTime, 5.0)
-				if len(gaps) > 0 {
-					mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)
-					log.Printf("[transfer] stall detected, published %d NACKs for session %s",
-						len(gaps), tq.ActiveTransfer.SessionID)
+				now := float64(time.Now().UnixMilli()) / 1000.0
+				if now-lastStallNACKTime >= 10.0 {
+					gaps := sr.CheckStall(lastChunkTime, 5.0)
+					if len(gaps) > 0 {
+						mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)
+						lastStallNACKTime = now
+						log.Printf("[transfer] stall detected, published %d NACKs for session %s",
+							len(gaps), tq.ActiveTransfer.SessionID)
+					}
 				}
 			}
 			// B7: garbage-collect stale pending chunks (>30s old is impossible
