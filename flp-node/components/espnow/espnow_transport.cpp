@@ -117,6 +117,17 @@ void EspNowTransport::init()
         return;
     }
 
+    /* TX flow control semaphore: sized to ESP-NOW's internal TX queue depth.
+     * send() takes a slot, on_send() callback returns it.  This makes
+     * NO_MEM structurally impossible and self-adjusts to actual radio
+     * throughput — no budget constants needed in upper layers. */
+    tx_slots_ = xSemaphoreCreateCounting(TX_SLOT_DEPTH, TX_SLOT_DEPTH);
+    if (!tx_slots_)
+    {
+        ESP_LOGE(TAG, "Failed to create TX semaphore");
+        return;
+    }
+
     /* Derive node address from base MAC */
     uint8_t mac[6];
     esp_efuse_mac_get_default(mac);
@@ -286,6 +297,13 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
 void EspNowTransport::on_send(const esp_now_send_info_t *info,
                               esp_now_send_status_t status)
 {
+    /* Return the TX slot to the semaphore — fires from the WiFi task
+     * after the frame has been transmitted (success or failure). */
+    if (s_instance && s_instance->tx_slots_)
+    {
+        xSemaphoreGive(s_instance->tx_slots_);
+    }
+
     if (status != ESP_NOW_SEND_SUCCESS)
     {
         const uint8_t *mac = info->des_addr;
@@ -313,6 +331,17 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         return -1;
     }
 
+    /* Acquire a TX slot from the counting semaphore.
+     * Brief blocking wait (5ms): gives on_send() callback time to
+     * return a slot when the pipeline is saturated, instead of
+     * failing instantly.  5ms is ~2 frame TX times at 1Mbps. */
+    if (tx_slots_ && xSemaphoreTake(tx_slots_, pdMS_TO_TICKS(5)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "TX semaphore full (%u slots), deferring send to 0x%04X",
+                 TX_SLOT_DEPTH, peer_addr);
+        return -1;
+    }
+
     /* Broadcast */
     if (peer_addr == 0xFFFF)
     {
@@ -326,6 +355,8 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         {
             ESP_LOGE(
                 TAG, "ESP-NOW broadcast send failed: %s", esp_err_to_name(err));
+            /* Give back the slot — esp_now_send failed, on_send won't fire */
+            if (tx_slots_) { xSemaphoreGive(tx_slots_); }
             return -1;
         }
         ESP_LOGD(TAG, "Broadcast %zu bytes", len);
@@ -337,6 +368,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
     if (!find_mac(peer_addr, mac))
     {
         ESP_LOGW(TAG, "Peer 0x%04X not found in table", peer_addr);
+        if (tx_slots_) { xSemaphoreGive(tx_slots_); }
         return -1;
     }
 
@@ -347,6 +379,8 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
                  "ESP-NOW send to 0x%04X failed: %s",
                  peer_addr,
                  esp_err_to_name(err));
+        /* Give back — esp_now_send failed, on_send won't fire */
+        if (tx_slots_) { xSemaphoreGive(tx_slots_); }
         return -1;
     }
 

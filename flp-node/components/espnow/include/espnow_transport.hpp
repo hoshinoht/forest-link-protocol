@@ -7,6 +7,7 @@
 #include "esp_now.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "itransport.hpp"
 
 namespace flp
@@ -61,6 +62,13 @@ class EspNowTransport : public ITransport
 
     int8_t get_peer_rssi(uint16_t peer_addr) const;
 
+    /* TX semaphore diagnostics: slots currently available (0 = all busy) */
+    uint8_t get_tx_slots_available() const
+    {
+        if (!tx_slots_) { return TX_SLOT_DEPTH; }
+        return static_cast<uint8_t>(uxSemaphoreGetCount(tx_slots_));
+    }
+
   private:
     struct PeerInfo
     {
@@ -76,6 +84,25 @@ class EspNowTransport : public ITransport
         uint8_t mac[6];
         int8_t rssi;
     };
+
+    /*
+     * Counting semaphore for ESP-NOW TX flow control.
+     *
+     * ESP-NOW has a small internal TX queue (~5 frames).  When full,
+     * esp_now_send() returns ESP_ERR_ESPNOW_NO_MEM.  Instead of guessing
+     * per-tick send budgets, we use a counting semaphore sized to the
+     * radio's actual TX depth.
+     *
+     * send():    xSemaphoreTake(tx_slots_, 0)  — acquire a slot
+     *            esp_now_send(...)
+     * on_send(): xSemaphoreGive(tx_slots_)     — frame TX'd, slot freed
+     *
+     * This provides distributed mutual exclusion (Coulouris §15.2) on the
+     * shared radio TX buffer: all code paths that call send() are naturally
+     * throttled without any budget constants or coordination.
+     */
+    static constexpr uint8_t TX_SLOT_DEPTH = 16;
+    SemaphoreHandle_t tx_slots_ = nullptr;
 
     PeerInfo peers_[ESPNOW_MAX_PEERS] = {};
     uint8_t peer_count_ = 0;

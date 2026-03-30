@@ -31,6 +31,7 @@ enum class PacketType : uint8_t
     TRANSFER_ACK = 0x21, /* exit node response to transfer ad */
     ROUTE_ERROR = 0x13, /* link failure notification */
     EXIT_OFFLINE = 0x22, /* exit node going offline notification */
+    TRANSFER_DONE = 0x23, /* cloud confirmed transfer complete */
     MESH_PUB = 0x30, /* uplink relay: node → exit → MQTT */
     MESH_CMD = 0x31, /* downlink relay: MQTT → exit → node */
 };

@@ -107,7 +107,7 @@ using ForwardMetaFn = std::function<void(uint16_t session_id,
                                           uint32_t crc32)>;
 
 /* Callback for draining ACK/NACK from MqttClient */
-using DrainSeqFn = std::function<bool(uint16_t &seq_out)>;
+using DrainSeqFn = std::function<bool(uint16_t session_id, uint16_t &seq_out)>;
 
 class TransferEngine
 {
@@ -185,8 +185,8 @@ class TransferEngine
      * to avoid stalling the transfer while giving the exit node drain time. */
     void signal_congestion()
     {
-        congestion_backoff_ticks_ += 4;
-        if (congestion_backoff_ticks_ > 20) { congestion_backoff_ticks_ = 20; }
+        congestion_backoff_ticks_ += 2;
+        if (congestion_backoff_ticks_ > 12) { congestion_backoff_ticks_ = 12; }
     }
 
     /* Set callback for forwarding fragments to MQTT */
@@ -202,11 +202,32 @@ class TransferEngine
     /* Set drain callback for deferred fragment ACKs (exit node: MQTT published OK) */
     void set_fragment_ack_drain(DrainSeqFn fn) { drain_fragment_ack_fn_ = fn; }
 
+    /* Session consensus: cloud confirmed transfer complete.
+     * Set a callback that returns true (once) when the cloud has
+     * published TRANSFER_COMPLETE.  The exit node polls this each tick
+     * and forwards TRANSFER_DONE to the source via mesh. */
+    using TransferCompleteFn = std::function<bool(uint16_t session_id)>;
+    void set_transfer_complete_fn(TransferCompleteFn fn)
+    {
+        transfer_complete_fn_ = fn;
+    }
+
+    using SessionLifecycleFn = std::function<void(uint16_t session_id)>;
+    void set_mqtt_session_end_fn(SessionLifecycleFn fn)
+    {
+        mqtt_session_end_fn_ = fn;
+    }
+
+    /* Handle TRANSFER_DONE from exit node (source side) */
+    void handle_transfer_done(uint16_t sender);
+
   private:
     void transfer_tick();
     void tick_local_exit_arq();
     void tick_mesh_arq();
     void compact_retx_queue(uint8_t sent);
+    void reset_sender_transfer_state(bool signal_complete);
+    void clear_exit_node_state();
     void broadcast_retry_tick(uint32_t now_ms);
     void election_timeout_tick(uint32_t now_ms);
     void exit_node_health_tick(uint32_t now_ms);
@@ -219,8 +240,8 @@ class TransferEngine
                                    uint8_t max_retries = 3);
     int8_t arq_index_for_peer(uint16_t addr) const;
 
-    static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 10000;
-    static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 3000;
+    static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 30000;
+    static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 8000;
     uint32_t election_timeout_ms_ = 3000; /* Step 6: adaptive election window */
 
     SelectiveRepeat arq_[MAX_EXIT_NODES];
@@ -243,6 +264,8 @@ class TransferEngine
     DrainSeqFn drain_cloud_ack_fn_;
     DrainSeqFn drain_cloud_nack_fn_;
     DrainSeqFn drain_fragment_ack_fn_;
+    TransferCompleteFn transfer_complete_fn_;
+    SessionLifecycleFn mqtt_session_end_fn_;
     bool is_exit_node_ = false;
     bool local_exit_ = false;
     uint16_t active_session_id_ = 0;
@@ -252,7 +275,7 @@ class TransferEngine
     uint8_t frag_buf_[MAX_MTU] = {};
 
     /* Cloud selective-repeat ARQ state (local-exit path) */
-    static constexpr uint8_t CLOUD_WINDOW_SIZE = 8;
+    static constexpr uint8_t CLOUD_WINDOW_SIZE = 16;
     static constexpr uint16_t MAX_CLOUD_FRAGMENTS = 2200;
     static constexpr uint16_t CLOUD_ACK_BITMAP_BYTES =
         (MAX_CLOUD_FRAGMENTS + 7) / 8;  /* 275 bytes */
@@ -274,12 +297,6 @@ class TransferEngine
     static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 64;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
     uint8_t oow_retx_count_ = 0;
-
-    /* Shared per-tick send budget: prevents ESP_ERR_ESPNOW_NO_MEM by
-     * capping the total number of data-carrying sends across ARQ retx,
-     * OOW retx, and new fragments. */
-    static constexpr uint8_t MAX_SENDS_PER_TICK = 4;
-    uint8_t tick_send_budget_ = MAX_SENDS_PER_TICK;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;

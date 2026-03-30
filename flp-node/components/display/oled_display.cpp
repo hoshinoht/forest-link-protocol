@@ -145,7 +145,11 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     esp_lcd_panel_io_register_event_callbacks(io_handle_, &cbs, display_);
 
     const esp_timer_create_args_t tick_args = {
-        .callback = &OledDisplay::tick_timer_cb, .name = "lvgl_tick"
+        .callback = &OledDisplay::tick_timer_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "lvgl_tick",
+        .skip_unhandled_events = false,
     };
     esp_timer_handle_t tick_timer = nullptr;
     ESP_ERROR_CHECK(esp_timer_create(&tick_args, &tick_timer));

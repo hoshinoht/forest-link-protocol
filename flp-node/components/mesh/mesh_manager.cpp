@@ -34,7 +34,7 @@ constexpr uint8_t kNodeMacLowByteIdx = 5;
 constexpr uint8_t kNodeMacHighByteIdx = 4;
 constexpr uint8_t kQueueDepth = 16;
 constexpr uint8_t kMaxQueueDrainPerLoop = 8;
-constexpr uint32_t kQueueWaitMs = 100;
+constexpr uint32_t kQueueWaitMs = 20;
 constexpr uint32_t kDiscoveryIntervalMs = 10000;
 constexpr uint32_t kPruneIntervalMs = 5000;
 constexpr uint32_t kNeighborStaleTimeoutMs = 30000;
@@ -205,33 +205,54 @@ void MeshManager::init()
 
     /* Wire up cloud ACK/NACK drain for local-exit selective repeat */
     transfer_engine_.set_cloud_ack_drain(
-        [this](uint16_t &seq_out) -> bool
+        [this](uint16_t session_id, uint16_t &seq_out) -> bool
         {
             if (mqtt_client_)
             {
-                return mqtt_client_->drain_cloud_ack(seq_out);
+                return mqtt_client_->drain_cloud_ack(session_id, seq_out);
             }
             return false;
         });
     transfer_engine_.set_cloud_nack_drain(
-        [this](uint16_t &seq_out) -> bool
+        [this](uint16_t session_id, uint16_t &seq_out) -> bool
         {
             if (mqtt_client_)
             {
-                return mqtt_client_->drain_cloud_nack(seq_out);
+                return mqtt_client_->drain_cloud_nack(session_id, seq_out);
             }
             return false;
         });
 
     /* Wire up deferred fragment ACK drain (exit node: ACK after MQTT publish) */
     transfer_engine_.set_fragment_ack_drain(
-        [this](uint16_t &seq_out) -> bool
+        [this](uint16_t session_id, uint16_t &seq_out) -> bool
         {
             if (mqtt_client_)
             {
-                return mqtt_client_->drain_fragment_ack(seq_out);
+                return mqtt_client_->drain_fragment_ack(session_id, seq_out);
             }
             return false;
+        });
+
+    /* Wire up session consensus: cloud TRANSFER_COMPLETE → exit → source.
+     * Exit node polls MqttClient's flag each tick. */
+    transfer_engine_.set_transfer_complete_fn(
+        [this](uint16_t session_id) -> bool
+        {
+            if (mqtt_client_)
+            {
+                return mqtt_client_->consume_transfer_complete(session_id);
+            }
+            return false;
+        });
+
+    transfer_engine_.set_mqtt_session_end_fn(
+        [this](uint16_t session_id)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->clear_transfer_session(session_id);
+            }
         });
 
     /* Wire up transfer meta forwarding (exit node publishes complete meta) */
@@ -401,6 +422,15 @@ void MeshManager::run()
                          "Buffer pool exhausted %lu time(s) total",
                          exhaustions);
             }
+
+            /* Periodic system state summary for diagnostics */
+            ESP_LOGI(TAG,
+                     "state: tx_slots=%u neighbors=%u transfer=%s",
+                     espnow_.get_tx_slots_available(),
+                     route_table_.get_count(),
+                     transfer_engine_.is_transfer_active()
+                         ? transfer_engine_.current_filename()
+                         : "idle");
 
             /* Step 7: ADR-inspired adaptive spreading factor */
             uint8_t target_sf = 7;
@@ -580,8 +610,13 @@ void MeshManager::process_slab(BufferSlab *slab)
             hdr.src_addr, slab->rssi, hdr.hop_count(), via_espnow, via_lora);
     }
 
-    /* EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others. */
-    bool is_exit = has_internet_ && mqtt_client_;
+    /* EXIT_ANY_ADDR: consumed by exit nodes (has MQTT), relayed by others.
+     * Require MQTT to be actually connected — has_internet_ only means
+     * "WiFi has IP", but DNS resolution + TLS handshake can take 10-15s.
+     * Accepting exit role before MQTT connects causes the fragment queue
+     * to fill with no drain path, producing zero ACKs and false timeouts. */
+    bool mqtt_connected = mqtt_client_ && mqtt_client_->is_connected();
+    bool is_exit = has_internet_ && mqtt_connected;
     bool for_us = (hdr.dst_addr == my_addr_) ||
                   (hdr.dst_addr == BROADCAST_ADDR) ||
                   (hdr.dst_addr == EXIT_ANY_ADDR && is_exit);
@@ -595,7 +630,7 @@ void MeshManager::process_slab(BufferSlab *slab)
                 break;
             case PacketType::TRANSFER_AD:
                 transfer_engine_.handle_transfer_ad(
-                    hdr, payload, payload_len, has_internet_);
+                    hdr, payload, payload_len, is_exit);
                 break;
             case PacketType::TRANSFER_ACK:
                 transfer_engine_.handle_transfer_ack(hdr, payload, payload_len);
@@ -634,6 +669,9 @@ void MeshManager::process_slab(BufferSlab *slab)
                 break;
             case PacketType::ROUTE_ERROR:
                 handle_route_error(hdr, payload, payload_len);
+                break;
+            case PacketType::TRANSFER_DONE:
+                transfer_engine_.handle_transfer_done(hdr.src_addr);
                 break;
             default:
                 ESP_LOGD(TAG,

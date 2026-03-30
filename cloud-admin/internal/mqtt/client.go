@@ -29,6 +29,10 @@ type Client struct {
 	topoCh   chan<- TopoMsg
 	metricCh chan<- MetricMsg
 	ackCh    chan ackItem // async ACK publish queue
+
+	// Tracing counters
+	traceChunksIn      int
+	traceChunksDropped int
 }
 
 // NewClient creates a Client that fans out received messages to the provided channels.
@@ -155,8 +159,11 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 			copy(data, payload[4:])
 			select {
 			case c.chunkCh <- FileChunk{NodeID: nodeID, SessionID: sessionID, SeqNum: seq, Data: data}:
+				c.traceChunksIn++
 			default:
-				log.Printf("[mqtt] chunkCh full, dropping chunk seq=%d from %s", seq, nodeID)
+				c.traceChunksDropped++
+				log.Printf("[mqtt] chunkCh full, dropping chunk seq=%d from %s (dropped=%d)",
+					seq, nodeID, c.traceChunksDropped)
 			}
 		}
 
@@ -235,6 +242,24 @@ func (c *Client) PublishTransferCmd(nodeID, command, sessionID string) {
 	if tok.Error() != nil {
 		log.Printf("[mqtt] publish transfer_cmd error: %v", tok.Error())
 	}
+}
+
+// PublishTransferComplete notifies exit nodes that a session has been
+// successfully received.  The exit node forwards this to the source
+// node via mesh, providing session consensus (Coulouris §15.5):
+// the cloud is the authoritative coordinator that terminates the
+// "transfer active" state.
+func (c *Client) PublishTransferComplete(sessionID string) {
+	payload, _ := json.Marshal(map[string]string{
+		"session_id": sessionID,
+	})
+	topic := fmt.Sprintf("flp/admin/complete/%s", sessionID)
+	tok := c.client.Publish(topic, 1, false, payload)
+	tok.Wait()
+	if tok.Error() != nil {
+		log.Printf("[mqtt] publish transfer_complete error: %v", tok.Error())
+	}
+	log.Printf("[transfer] published TRANSFER_COMPLETE for session %s", sessionID)
 }
 
 // PublishCmd publishes raw bytes to flp/admin/cmd.

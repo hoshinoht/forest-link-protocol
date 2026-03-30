@@ -62,6 +62,11 @@ void SelectiveRepeat::reset_sender()
     exit_stride_ = 1;
     exit_offset_ = 0;
     sender_failed_ = false;
+    /* Reset adaptive RTT state for the next transfer */
+    srtt_ms_ = 0;
+    rttvar_ms_ = 0;
+    rto_ms_ = 0;
+    rtt_initialized_ = false;
     if (window_)
     {
         memset(window_, 0, ARQ_WINDOW * sizeof(FragmentSlot));
@@ -128,7 +133,49 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
     }
 
     uint8_t idx = seq % window_size_;
-    window_[idx].acked = true;
+    FragmentSlot &slot = window_[idx];
+
+    /* Adaptive RTO: measure RTT on first-attempt ACKs only.
+     * Retransmitted fragments have ambiguous RTT (Karn's algorithm). */
+    if (slot.sent && !slot.acked && slot.retries == 0)
+    {
+        uint32_t rtt = now_ms() - slot.send_time_ms;
+        if (!rtt_initialized_)
+        {
+            /* Bootstrap: RFC 6298 §2.2 */
+            srtt_ms_ = rtt;
+            rttvar_ms_ = rtt / 2;
+            rtt_initialized_ = true;
+        }
+        else
+        {
+            /* Update: RFC 6298 §2.3 */
+            int32_t delta = static_cast<int32_t>(rtt) -
+                            static_cast<int32_t>(srtt_ms_);
+            uint32_t abs_delta = (delta < 0)
+                                     ? static_cast<uint32_t>(-delta)
+                                     : static_cast<uint32_t>(delta);
+            rttvar_ms_ = (3 * rttvar_ms_ + abs_delta) / 4;
+            srtt_ms_ = (7 * srtt_ms_ + rtt) / 8;
+        }
+        rto_ms_ = srtt_ms_ + 4 * rttvar_ms_;
+        if (rto_ms_ < RTO_MIN_MS) { rto_ms_ = RTO_MIN_MS; }
+        if (rto_ms_ > RTO_MAX_MS) { rto_ms_ = RTO_MAX_MS; }
+
+        /* Log every 32nd RTT sample to track adaptation without flooding */
+        static uint16_t rtt_sample_count = 0;
+        rtt_sample_count++;
+        if (rtt_sample_count <= 3 || (rtt_sample_count % 32) == 0)
+        {
+            ESP_LOGI(TAG,
+                     "RTT sample #%u: rtt=%lums srtt=%lums rttvar=%lums rto=%lums",
+                     rtt_sample_count,
+                     (unsigned long) rtt, (unsigned long) srtt_ms_,
+                     (unsigned long) rttvar_ms_, (unsigned long) rto_ms_);
+        }
+    }
+
+    slot.acked = true;
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);
 
@@ -169,11 +216,10 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
 
     if (slot.retries >= MAX_RETRIES)
     {
-        ESP_LOGE(TAG, "NACK seq=%u max retries reached", seq);
-        return;
+        ESP_LOGW(TAG, "NACK seq=%u retry counter exhausted, resetting", seq);
     }
 
-    slot.retries++;
+    slot.retries = 0;
     slot.send_time_ms = now_ms();
 
     ESP_LOGD(TAG, "NACK retransmit seq=%u retry=%u", seq, slot.retries);
@@ -207,30 +253,28 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
         }
 
         /*
-         * Exponential backoff: timeout doubles with each retry.
-         *   retry 0 (first send): timeout_ms_        (2000ms)
-         *   retry 1:              timeout_ms_ * 2    (4000ms)
-         *   retry 2:              timeout_ms_ * 4    (8000ms)
-         *   retry 3:              timeout_ms_ * 8    (16000ms)  capped
-         *   ...
-         * This gives the deferred-ACK pipeline (ESP-NOW → MQTT queue →
-         * TLS publish → fragment_ack_queue → mesh tick → ACK back) more
-         * time to complete under load, instead of burning retries at a
-         * fixed 2s interval that's too aggressive for the slowest path.
+         * Adaptive RTO with exponential backoff on retries.
+         *
+         * Base timeout uses the measured SRTT+4*RTTVAR (RFC 6298) if
+         * available, falling back to the configured timeout_ms_ until
+         * the first ACK arrives.  On each retry, the RTO doubles
+         * (RFC 6298 §5.5) to give the pipeline time to drain.
+         *
+         * Lecture ref: "Failure Detectors" (Coulouris) — "use timeout
+         * values that reflect observed network delay conditions."
          */
-        uint32_t backoff = timeout_ms_ << slot.retries; /* 2^retries */
-        static constexpr uint32_t MAX_BACKOFF_MS = 16000;
-        if (backoff > MAX_BACKOFF_MS)
+        uint32_t base_rto = rtt_initialized_ ? rto_ms_ : timeout_ms_;
+        uint32_t backoff = base_rto << slot.retries; /* 2^retries */
+        if (backoff > RTO_MAX_MS)
         {
-            backoff = MAX_BACKOFF_MS;
+            backoff = RTO_MAX_MS;
         }
 
         if ((now - slot.send_time_ms) >= backoff)
         {
             if (slot.retries >= MAX_RETRIES)
             {
-                ESP_LOGE(TAG, "Timeout seq=%u max retries exceeded", seq);
-                sender_failed_ = true;
+                ESP_LOGD(TAG, "Timeout seq=%u max retries exceeded, awaiting NACK", seq);
                 continue;
             }
 
@@ -256,8 +300,10 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
             slot.send_time_ms = now;
             retx_count++;
 
-            ESP_LOGW(TAG, "Timeout retransmit seq=%u retry=%u backoff=%lums",
-                     seq, slot.retries, (unsigned long) backoff);
+            ESP_LOGW(TAG, "Timeout retransmit seq=%u retry=%u backoff=%lums (rto=%lums%s)",
+                     seq, slot.retries, (unsigned long) backoff,
+                     (unsigned long) base_rto,
+                     rtt_initialized_ ? "" : " fallback");
         }
     }
     return retx_count;
