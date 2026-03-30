@@ -80,6 +80,18 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
     /* If we have internet, respond as exit node candidate */
     if (has_internet)
     {
+        /* Reject if we're doing our own transfer — the MQTT pipeline
+         * (fragment_publish_queue_ + fragment_ack_queue_) is shared and
+         * cannot serve two transfers simultaneously without pollution. */
+        if (transfer_.active)
+        {
+            ESP_LOGW(TAG,
+                     "Declining exit role: own transfer in progress "
+                     "(session=%u)",
+                     transfer_.session_id);
+            return;
+        }
+
         /* Dedup: if already set up for this session, just re-send ACK */
         if (is_exit_node_ && active_session_id_ == ad.session_id)
         {
@@ -203,9 +215,18 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
     if (is_exit_node_)
     {
         /*
-         * P5 fix: Only ACK after fragment is successfully queued for MQTT.
-         * If the queue is full, send NACK so the sender retransmits later.
-         * This prevents silent data loss at the MQTT layer.
+         * Deferred-ACK architecture: enqueue fragment for MQTT publish but
+         * do NOT send a mesh ACK here.  The MQTT task pushes the seq into
+         * fragment_ack_queue_ after successful esp_mqtt_client_publish().
+         * TransferEngine::tick() drains that queue and sends mesh ACKs.
+         *
+         * This makes the sender's ARQ window track actual MQTT throughput:
+         * the window only opens when MQTT has capacity, preventing the
+         * queue-full / ESP_NO_MEM cascade that occurred when ACKs raced
+         * ahead of MQTT draining.
+         *
+         * If the MQTT publish queue is full, stay silent — the sender's
+         * ARQ timeout will retransmit after the rate-limited delay.
          */
         bool queued = false;
         if (forward_to_mqtt_fn_)
@@ -220,14 +241,14 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 
         if (queued)
         {
-            send_fn_(hdr.src_addr, PacketType::ACK, nullptr, 0, hdr.seq_num);
+            /* ACK is deferred — sent when MQTT task confirms publish */
             last_cloud_activity_ms_ =
                 static_cast<uint32_t>(esp_timer_get_time() / 1000);
         }
         else
         {
-            send_fn_(hdr.src_addr, PacketType::NACK, nullptr, 0, hdr.seq_num);
-            ESP_LOGW(TAG, "MQTT queue full, NACK seq=%u", hdr.seq_num);
+            ESP_LOGW(TAG, "MQTT queue full, dropping seq=%u (ARQ will retry)",
+                     hdr.seq_num);
         }
         return;
     }
@@ -263,10 +284,56 @@ void TransferEngine::handle_ack(uint16_t seq, uint16_t from_addr)
 void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
 {
     int8_t idx = arq_index_for_peer(from_addr);
-    if (idx >= 0)
+    if (idx < 0)
     {
-        path_stats_[idx].nacked++; /* Phase 3 */
+        return;
+    }
+
+    path_stats_[idx].nacked++; /* Phase 3 */
+
+    /* If seq is still within the ARQ window, normal retransmit */
+    if (seq >= arq_[idx].get_base_seq())
+    {
         arq_[idx].handle_nack(seq);
+        return;
+    }
+
+    /*
+     * Out-of-window NACK: the mesh ARQ already advanced past this seq
+     * (exit node ACK'd it on receipt), but the cloud later NACK'd it.
+     * Queue for throttled re-send in tick_mesh_arq() instead of firing
+     * immediately, which overwhelms ESP-NOW and the exit node's MQTT queue.
+     */
+    if (!transfer_.active || seq >= transfer_.fragment_count)
+    {
+        return;
+    }
+
+    /* Skip parity — cannot reconstruct without re-XOR of entire group */
+    if (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE)
+    {
+        return;
+    }
+
+    /* Dedup: don't queue if already pending */
+    for (uint8_t i = 0; i < oow_retx_count_; i++)
+    {
+        if (oow_retx_queue_[i] == seq)
+        {
+            return;
+        }
+    }
+
+    if (oow_retx_count_ < OOW_RETX_QUEUE_SIZE)
+    {
+        oow_retx_queue_[oow_retx_count_++] = seq;
+        ESP_LOGI(TAG, "Queued out-of-window seq=%u for retx (%u pending)",
+                 seq, oow_retx_count_);
+    }
+    else
+    {
+        ESP_LOGW(TAG,
+                 "Out-of-window retx queue full, dropping seq=%u", seq);
     }
 }
 
@@ -306,6 +373,14 @@ void TransferEngine::start_file_transfer(const char *filename,
     if (transfer_.active)
     {
         ESP_LOGW(TAG, "Transfer already in progress");
+        return;
+    }
+
+    /* Reject if serving as exit node — the MQTT pipeline is shared */
+    if (is_exit_node_)
+    {
+        ESP_LOGW(TAG, "Cannot start transfer: serving as exit node "
+                 "(session=%u)", active_session_id_);
         return;
     }
 
@@ -454,10 +529,18 @@ void TransferEngine::start_file_transfer(const char *filename,
 
 void TransferEngine::tick(uint32_t now_ms)
 {
-    /* ARQ timeout retransmits — tick ALL instances */
+    /* Shared per-tick send budget: all data-carrying send paths
+     * (ARQ retransmits, OOW retransmits, new fragments) decrement
+     * from this single counter.  Keeps total ESP-NOW TX pressure
+     * within what the radio can buffer without ESP_ERR_ESPNOW_NO_MEM. */
+    tick_send_budget_ = MAX_SENDS_PER_TICK;
+
+    /* ARQ timeout retransmits — tick ALL instances, sharing the budget */
     for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
     {
-        arq_[i].tick();
+        if (tick_send_budget_ == 0) { break; }
+        uint8_t used = arq_[i].tick(tick_send_budget_);
+        tick_send_budget_ -= used;
     }
 
     /* Abort transfer if any ARQ instance has fatally failed */
@@ -483,12 +566,18 @@ void TransferEngine::tick(uint32_t now_ms)
 
     /* Periodic meta re-publish: if the cloud restarted mid-transfer, it
      * has no session state. Re-publishing meta lets it pick up the session
-     * and replay any staged chunks. */
+     * and replay any staged chunks.
+     * Only re-publish if data is still actively flowing (cloud_activity
+     * within the last 15s). This prevents ghost meta re-publishes after
+     * the source transfer has completed but exit node role hasn't cleared. */
     if (forward_meta_fn_ && last_meta_publish_ms_ > 0 &&
         (now_ms - last_meta_publish_ms_) > META_REPUBLISH_INTERVAL_MS)
     {
+        bool data_still_flowing = last_cloud_activity_ms_ > 0 &&
+            (now_ms - last_cloud_activity_ms_) < 15000;
         bool should_republish =
-            (local_exit_ && transfer_.active) || is_exit_node_;
+            data_still_flowing &&
+            ((local_exit_ && transfer_.active) || is_exit_node_);
         if (should_republish)
         {
             uint16_t sid = local_exit_ ? transfer_.session_id
@@ -551,6 +640,20 @@ void TransferEngine::tick(uint32_t now_ms)
         {
             send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
             ESP_LOGI(TAG, "Exit->source NACK for seq=%u", nack_seq);
+        }
+    }
+
+    /* Deferred fragment ACK: MQTT task published a fragment successfully.
+     * Send the mesh ACK back to the source now.  This closes the
+     * backpressure loop: sender ARQ window only advances when MQTT has
+     * actually consumed the fragment, preventing queue overflow. */
+    if (is_exit_node_ && drain_fragment_ack_fn_)
+    {
+        uint16_t ack_seq = 0;
+        while (drain_fragment_ack_fn_(ack_seq))
+        {
+            send_fn_(source_addr_, PacketType::ACK, nullptr, 0, ack_seq);
+            ESP_LOGD(TAG, "Deferred ACK for seq=%u", ack_seq);
         }
     }
 
@@ -678,7 +781,9 @@ void TransferEngine::transfer_tick()
         return;
     }
 
-    /* Congestion backoff: skip fragment feeding for one tick per signal */
+    /* Congestion backoff: skip fragment feeding for N ticks per signal.
+     * Cap at 20 ticks (~200-400ms) to avoid stalling the transfer
+     * indefinitely while still giving the exit node time to drain. */
     if (congestion_backoff_ticks_ > 0)
     {
         congestion_backoff_ticks_--;
@@ -945,6 +1050,66 @@ void TransferEngine::tick_mesh_arq()
         return;
     }
 
+    /* Drain out-of-window retransmit queue (cloud NACKs for seqs the ARQ
+     * has already advanced past).  Uses the shared per-tick send budget
+     * to avoid overwhelming ESP-NOW.  On send failure (NO_MEM), the seq
+     * is kept in the queue for retry on the next tick. */
+    if (oow_retx_count_ > 0 && transfer_.read_chunk && tick_send_budget_ > 0)
+    {
+        uint8_t sent = 0;
+        uint8_t kept = 0;
+        for (uint8_t i = 0; i < oow_retx_count_; i++)
+        {
+            uint16_t seq = oow_retx_queue_[i];
+
+            if (tick_send_budget_ == 0)
+            {
+                oow_retx_queue_[kept++] = seq;
+                continue;
+            }
+
+            uint16_t group = seq / (FEC_GROUP_SIZE + 1);
+            uint16_t idx_in_group = seq % (FEC_GROUP_SIZE + 1);
+            uint16_t data_idx = group * FEC_GROUP_SIZE + idx_in_group;
+            size_t offset =
+                static_cast<size_t>(data_idx) * transfer_.fragment_size;
+            if (offset >= transfer_.size)
+            {
+                continue; /* drop invalid */
+            }
+
+            size_t remain = transfer_.size - offset;
+            size_t frag_len = (remain < transfer_.fragment_size)
+                                  ? remain
+                                  : transfer_.fragment_size;
+            size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
+
+            /* Pick the first alive exit node for re-send */
+            uint16_t dst = transfer_.exit_nodes[0];
+            for (uint8_t e = 0; e < transfer_.exit_node_count; e++)
+            {
+                if (transfer_.exit_node_alive[e])
+                {
+                    dst = transfer_.exit_nodes[e];
+                    break;
+                }
+            }
+
+            int rc = send_fn_(dst, PacketType::DATA, frag_buf_, got, seq);
+            if (rc < 0)
+            {
+                /* Send failed (NO_MEM) — keep in queue for next tick */
+                oow_retx_queue_[kept++] = seq;
+                tick_send_budget_ = 0; /* stop all further sends this tick */
+                break;
+            }
+            ESP_LOGI(TAG, "Re-sent out-of-window seq=%u to 0x%04X", seq, dst);
+            sent++;
+            tick_send_budget_--;
+        }
+        oow_retx_count_ = kept;
+    }
+
     /* Drain pending redistribution queue first */
     if (redist_count_ > 0)
     {
@@ -1005,7 +1170,10 @@ void TransferEngine::tick_mesh_arq()
         weight_recompute_counter_ = 0;
     }
 
-    while (transfer_.next_fragment < transfer_.fragment_count)
+    /* New fragment sends share the per-tick budget with ARQ retransmits
+     * and OOW retransmits above. */
+    while (transfer_.next_fragment < transfer_.fragment_count &&
+           tick_send_budget_ > 0)
     {
         /* Score all alive exits: weight * free_slots */
         uint8_t arq_idx = 0;
@@ -1079,9 +1247,14 @@ void TransferEngine::tick_mesh_arq()
         path_stats_[arq_idx].sent++;
         weight_recompute_counter_++;
         transfer_.next_fragment++;
+        tick_send_budget_--;
     }
 
-    /* Check if all fragments sent and acknowledged (only check alive exits) */
+    /* Check if all fragments sent and acknowledged (only check alive exits).
+     * Use sender_window_used()==0 instead of base_seq >= fragment_count
+     * because some trailing seqs (data past EOF, final parity) are skipped
+     * by the feeding loop and never enqueued into the ARQ window — so
+     * base_seq can never advance past them via handle_ack(). */
     if (transfer_.next_fragment >= transfer_.fragment_count)
     {
         bool all_done = true;
@@ -1091,7 +1264,7 @@ void TransferEngine::tick_mesh_arq()
             {
                 continue;
             }
-            if (arq_[i].get_base_seq() < transfer_.fragment_count)
+            if (arq_[i].sender_window_used() > 0)
             {
                 all_done = false;
                 break;

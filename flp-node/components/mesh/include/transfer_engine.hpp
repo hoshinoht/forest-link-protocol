@@ -79,12 +79,15 @@ struct BroadcastRetry
     bool active = false;
 };
 
-/* Callback for sending packets (TransferEngine -> MeshManager) */
-using SendPacketFn = std::function<void(uint16_t dst,
-                                        PacketType type,
-                                        const uint8_t *payload,
-                                        size_t payload_len,
-                                        uint16_t seq_num)>;
+/* Callback for sending packets (TransferEngine -> MeshManager).
+ * Returns 0 on success, -1 on failure (e.g. ESP_ERR_ESPNOW_NO_MEM).
+ * Callers can use the return value to stop sending when the radio
+ * TX buffer is exhausted. */
+using SendPacketFn = std::function<int(uint16_t dst,
+                                       PacketType type,
+                                       const uint8_t *payload,
+                                       size_t payload_len,
+                                       uint16_t seq_num)>;
 
 /* Callback for forwarding fragments to MQTT (returns true if queued OK) */
 using ForwardToMqttFn = std::function<bool(uint16_t session_id,
@@ -177,9 +180,14 @@ class TransferEngine
     /* Called when an exit node reports itself offline */
     void handle_exit_offline(uint16_t exit_addr, uint16_t session_id);
 
-    /* Called when a relay signals congestion via the ACK/NACK high bit.
-     * Causes transfer_tick() to skip one cycle of fragment feeding. */
-    void signal_congestion() { congestion_backoff_ticks_++; }
+    /* Called when a relay/exit signals congestion via the ACK/NACK high bit.
+     * Adds 4 skip-ticks per signal (~40-80ms pause), capped at 20 ticks
+     * to avoid stalling the transfer while giving the exit node drain time. */
+    void signal_congestion()
+    {
+        congestion_backoff_ticks_ += 4;
+        if (congestion_backoff_ticks_ > 20) { congestion_backoff_ticks_ = 20; }
+    }
 
     /* Set callback for forwarding fragments to MQTT */
     void set_forward_to_mqtt(ForwardToMqttFn fn) { forward_to_mqtt_fn_ = fn; }
@@ -190,6 +198,9 @@ class TransferEngine
     /* Set drain callbacks for cloud ACK/NACK (local-exit selective repeat) */
     void set_cloud_ack_drain(DrainSeqFn fn) { drain_cloud_ack_fn_ = fn; }
     void set_cloud_nack_drain(DrainSeqFn fn) { drain_cloud_nack_fn_ = fn; }
+
+    /* Set drain callback for deferred fragment ACKs (exit node: MQTT published OK) */
+    void set_fragment_ack_drain(DrainSeqFn fn) { drain_fragment_ack_fn_ = fn; }
 
   private:
     void transfer_tick();
@@ -231,6 +242,7 @@ class TransferEngine
     ForwardMetaFn forward_meta_fn_;
     DrainSeqFn drain_cloud_ack_fn_;
     DrainSeqFn drain_cloud_nack_fn_;
+    DrainSeqFn drain_fragment_ack_fn_;
     bool is_exit_node_ = false;
     bool local_exit_ = false;
     uint16_t active_session_id_ = 0;
@@ -256,6 +268,18 @@ class TransferEngine
     /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
     uint8_t redist_count_ = 0;
+
+    /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
+     * already advanced past.  Drained throttled in tick_mesh_arq(). */
+    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 32;
+    uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
+    uint8_t oow_retx_count_ = 0;
+
+    /* Shared per-tick send budget: prevents ESP_ERR_ESPNOW_NO_MEM by
+     * capping the total number of data-carrying sends across ARQ retx,
+     * OOW retx, and new fragments. */
+    static constexpr uint8_t MAX_SENDS_PER_TICK = 6;
+    uint8_t tick_send_budget_ = MAX_SENDS_PER_TICK;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;
