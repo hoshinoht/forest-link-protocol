@@ -370,10 +370,13 @@ extern "C" void app_main()
             s_sd_status = "OK";
             ESP_LOGI(TAG,
                      "Loaded %s from SD card: %u bytes "
-                     "(PSRAM read-ahead cache, %zu KB)",
+                     "(%zu KB cache in PSRAM%s)",
                      FILENAME,
                      (unsigned) s_demo_size,
-                     flp::SdReadCache::CACHE_SIZE / 1024);
+                     s_sd_cache.cache_size() / 1024,
+                     s_sd_cache.fully_cached()
+                         ? ", fully resident — zero SD I/O during transfer"
+                         : "");
         }
         else
         {

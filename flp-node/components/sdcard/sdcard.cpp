@@ -51,7 +51,7 @@ esp_err_t flp::sdcard_init()
     bus_cfg.sclk_io_num = CONFIG_FLP_SD_SCK;
     bus_cfg.quadwp_io_num = -1;
     bus_cfg.quadhd_io_num = -1;
-    bus_cfg.max_transfer_sz = SdReadCache::CACHE_SIZE;
+    bus_cfg.max_transfer_sz = SdReadCache::MAX_CACHE_SIZE;
 
     esp_err_t ret = spi_bus_initialize(
         static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -201,13 +201,23 @@ esp_err_t flp::SdReadCache::open(const char *path)
         return ESP_ERR_INVALID_SIZE;
     }
 
-    /* Allocate cache in PSRAM */
+    /*
+     * Allocate min(file_size, MAX_CACHE_SIZE) in PSRAM.
+     * For files that fit entirely, this pre-loads the whole file so
+     * every fragment read during transfer is a zero-cost PSRAM memcpy.
+     */
+    size_t alloc_size = static_cast<size_t>(fsize);
+    if (alloc_size > MAX_CACHE_SIZE)
+    {
+        alloc_size = MAX_CACHE_SIZE;
+    }
+
     uint8_t *buf = static_cast<uint8_t *>(
-        heap_caps_malloc(CACHE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!buf)
     {
         ESP_LOGE(TAG, "SdReadCache: PSRAM alloc failed (%zu bytes)",
-                 CACHE_SIZE);
+                 alloc_size);
         fclose(f);
         return ESP_ERR_NO_MEM;
     }
@@ -219,29 +229,32 @@ esp_err_t flp::SdReadCache::open(const char *path)
     file_ = f;
     file_size_ = static_cast<size_t>(fsize);
     cache_buf_ = buf;
+    cache_capacity_ = alloc_size;
     cache_start_ = 0;
     cache_len_ = 0;
     hits_ = 0;
     misses_ = 0;
 
-    /* Prime the cache with the first block */
+    /* Prime the cache — if file fits, this loads everything */
     refill(0);
 
+    bool full = (cache_capacity_ >= file_size_);
     ESP_LOGI(TAG,
-             "SdReadCache: opened %s (%u bytes, %zu KB cache in PSRAM)",
-             path, (unsigned) file_size_, CACHE_SIZE / 1024);
+             "SdReadCache: opened %s (%u bytes, %zu KB cache in PSRAM%s)",
+             path, (unsigned) file_size_, cache_capacity_ / 1024,
+             full ? ", fully resident" : "");
     return ESP_OK;
 }
 
 bool flp::SdReadCache::refill(size_t offset)
 {
-    if (!file_)
+    if (!file_ || cache_capacity_ == 0)
     {
         return false;
     }
 
-    /* Align to CACHE_SIZE boundary for predictable sequential access */
-    size_t aligned = (offset / CACHE_SIZE) * CACHE_SIZE;
+    /* Align to cache_capacity_ boundary for predictable sequential access */
+    size_t aligned = (offset / cache_capacity_) * cache_capacity_;
     if (aligned >= file_size_)
     {
         return false;
@@ -255,7 +268,7 @@ bool flp::SdReadCache::refill(size_t offset)
         return false;
     }
 
-    size_t want = CACHE_SIZE;
+    size_t want = cache_capacity_;
     if (aligned + want > file_size_)
     {
         want = file_size_ - aligned;
@@ -266,7 +279,7 @@ bool flp::SdReadCache::refill(size_t offset)
     cache_len_ = got;
 
     int64_t elapsed_us = esp_timer_get_time() - t0;
-    ESP_LOGD(TAG,
+    ESP_LOGI(TAG,
              "SdReadCache: refill @ %u, %u bytes in %lld us",
              (unsigned) aligned, (unsigned) got, elapsed_us);
     return got > 0;

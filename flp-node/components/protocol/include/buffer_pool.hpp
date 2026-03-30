@@ -28,11 +28,11 @@ class BufferPool
 {
   public:
     /*
-     * 48 slabs in PSRAM (~13 KB).  Doubled from 24 to reduce packet drops
-     * during heavy transfers.  PSRAM is fine here — slabs are memcpy'd, not
-     * DMA-accessed.
+     * 96 slabs in PSRAM (~26 KB).  Enlarged to absorb ESP-NOW RX bursts
+     * during heavy transfers without exhaustion.  PSRAM is fine here —
+     * slabs are memcpy'd, not DMA-accessed.
      */
-    static constexpr uint8_t POOL_SIZE = 48;
+    static constexpr uint8_t POOL_SIZE = 96;
 
     void init();
     BufferSlab *acquire();

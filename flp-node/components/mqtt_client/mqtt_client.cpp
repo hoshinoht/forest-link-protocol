@@ -19,7 +19,7 @@ static const char *TAG = "mqtt";
 static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 static constexpr UBaseType_t MQTT_PUBLISH_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
-static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 128;
+static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 256;
 static constexpr UBaseType_t MQTT_ACK_QUEUE_DEPTH = 32;
 static constexpr UBaseType_t MQTT_NACK_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_CMD_QUEUE_DEPTH = 8;
@@ -57,7 +57,9 @@ void MqttClient::init()
     ack_queue_ = xQueueCreate(MQTT_ACK_QUEUE_DEPTH, sizeof(CloudAckItem));
     nack_queue_ = xQueueCreate(MQTT_NACK_QUEUE_DEPTH, sizeof(CloudNackItem));
     cmd_queue_ = xQueueCreate(MQTT_CMD_QUEUE_DEPTH, sizeof(MeshCmdItem));
-    fragment_ack_queue_ = xQueueCreate(MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(uint16_t));
+    fragment_ack_queue_ = xQueueCreateWithCaps(
+        MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM);
 
     if (!publish_queue_ || !file_publish_queue_ || !fragment_publish_queue_ ||
         !ack_queue_ || !nack_queue_ || !cmd_queue_ || !fragment_ack_queue_)
@@ -81,7 +83,7 @@ void MqttClient::init()
      * areas" in usb_serial_jtag_end_select during esp_vfs_select().
      */
     mqtt_cfg.task.stack_size = 8192;
-    mqtt_cfg.outbox.limit = 32768; /* headroom for QoS 1 in-flight fragments */
+    mqtt_cfg.outbox.limit = 65536; /* 64KB: headroom for QoS 1 in-flight fragments */
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(
@@ -594,11 +596,10 @@ void MqttClient::process_fragment_publish()
     /*
      * Limit publishes per run() iteration so we don't stuff the ESP-MQTT
      * outbox faster than TLS can drain it.  Each fragment is ~250 bytes
-     * with QoS 1 overhead; the outbox is 32 KB.  Cap at 8 per tick to
-     * keep outbox utilisation low and avoid the "outbox full, deferring"
-     * stalls that delay deferred mesh ACKs.
+     * with QoS 1 overhead; the outbox is 64 KB.  Cap at 16 per tick to
+     * utilise the larger outbox while keeping a safety margin.
      */
-    static constexpr uint8_t MAX_PUBLISHES_PER_TICK = 8;
+    static constexpr uint8_t MAX_PUBLISHES_PER_TICK = 16;
     uint8_t published = 0;
 
     FragmentPublishRequest req;
