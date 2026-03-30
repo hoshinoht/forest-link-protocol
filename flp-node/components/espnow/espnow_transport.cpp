@@ -322,12 +322,12 @@ void EspNowTransport::on_send(const esp_now_send_info_t *info,
 
 int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
 {
-    if (len > ESP_NOW_MAX_DATA_LEN)
+    if (len > ESP_NOW_MAX_DATA_LEN_V2)
     {
         ESP_LOGW(TAG,
                  "Payload %zu exceeds ESP-NOW max (%d), dropping",
                  len,
-                 ESP_NOW_MAX_DATA_LEN);
+                 ESP_NOW_MAX_DATA_LEN_V2);
         return -1;
     }
 

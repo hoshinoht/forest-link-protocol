@@ -9,8 +9,60 @@ static const char *TAG = "lora_xport";
 static const int32_t BUSY_POLL_MAX_ITER = 1000;
 static const int32_t SX1280_SPI_CLOCK_HZ = 8000000;
 
+namespace
+{
+/*
+ * LilyGo T3-S3 v1.2 SX1280 PA board-specific RF switch pins.
+ * We infer this board from the published SX1280 SPI/BUSY/DIO1 pin map already
+ * configured in sdkconfig to avoid changing project configuration files.
+ */
+static constexpr bool kLooksLikeLilyGoT3S3Sx1280 =
+    CONFIG_FLP_LORA_MOSI == 6 && CONFIG_FLP_LORA_MISO == 3 &&
+    CONFIG_FLP_LORA_SCK == 5 && CONFIG_FLP_LORA_CS == 7 &&
+    CONFIG_FLP_LORA_RST == 8 && CONFIG_FLP_LORA_DIO0 == 9 &&
+    CONFIG_FLP_LORA_BUSY == 36;
+static constexpr gpio_num_t kLilyGoT3S3RxEnPin = GPIO_NUM_21;
+static constexpr gpio_num_t kLilyGoT3S3TxEnPin = GPIO_NUM_10;
+} /* namespace */
+
 namespace flp
 {
+
+void LoraTransport::set_rf_switch_idle()
+{
+    if (rx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(rx_en_pin_, 0);
+    }
+    if (tx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(tx_en_pin_, 0);
+    }
+}
+
+void LoraTransport::set_rf_switch_rx()
+{
+    if (tx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(tx_en_pin_, 0);
+    }
+    if (rx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(rx_en_pin_, 1);
+    }
+}
+
+void LoraTransport::set_rf_switch_tx()
+{
+    if (rx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(rx_en_pin_, 0);
+    }
+    if (tx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_set_level(tx_en_pin_, 1);
+    }
+}
 
 /* ── SX1280 SPI helpers ────────────────────────────────────────────────── */
 
@@ -219,6 +271,8 @@ void LoraTransport::set_packet_params(uint8_t payload_len)
 
 void LoraTransport::enter_rx_continuous()
 {
+    set_rf_switch_rx();
+
     /* Max-length packet params for RX */
     set_packet_params(LORA_MAX_PACKET);
 
@@ -359,7 +413,7 @@ void LoraTransport::rx_task_func(void *arg)
                 continue;
             }
 
-            slab->len = (pkt_len > MAX_MTU) ? MAX_MTU : pkt_len;
+            slab->len = static_cast<size_t>(pkt_len);
             slab->source = RxTransport::LORA;
 
             if (pkt_len > 0 && pkt_len <= LORA_MAX_PACKET)
@@ -437,6 +491,11 @@ void LoraTransport::init(uint8_t rx_task_priority)
     rst_pin_ = (gpio_num_t) CONFIG_FLP_LORA_RST;
     dio1_pin_ = (gpio_num_t) CONFIG_FLP_LORA_DIO0; /* DIO1 on SX1280, same GPIO */
     busy_pin_ = (gpio_num_t) CONFIG_FLP_LORA_BUSY;
+    if (kLooksLikeLilyGoT3S3Sx1280)
+    {
+        rx_en_pin_ = kLilyGoT3S3RxEnPin;
+        tx_en_pin_ = kLilyGoT3S3TxEnPin;
+    }
 
     /* Configure RST pin as output */
     gpio_config_t rst_cfg = {};
@@ -452,6 +511,28 @@ void LoraTransport::init(uint8_t rx_task_priority)
     busy_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
     busy_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&busy_cfg);
+
+    if (rx_en_pin_ != GPIO_NUM_NC || tx_en_pin_ != GPIO_NUM_NC)
+    {
+        gpio_config_t rf_cfg = {};
+        if (rx_en_pin_ != GPIO_NUM_NC)
+        {
+            rf_cfg.pin_bit_mask |= 1ULL << rx_en_pin_;
+        }
+        if (tx_en_pin_ != GPIO_NUM_NC)
+        {
+            rf_cfg.pin_bit_mask |= 1ULL << tx_en_pin_;
+        }
+        rf_cfg.mode = GPIO_MODE_OUTPUT;
+        rf_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+        rf_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        gpio_config(&rf_cfg);
+        set_rf_switch_idle();
+        ESP_LOGI(TAG,
+                 "RF switch pins configured: RX_EN=%d TX_EN=%d",
+                 static_cast<int>(rx_en_pin_),
+                 static_cast<int>(tx_en_pin_));
+    }
 
     /* Configure SPI bus */
     spi_bus_config_t bus_cfg = {};
@@ -558,6 +639,7 @@ void LoraTransport::deinit()
     /* Put radio to sleep */
     uint8_t sleep_cfg = 0x00;
     write_command(sx1280::CMD_SET_SLEEP, &sleep_cfg, 1);
+    set_rf_switch_idle();
 
     /* Remove ISR and delete RX task */
     gpio_isr_handler_remove(dio1_pin_);
@@ -599,6 +681,11 @@ void LoraTransport::deinit()
 
 void LoraTransport::set_spreading_factor(uint8_t sf)
 {
+    if (!initialized_)
+    {
+        return;
+    }
+
     /* Clamp to SF7-SF10: SF<7 has poor range, SF>10 is too slow for mesh */
     if (sf < 7)
     {
@@ -623,6 +710,11 @@ void LoraTransport::set_spreading_factor(uint8_t sf)
 
 void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
 {
+    if (!initialized_)
+    {
+        return;
+    }
+
     uint8_t stdby = sx1280::STDBY_RC;
     write_command(sx1280::CMD_SET_STANDBY, &stdby, 1);
 
@@ -693,6 +785,11 @@ void LoraTransport::configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz)
 
 int LoraTransport::send_raw(const uint8_t *data, size_t len)
 {
+    if (!initialized_)
+    {
+        return -1;
+    }
+
     if (len > LORA_MAX_PACKET)
     {
         ESP_LOGE(TAG, "Payload too large: %zu > %zu", len, LORA_MAX_PACKET);
@@ -739,6 +836,7 @@ int LoraTransport::send_raw(const uint8_t *data, size_t len)
     xSemaphoreTake(tx_done_sem_, 0);
 
     /* Enter TX (periodBase=1ms, count=5000 → 5s hardware timeout) */
+    set_rf_switch_tx();
     uint8_t tx_params[3] = {0x02, 0x13, 0x88};
     write_command(sx1280::CMD_SET_TX, tx_params, 3);
 

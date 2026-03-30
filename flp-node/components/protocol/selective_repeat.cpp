@@ -87,9 +87,12 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
                                    const uint8_t *data,
                                    size_t len)
 {
-    if (len > MAX_MTU)
+    /* send_cb_ hands this payload to MeshManager::send_packet(), which adds
+     * an 8-byte PacketHeader. Guard against storing/sending fragments larger
+     * than the actual mesh payload budget. */
+    if (len > ESPNOW_MAX_PAYLOAD)
     {
-        ESP_LOGE(TAG, "Fragment too large: %zu > %zu", len, MAX_MTU);
+        ESP_LOGE(TAG, "Fragment too large: %zu > %zu", len, ESPNOW_MAX_PAYLOAD);
         return -1;
     }
 

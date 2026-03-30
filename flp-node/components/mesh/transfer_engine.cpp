@@ -302,17 +302,18 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
     if (is_exit_node_)
     {
         /*
-         * Deferred-ACK architecture: enqueue fragment for MQTT publish but
-         * do NOT send a mesh ACK here.  The MQTT task pushes the seq into
-         * fragment_ack_queue_ after successful esp_mqtt_client_publish().
-         * TransferEngine::tick() drains that queue and sends mesh ACKs.
+         * Custody ACK architecture: enqueue fragment for MQTT publish but do
+         * NOT send the mesh ACK inline here. The MQTT task pushes the seq into
+         * fragment_ack_queue_ once esp_mqtt_client_publish() accepts it into
+         * the local MQTT client/outbox. TransferEngine::tick() drains that
+         * queue and sends mesh ACKs.
          *
-         * This makes the sender's ARQ window track actual MQTT throughput:
-         * the window only opens when MQTT has capacity, preventing the
-         * source from outrunning the exit node's MQTT pipeline.
+         * This keeps the sender coupled to the exit node's local relay
+         * capacity without waiting for broker PUBACK latency on every
+         * fragment.
          *
-         * If the MQTT publish queue is full, stay silent — the sender's
-         * ARQ timeout will retransmit after the rate-limited delay.
+         * If the MQTT publish queue is full, stay silent — the sender's ARQ
+         * timeout will retransmit after the rate-limited delay.
          */
         bool queued = false;
         if (forward_to_mqtt_fn_)
@@ -327,7 +328,7 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 
         if (queued)
         {
-            /* ACK is deferred — sent when MQTT task confirms publish */
+            /* ACK is deferred — sent once local MQTT accepts the fragment */
             last_cloud_activity_ms_ =
                 static_cast<uint32_t>(esp_timer_get_time() / 1000);
         }
@@ -487,10 +488,10 @@ void TransferEngine::start_file_transfer(const char *filename,
     fec_encoder_.reset();
 
     /*
-     * Align fragment size to multiples of 8 for compact d8 encoding.
-     * ESPNOW_MAX_PAYLOAD = 242, aligned down to 240.
+     * Fragment size is derived from the current mesh MTU and aligned to the
+     * d8 wire encoding used in TransferAdPayload.
      */
-    size_t frag_payload = (ESPNOW_MAX_PAYLOAD / 8) * 8;
+    size_t frag_payload = DEFAULT_TRANSFER_FRAGMENT_SIZE;
 
     transfer_.read_chunk = read_chunk;
     transfer_.size = size;
@@ -722,10 +723,10 @@ void TransferEngine::tick(uint32_t now_ms)
         }
     }
 
-    /* Deferred fragment ACK: MQTT task published a fragment successfully.
-     * Send the mesh ACK back to the source now.  This closes the
-     * backpressure loop: sender ARQ window only advances when MQTT has
-     * actually consumed the fragment, preventing queue overflow. */
+    /* Deferred fragment ACK: MQTT task accepted a fragment into the local
+     * MQTT client/outbox. Send the mesh ACK back to the source now. This
+     * closes the backpressure loop without waiting for broker PUBACK on every
+     * fragment. */
     if (is_exit_node_ && drain_fragment_ack_fn_)
     {
         uint16_t ack_seq = 0;

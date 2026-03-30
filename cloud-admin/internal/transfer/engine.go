@@ -11,10 +11,27 @@ import (
 )
 
 const (
-	transferTimeoutSec = 60
-	maxCompletedSlice  = 1000
-	outputDir          = "received_files"
+	transferTimeoutSec   = 60
+	maxCompletedSlice    = 1000
+	outputDir            = "received_files"
+	recentlyCompletedTTL = 30 * time.Second
 )
+
+func completedMetaKey(sessionID, nodeID, filename string, totalSize, chunkCount int, crc32Val uint32, fragmentSize int) string {
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%d|%d",
+		nodeID,
+		sessionID,
+		filename,
+		totalSize,
+		chunkCount,
+		crc32Val,
+		fragmentSize,
+	)
+}
+
+func completedSessionKey(sessionID, nodeID string) string {
+	return fmt.Sprintf("%s|%s", nodeID, sessionID)
+}
 
 // Session tracks the state of a single file transfer.
 type Session struct {
@@ -60,8 +77,6 @@ func NewQueue() *Queue {
 }
 
 // Enqueue adds a transfer or merges into an existing session.
-// Rejects sessions that have already completed to prevent stale
-// meta re-publishes from restarting finished transfers.
 func (q *Queue) Enqueue(sessionID, nodeID, filename string, totalSize, chunkCount int, crc32Val uint32, fragmentSize int) *Session {
 	if q.ActiveTransfer != nil && q.ActiveTransfer.SessionID == sessionID {
 		q.ActiveTransfer.ExitNodes[nodeID] = true
@@ -71,14 +86,6 @@ func (q *Queue) Enqueue(sessionID, nodeID, filename string, totalSize, chunkCoun
 	for _, s := range q.queue {
 		if s.SessionID == sessionID {
 			s.ExitNodes[nodeID] = true
-			return s
-		}
-	}
-
-	// Reject if this session already completed successfully
-	for _, s := range q.Completed {
-		if s.SessionID == sessionID {
-			log.Printf("[transfer] ignoring meta for already-completed session %s", sessionID)
 			return s
 		}
 	}
@@ -158,37 +165,23 @@ func RunEngine(
 
 	// Stall NACK cooldown: don't flood every second
 	var lastStallNACKTime float64
+	recentlyCompletedMeta := make(map[string]time.Time)
+	recentlyCompletedSession := make(map[string]time.Time)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
-	// -- Tracing counters (reset each trace interval) --
-	var traceChunksNew int       // new (non-duplicate) chunks this interval
-	var traceChunksDup int       // duplicate chunks this interval
-	var traceBytesRx int         // payload bytes received this interval
-	var traceChunksStaged int    // chunks staged (no active session) this interval
-	var traceChunksWrongSID int  // chunks filtered (wrong session) this interval
-	var traceLastReport float64  // timestamp of last trace report
-	const traceIntervalSec = 5.0 // report every N seconds during active transfer
 
 	// processChunk handles a single chunk against the active reassembler.
 	// Returns (complete, success): complete=true means transfer finished.
 	processChunk := func(chunk mqtt.FileChunk) (bool, bool) {
 		seq := int(chunk.SeqNum)
-		isNew, recoveredSeq := reassembler.WriteChunk(seq, chunk.Data)
+		isNew := reassembler.WriteChunk(seq, chunk.Data)
 		if isNew {
-			if recoveredSeq >= 0 {
-				sr.OnChunkReceived(recoveredSeq)
-			}
 			sr.OnChunkReceived(seq)
 			lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
-			traceChunksNew++
-			traceBytesRx += len(chunk.Data)
 			s := tq.ActiveTransfer
 			progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
 				reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
-		} else {
-			traceChunksDup++
 		}
 
 		if reassembler.IsComplete() {
@@ -263,68 +256,31 @@ func RunEngine(
 		}
 		progress.Update("", "", 0, 0, 0, 0, false, 0)
 		s.CompletedAt = float64(time.Now().UnixMilli()) / 1000.0
-
-		// -- Transfer summary trace --
-		elapsed := s.CompletedAt - s.StartedAt
-		status := "ABORT"
 		if success {
-			status = "OK"
-		}
-		nacks := 0
-		acks := 0
-		base := 0
-		if sr != nil {
-			nacks = sr.NACKCount
-			acks = sr.traceACKsSent
-			base = sr.ExpectedBase()
-		}
-		fecRec := 0
-		parityRx := 0
-		dataRx := 0
-		totalRx := 0
-		if reassembler != nil {
-			fecRec = reassembler.FECRecoveries
-			parityRx = reassembler.ParityReceived
-			dataRx = reassembler.DataChunksReceived
-			totalRx = reassembler.ChunksReceived
-		}
-		avgBps := 0.0
-		if elapsed > 0 {
-			avgBps = float64(s.TotalSize) / elapsed / 1024
-		}
-		log.Printf("[trace] === SESSION %s %s ===", s.SessionID, status)
-		log.Printf("[trace]   file=%s size=%d chunks=%d frag_size=%d",
-			s.Filename, s.TotalSize, s.ChunkCount, s.FragmentSize)
-		log.Printf("[trace]   elapsed=%.1fs avg=%.1f KB/s", elapsed, avgBps)
-		log.Printf("[trace]   rx: data=%d parity=%d total=%d | FEC_recoveries=%d",
-			dataRx, parityRx, totalRx, fecRec)
-		log.Printf("[trace]   arq: ACKs=%d NACKs=%d base=%d/%d",
-			acks, nacks, base, s.ChunkCount)
-		log.Printf("[trace]   exit_nodes=%v pending_staged=%d queued=%d",
-			s.ExitNodes, len(pendingChunks), len(tq.queue))
-
-		// Reset trace counters for next session
-		traceChunksNew = 0
-		traceChunksDup = 0
-		traceBytesRx = 0
-		traceChunksStaged = 0
-		traceChunksWrongSID = 0
-		traceLastReport = 0
-
-		if success {
+			elapsed := s.CompletedAt - s.StartedAt
+			nacks := 0
+			if sr != nil {
+				nacks = sr.NACKCount
+			}
 			log.Printf("[transfer] completed session %s in %.1fs (%d NACKs)", s.SessionID, elapsed, nacks)
+			expiresAt := time.Now().Add(recentlyCompletedTTL)
+			recentlyCompletedMeta[completedMetaKey(
+				s.SessionID,
+				s.NodeID,
+				s.Filename,
+				s.TotalSize,
+				s.ChunkCount,
+				s.CRC32,
+				s.FragmentSize,
+			)] = expiresAt
+			recentlyCompletedSession[completedSessionKey(s.SessionID, s.NodeID)] = expiresAt
+			mqttClient.PublishTransferComplete(s.SessionID)
 			if err := store.RecordTransfer(s.ToRecord(), nacks); err != nil {
 				log.Printf("[transfer] failed to record transfer: %v", err)
 			}
 			if err := store.RecordBenchmark(s.ToRecord(), nacks); err != nil {
 				log.Printf("[transfer] failed to record benchmark: %v", err)
 			}
-			// Notify exit nodes that the session is complete.
-			// This provides session consensus (Coulouris §15.5):
-			// the cloud is the authoritative coordinator that
-			// terminates the transfer, preventing zombie sessions
-			// where the source keeps retransmitting.
-			mqttClient.PublishTransferComplete(s.SessionID)
 		} else {
 			log.Printf("[transfer] aborted session %s (timeout)", s.SessionID)
 		}
@@ -335,46 +291,6 @@ func RunEngine(
 		setupActive()
 	}
 
-	// drainChunks batch-drains up to 64 chunks from chunkCh in one go,
-	// avoiding the overhead of re-entering the select loop per chunk.
-	const maxBatchSize = 64
-	drainChunks := func(first mqtt.FileChunk) {
-		batch := make([]mqtt.FileChunk, 0, maxBatchSize)
-		batch = append(batch, first)
-		for len(batch) < maxBatchSize {
-			select {
-			case c := <-chunkCh:
-				batch = append(batch, c)
-			default:
-				goto process
-			}
-		}
-	process:
-		for _, chunk := range batch {
-			// B7 fix: stage chunks if no active session yet
-			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
-				if len(pendingChunks) < maxPendingChunks {
-					pendingChunks = append(pendingChunks, chunk)
-					traceChunksStaged++
-				}
-				continue
-			}
-
-			// B4 fix: filter stale chunks from wrong session
-			chunkSID := fmt.Sprintf("%d", chunk.SessionID)
-			if chunkSID != tq.ActiveTransfer.SessionID {
-				traceChunksWrongSID++
-				continue
-			}
-
-			complete, success := processChunk(chunk)
-			if complete {
-				completeTransfer(success)
-				return // transfer done, stop processing batch
-			}
-		}
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -382,6 +298,23 @@ func RunEngine(
 
 		case meta := <-metaCh:
 			sessionID := meta.SessionID.String()
+			metaKey := completedMetaKey(
+				sessionID,
+				meta.NodeID,
+				meta.Filename,
+				meta.TotalSize,
+				meta.ChunkCount,
+				meta.CRC32,
+				meta.FragmentSize,
+			)
+			if expiresAt, ok := recentlyCompletedMeta[metaKey]; ok {
+				if time.Now().Before(expiresAt) {
+					log.Printf("[transfer] ignoring duplicate meta for recently completed session %s from %s",
+						sessionID, meta.NodeID)
+					continue
+				}
+				delete(recentlyCompletedMeta, metaKey)
+			}
 			if tq.ActiveTransfer != nil {
 				if tq.ActiveTransfer.SessionID == sessionID {
 					log.Printf("[transfer] merging exit node %s into session %s",
@@ -405,9 +338,44 @@ func RunEngine(
 			}
 
 		case chunk := <-chunkCh:
-			drainChunks(chunk)
+			chunkSID := fmt.Sprintf("%d", chunk.SessionID)
+			chunkKey := completedSessionKey(chunkSID, chunk.NodeID)
+			if expiresAt, ok := recentlyCompletedSession[chunkKey]; ok {
+				if time.Now().Before(expiresAt) {
+					continue
+				}
+				delete(recentlyCompletedSession, chunkKey)
+			}
+			// B7 fix: stage chunks if no active session yet
+			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
+				if len(pendingChunks) < maxPendingChunks {
+					pendingChunks = append(pendingChunks, chunk)
+				}
+				continue
+			}
+
+			// B4 fix: filter stale chunks from wrong session
+			if chunkSID != tq.ActiveTransfer.SessionID {
+				continue
+			}
+
+			complete, success := processChunk(chunk)
+			if complete {
+				completeTransfer(success)
+			}
 
 		case <-ticker.C:
+			nowTime := time.Now()
+			for key, expiresAt := range recentlyCompletedMeta {
+				if !expiresAt.After(nowTime) {
+					delete(recentlyCompletedMeta, key)
+				}
+			}
+			for key, expiresAt := range recentlyCompletedSession {
+				if !expiresAt.After(nowTime) {
+					delete(recentlyCompletedSession, key)
+				}
+			}
 			if sr != nil {
 				sr.CheckTimeouts()
 			}
@@ -417,42 +385,13 @@ func RunEngine(
 					completeTransfer(false)
 				}
 			}
-			// -- Periodic trace report --
-			if tq.ActiveTransfer != nil && reassembler != nil && sr != nil {
-				now := float64(time.Now().UnixMilli()) / 1000.0
-				if traceLastReport == 0 {
-					traceLastReport = now
-				}
-				elapsed := now - traceLastReport
-				if elapsed >= traceIntervalSec {
-					rate := float64(traceChunksNew) / elapsed
-					bps := float64(traceBytesRx) / elapsed
-					staleSec := now - lastChunkTime
-					dataChunkCount := (reassembler.TotalSize + reassembler.ChunkSize - 1) / reassembler.ChunkSize
-					log.Printf("[trace] session=%s | +%d new, %d dup, %d wrong_sid, %d staged | %d/%d data (%d/%d total) %.1f%% | %.1f chunks/s %.1f KB/s | idle=%.1fs NACKs=%d base=%d",
-						tq.ActiveTransfer.SessionID,
-						traceChunksNew, traceChunksDup, traceChunksWrongSID, traceChunksStaged,
-						reassembler.DataChunksReceived, dataChunkCount,
-						reassembler.ChunksReceived, reassembler.ChunkCount,
-						reassembler.Progress()*100,
-						rate, bps/1024,
-						staleSec, sr.NACKCount, sr.ExpectedBase(),
-					)
-					traceChunksNew = 0
-					traceChunksDup = 0
-					traceBytesRx = 0
-					traceChunksStaged = 0
-					traceChunksWrongSID = 0
-					traceLastReport = now
-				}
-			}
 			// D1+B3 fix: stall-based end-to-end NACK bridge.
 			// If no chunks arrived for 5s but transfer is incomplete,
 			// publish missing seqs so exit nodes can re-request from source.
 			// Cooldown: only fire once per 10s to avoid flooding MQTT.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
 				now := float64(time.Now().UnixMilli()) / 1000.0
-				if now-lastStallNACKTime >= 15.0 {
+				if now-lastStallNACKTime >= 10.0 {
 					gaps := sr.CheckStall(lastChunkTime, 5.0)
 					if len(gaps) > 0 {
 						mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)

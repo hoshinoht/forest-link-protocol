@@ -15,11 +15,37 @@
 
 static const char *TAG = "mqtt";
 
+namespace
+{
+struct LegacyFragmentPublishRequest
+{
+    uint16_t session_id;
+    uint16_t seq;
+    uint16_t src_node;
+    uint8_t data[250];
+    size_t len;
+    char filename[33];
+};
+} /* namespace */
+
 /* Max data bytes per MQTT chunk (2-byte seq header + payload) */
 static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 static constexpr UBaseType_t MQTT_PUBLISH_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
-static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 256;
+/*
+ * Preserve approximately the old fragment-queue PSRAM budget by deriving the
+ * depth from the legacy 250-byte request size. As MTU grows, the queue depth
+ * shrinks automatically to keep memory bounded.
+ */
+static constexpr size_t MQTT_FRAGMENT_QUEUE_BUDGET_BYTES =
+    256 * sizeof(LegacyFragmentPublishRequest);
+static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH =
+    static_cast<UBaseType_t>(
+        (MQTT_FRAGMENT_QUEUE_BUDGET_BYTES / sizeof(flp::FragmentPublishRequest))
+            > 0
+            ? (MQTT_FRAGMENT_QUEUE_BUDGET_BYTES /
+               sizeof(flp::FragmentPublishRequest))
+            : 1);
 static constexpr UBaseType_t MQTT_ACK_QUEUE_DEPTH = 32;
 static constexpr UBaseType_t MQTT_NACK_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_CMD_QUEUE_DEPTH = 8;
@@ -27,6 +53,7 @@ static constexpr UBaseType_t MQTT_TRANSFER_COMPLETE_QUEUE_DEPTH = 8;
 static constexpr TickType_t MQTT_HEARTBEAT_INTERVAL = pdMS_TO_TICKS(30000);
 static constexpr TickType_t MQTT_IDLE_YIELD_TICKS = 1;
 static constexpr TickType_t MQTT_CHUNK_PUBLISH_DELAY = pdMS_TO_TICKS(2);
+static constexpr int MQTT_FRAGMENT_DATA_QOS = 0;
 static constexpr int MQTT_OUTBOX_LIMIT_BYTES = 65536;
 static constexpr int MQTT_OUTBOX_HIGH_WATER_BYTES = 48 * 1024;
 
@@ -44,11 +71,7 @@ void MqttClient::notify()
 
 void MqttClient::init()
 {
-    /*
-     * Large queues (MqttPublishItem=526B, FragmentPublishRequest=546B) are
-     * allocated in PSRAM to free ~44 KB of internal SRAM.  Small queues
-     * (ACK/NACK/CMD, 2-68 bytes per item) stay in internal RAM.
-     */
+    /* Large data queues live in PSRAM; small control queues stay internal. */
     publish_queue_ = xQueueCreateWithCaps(
         MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem),
         MALLOC_CAP_SPIRAM);
@@ -73,6 +96,12 @@ void MqttClient::init()
         ESP_LOGE(TAG, "Failed to create one or more MQTT queues");
         return;
     }
+
+    ESP_LOGI(TAG,
+             "Fragment queue budget=%uB item=%uB depth=%u",
+             static_cast<unsigned>(MQTT_FRAGMENT_QUEUE_BUDGET_BYTES),
+             static_cast<unsigned>(sizeof(FragmentPublishRequest)),
+             static_cast<unsigned>(MQTT_FRAGMENT_QUEUE_DEPTH));
 
     /* Configure and start ESP-IDF MQTT client */
     esp_mqtt_client_config_t mqtt_cfg = {};
@@ -151,33 +180,6 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
 
     switch (event->event_id)
     {
-        case MQTT_EVENT_PUBLISHED:
-        {
-            PendingFragmentPublish pending = {};
-            if (complete_pending_fragment_publish(event->msg_id, pending))
-            {
-                if (fragment_ack_queue_ && pending.src_node != node_addr_)
-                {
-                    FragmentAckItem ack = {};
-                    ack.session_id = pending.session_id;
-                    ack.seq = pending.seq;
-                    if (xQueueSend(fragment_ack_queue_, &ack, 0) != pdTRUE)
-                    {
-                        ESP_LOGW(TAG,
-                                 "Fragment ACK queue full, dropping seq=%u session=%u",
-                                 pending.seq,
-                                 pending.session_id);
-                    }
-                }
-                ESP_LOGD(TAG,
-                         "Broker acknowledged fragment msg_id=%d session=%u seq=%u",
-                         event->msg_id,
-                         pending.session_id,
-                         pending.seq);
-            }
-            break;
-        }
-
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT connected to broker");
             connected_ = true;
@@ -474,12 +476,6 @@ void MqttClient::reset_transfer_runtime_state()
         xQueueReset(transfer_complete_queue_);
     }
 
-    portENTER_CRITICAL(&pending_fragment_mux_);
-    for (auto &entry : pending_fragment_publishes_)
-    {
-        entry = PendingFragmentPublish{};
-    }
-    portEXIT_CRITICAL(&pending_fragment_mux_);
 }
 
 void MqttClient::activate_transfer_session(uint16_t session_id)
@@ -505,53 +501,6 @@ void MqttClient::clear_transfer_session(uint16_t session_id)
         reset_transfer_runtime_state();
         ESP_LOGI(TAG, "Cleared MQTT transfer session=%u", session_id);
     }
-}
-
-void MqttClient::remember_pending_fragment_publish(int msg_id,
-                                                   uint16_t session_id,
-                                                   uint16_t seq,
-                                                   uint16_t src_node)
-{
-    portENTER_CRITICAL(&pending_fragment_mux_);
-    for (auto &entry : pending_fragment_publishes_)
-    {
-        if (!entry.in_use)
-        {
-            entry.in_use = true;
-            entry.msg_id = msg_id;
-            entry.session_id = session_id;
-            entry.seq = seq;
-            entry.src_node = src_node;
-            portEXIT_CRITICAL(&pending_fragment_mux_);
-            return;
-        }
-    }
-    portEXIT_CRITICAL(&pending_fragment_mux_);
-
-    ESP_LOGE(TAG,
-             "Pending publish table full, msg_id=%d session=%u seq=%u",
-             msg_id,
-             session_id,
-             seq);
-}
-
-bool MqttClient::complete_pending_fragment_publish(
-    int msg_id, PendingFragmentPublish &out)
-{
-    bool found = false;
-    portENTER_CRITICAL(&pending_fragment_mux_);
-    for (auto &entry : pending_fragment_publishes_)
-    {
-        if (entry.in_use && entry.msg_id == msg_id)
-        {
-            out = entry;
-            entry = PendingFragmentPublish{};
-            found = true;
-            break;
-        }
-    }
-    portEXIT_CRITICAL(&pending_fragment_mux_);
-    return found;
 }
 
 int MqttClient::outbox_size_bytes() const
@@ -837,10 +786,10 @@ void MqttClient::process_fragment_publish()
     }
 
     /*
-     * Limit publishes per run() iteration so we don't stuff the ESP-MQTT
-     * outbox faster than TLS can drain it.  Each fragment is ~250 bytes
-     * with QoS 1 overhead; the outbox is 64 KB.  Cap at 16 per tick to
-     * utilise the larger outbox while keeping a safety margin.
+     * Limit publishes per run() iteration so bulk fragment traffic does not
+     * monopolize the MQTT task. Fragment data uses QoS 0, so it is sent once
+     * and does not rely on the ESP-MQTT retransmit outbox; recovery is handled
+     * by the cloud NACK path.
      */
     static constexpr uint8_t MAX_PUBLISHES_PER_TICK = 32;
     uint8_t published = 0;
@@ -849,22 +798,6 @@ void MqttClient::process_fragment_publish()
     while (published < MAX_PUBLISHES_PER_TICK &&
            xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
-        int outbox_size = outbox_size_bytes();
-        if (outbox_size >= MQTT_OUTBOX_HIGH_WATER_BYTES)
-        {
-            if (xQueueSendToFront(fragment_publish_queue_, &req, 0) != pdTRUE)
-            {
-                ESP_LOGE(TAG,
-                         "Fragment re-queue failed at outbox high-water, seq=%u dropped",
-                         req.seq);
-            }
-            ESP_LOGW(TAG,
-                     "MQTT outbox high-water reached (%d/%d bytes), pausing fragment drain",
-                     outbox_size,
-                     MQTT_OUTBOX_LIMIT_BYTES);
-            break;
-        }
-
         uint16_t active_session =
             active_transfer_session_.load(std::memory_order_acquire);
         if (active_session == 0 || req.session_id != active_session)
@@ -892,15 +825,15 @@ void MqttClient::process_fragment_publish()
         memcpy(chunk_buf + 4, req.data, req.len);
 
         int msg_id = esp_mqtt_client_publish(
-            client_, data_topic, (const char *) chunk_buf, 4 + req.len, 1, 0);
+            client_, data_topic, (const char *) chunk_buf, 4 + req.len,
+            MQTT_FRAGMENT_DATA_QOS, 0);
 
         if (msg_id < 0)
         {
-            /* Outbox full — put fragment back and retry next tick */
+            /* Publish failed — put fragment back and retry next tick */
             ESP_LOGW(TAG,
-                     "MQTT outbox full, deferring seq=%u (outbox=%d bytes)",
-                     req.seq,
-                     outbox_size_bytes());
+                     "MQTT publish failed, deferring seq=%u",
+                     req.seq);
             if (xQueueSendToFront(fragment_publish_queue_, &req, 0) != pdTRUE)
             {
                 ESP_LOGE(TAG,
@@ -909,14 +842,26 @@ void MqttClient::process_fragment_publish()
             break;
         }
 
-        remember_pending_fragment_publish(
-            msg_id, req.session_id, req.seq, req.src_node);
+        if (fragment_ack_queue_ && req.src_node != node_addr_)
+        {
+            FragmentAckItem ack = {};
+            ack.session_id = req.session_id;
+            ack.seq = req.seq;
+            if (xQueueSend(fragment_ack_queue_, &ack, 0) != pdTRUE)
+            {
+                ESP_LOGW(TAG,
+                         "Fragment ACK queue full, dropping seq=%u session=%u",
+                         req.seq,
+                         req.session_id);
+            }
+        }
 
         ESP_LOGI(TAG,
-                 "Published fragment seq=%u len=%zu msg_id=%d",
+                 "Published fragment seq=%u len=%zu msg_id=%d qos=%d (locally accepted)",
                  req.seq,
                  req.len,
-                 msg_id);
+                 msg_id,
+                 MQTT_FRAGMENT_DATA_QOS);
         published++;
     }
 }

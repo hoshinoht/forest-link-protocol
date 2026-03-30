@@ -448,7 +448,7 @@ void MeshManager::run()
                 target_sf = 7;
             }
 
-            if (target_sf != lora_.get_spreading_factor())
+            if (lora_.is_initialized() && target_sf != lora_.get_spreading_factor())
             {
                 lora_.set_spreading_factor(target_sf);
                 ESP_LOGI(TAG, "ADR: SF changed to %u (success=%.0f%%, neighbors=%u)",
@@ -1066,7 +1066,8 @@ void MeshManager::send_discovery()
      *  - no route to internet yet (gateway may be on a different WiFi
      *    channel, unreachable via ESP-NOW but reachable via LoRa)
      */
-    bool lora_tx = (route_table_.get_espnow_neighbor_count() == 0 ||
+    bool lora_tx = lora_.is_initialized() &&
+                   (route_table_.get_espnow_neighbor_count() == 0 ||
                     route_table_.oldest_contact_age_ms() > 20000 ||
                     disc.hops_to_internet >= ROUTE_HOPS_UNKNOWN);
     if (lora_tx)
@@ -1476,6 +1477,11 @@ int MeshManager::send_raw(Transport transport,
                           size_t len,
                           uint16_t peer_addr)
 {
+    if (transport == Transport::LORA && !lora_.is_initialized())
+    {
+        return -1;
+    }
+
     /* Fix 9: use int64_t to avoid truncation of esp_timer_get_time() µs
      * values before the subtraction; cast to ms only for the final result. */
     int64_t t0_us = esp_timer_get_time();

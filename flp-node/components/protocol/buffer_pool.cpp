@@ -48,9 +48,11 @@ void BufferPool::init()
     top_.store(0, std::memory_order_release);
 
     ESP_LOGI(TAG,
-             "BufferPool initialized: %u slabs (~%u bytes) in %s",
+             "BufferPool initialized: %u slabs x %uB = %uB (budget=%uB) in %s",
              POOL_SIZE,
-             (unsigned)(POOL_SIZE * sizeof(BufferSlab)),
+             static_cast<unsigned>(sizeof(BufferSlab)),
+             static_cast<unsigned>(POOL_SIZE * sizeof(BufferSlab)),
+             static_cast<unsigned>(POOL_BUDGET_BYTES),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM"
                                                              : "internal");
 }

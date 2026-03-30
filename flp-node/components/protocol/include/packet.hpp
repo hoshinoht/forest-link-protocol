@@ -10,7 +10,13 @@ static constexpr uint16_t BROADCAST_ADDR = 0xFFFF;
 static constexpr uint16_t EXIT_ANY_ADDR = 0xFFFE; /* route toward nearest exit */
 static constexpr uint8_t PROTOCOL_VERSION = 1;
 static constexpr uint8_t DEFAULT_TTL = 8;
-static constexpr size_t MAX_MTU = 250;
+/*
+ * Large-MTU experiment: raise the protocol-wide packet ceiling to the
+ * ESP-NOW v2 payload limit so the existing mesh packet path can carry large
+ * ESPNOW frames end-to-end. LoRa keeps its own smaller payload limit and the
+ * transport selector must avoid routing oversized packets onto LoRa.
+ */
+static constexpr size_t MAX_MTU = 1470;
 static constexpr uint8_t ARQ_WINDOW = 64;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
 static constexpr uint8_t MAX_RETRIES = 5;
@@ -97,7 +103,11 @@ static_assert(sizeof(PacketHeader) == 8, "PacketHeader must be 8 bytes");
 static constexpr size_t PACKET_HEADER_SIZE = sizeof(PacketHeader);
 static constexpr size_t LORA_MAX_PAYLOAD =
     255 - PACKET_HEADER_SIZE; /* 247 bytes */
-static constexpr size_t ESPNOW_MAX_PAYLOAD = 250 - PACKET_HEADER_SIZE; /* 242 bytes */
+static constexpr size_t ESPNOW_MAX_PAYLOAD =
+    MAX_MTU - PACKET_HEADER_SIZE; /* 1462 bytes with ESP-NOW v2 */
+static constexpr size_t TRANSFER_FRAGMENT_ALIGN = 8;
+static constexpr size_t DEFAULT_TRANSFER_FRAGMENT_SIZE =
+    (ESPNOW_MAX_PAYLOAD / TRANSFER_FRAGMENT_ALIGN) * TRANSFER_FRAGMENT_ALIGN;
 
 struct __attribute__((packed)) DiscoveryPayload
 {

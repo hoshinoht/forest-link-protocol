@@ -24,15 +24,34 @@ struct BufferSlab
     std::atomic<int32_t> next_free{-1};
 };
 
+namespace detail
+{
+/* Legacy 250-byte slab layout used to preserve roughly the old PSRAM budget. */
+struct LegacyBufferSlab
+{
+    uint8_t data[250];
+    size_t len = 0;
+    int8_t rssi = 0;
+    RxTransport source = RxTransport::ESPNOW;
+    std::atomic<uint8_t> refcount{0};
+    std::atomic<int32_t> next_free{-1};
+};
+} /* namespace detail */
+
 class BufferPool
 {
   public:
     /*
-     * 96 slabs in PSRAM (~26 KB).  Enlarged to absorb ESP-NOW RX bursts
-     * during heavy transfers without exhaustion.  PSRAM is fine here —
-     * slabs are memcpy'd, not DMA-accessed.
+     * Preserve approximately the pre-1470 PSRAM budget by deriving the slab
+     * count from the old 96 x 250-byte layout. Larger MTUs reduce the slab
+     * count automatically to keep total allocation bounded.
      */
-    static constexpr uint8_t POOL_SIZE = 96;
+    static constexpr size_t POOL_BUDGET_BYTES =
+        96 * sizeof(detail::LegacyBufferSlab);
+    static constexpr uint8_t POOL_SIZE =
+        static_cast<uint8_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
+                                 ? (POOL_BUDGET_BYTES / sizeof(BufferSlab))
+                                 : 1);
 
     void init();
     BufferSlab *acquire();
