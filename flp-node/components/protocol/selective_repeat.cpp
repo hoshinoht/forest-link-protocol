@@ -239,18 +239,25 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
                 break; /* defer remaining retransmissions to next tick */
             }
 
+            if (send_cb_)
+            {
+                int rc = send_cb_(
+                    peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
+                if (rc < 0)
+                {
+                    /* Send failed (NO_MEM) — don't burn a retry, stop.
+                     * The slot keeps its current retry count and timestamp
+                     * so the next tick will re-attempt after backoff. */
+                    break;
+                }
+            }
+
             slot.retries++;
             slot.send_time_ms = now;
+            retx_count++;
 
             ESP_LOGW(TAG, "Timeout retransmit seq=%u retry=%u backoff=%lums",
                      seq, slot.retries, (unsigned long) backoff);
-
-            if (send_cb_)
-            {
-                send_cb_(
-                    peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
-            }
-            retx_count++;
         }
     }
     return retx_count;

@@ -24,12 +24,13 @@ struct FragmentSlot
     uint8_t retries = 0;
 };
 
-/* Callback for sending packets (ACK, NACK, retransmit data) */
-using SendCallback = std::function<void(uint16_t dst,
-                                        PacketType type,
-                                        uint16_t seq,
-                                        const uint8_t *data,
-                                        size_t len)>;
+/* Callback for sending packets (ACK, NACK, retransmit data).
+ * Returns 0 on success, -1 on failure (e.g. ESP_ERR_ESPNOW_NO_MEM). */
+using SendCallback = std::function<int(uint16_t dst,
+                                       PacketType type,
+                                       uint16_t seq,
+                                       const uint8_t *data,
+                                       size_t len)>;
 
 class SelectiveRepeat
 {

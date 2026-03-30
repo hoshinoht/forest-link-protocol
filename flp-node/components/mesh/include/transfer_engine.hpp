@@ -267,18 +267,18 @@ class TransferEngine
 
     /* Pending redistribution queue (fragments from dead exit nodes) */
     uint16_t redist_pending_[ARQ_WINDOW * MAX_EXIT_NODES] = {};
-    uint8_t redist_count_ = 0;
+    uint16_t redist_count_ = 0;
 
     /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
      * already advanced past.  Drained throttled in tick_mesh_arq(). */
-    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 32;
+    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 64;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
     uint8_t oow_retx_count_ = 0;
 
     /* Shared per-tick send budget: prevents ESP_ERR_ESPNOW_NO_MEM by
      * capping the total number of data-carrying sends across ARQ retx,
      * OOW retx, and new fragments. */
-    static constexpr uint8_t MAX_SENDS_PER_TICK = 6;
+    static constexpr uint8_t MAX_SENDS_PER_TICK = 4;
     uint8_t tick_send_budget_ = MAX_SENDS_PER_TICK;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
