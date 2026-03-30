@@ -47,7 +47,10 @@ class SelectiveRepeat
     int send_fragment(uint16_t seq, const uint8_t *data, size_t len);
     void handle_ack(uint16_t seq);
     void handle_nack(uint16_t seq);
-    void tick();
+    /* Tick with external send budget.  Returns the number of
+     * retransmissions actually sent so the caller can decrement a
+     * shared budget across multiple send paths. */
+    uint8_t tick(uint8_t max_sends);
 
     uint16_t get_base_seq() const
     {

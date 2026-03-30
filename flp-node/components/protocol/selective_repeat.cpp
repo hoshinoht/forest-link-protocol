@@ -184,9 +184,10 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
     }
 }
 
-void SelectiveRepeat::tick()
+uint8_t SelectiveRepeat::tick(uint8_t max_sends)
 {
     uint32_t now = now_ms();
+    uint8_t retx_count = 0;
 
     for (uint16_t seq = base_seq_; seq < next_seq_; seq++)
     {
@@ -205,7 +206,26 @@ void SelectiveRepeat::tick()
             continue;
         }
 
-        if ((now - slot.send_time_ms) >= timeout_ms_)
+        /*
+         * Exponential backoff: timeout doubles with each retry.
+         *   retry 0 (first send): timeout_ms_        (2000ms)
+         *   retry 1:              timeout_ms_ * 2    (4000ms)
+         *   retry 2:              timeout_ms_ * 4    (8000ms)
+         *   retry 3:              timeout_ms_ * 8    (16000ms)  capped
+         *   ...
+         * This gives the deferred-ACK pipeline (ESP-NOW → MQTT queue →
+         * TLS publish → fragment_ack_queue → mesh tick → ACK back) more
+         * time to complete under load, instead of burning retries at a
+         * fixed 2s interval that's too aggressive for the slowest path.
+         */
+        uint32_t backoff = timeout_ms_ << slot.retries; /* 2^retries */
+        static constexpr uint32_t MAX_BACKOFF_MS = 16000;
+        if (backoff > MAX_BACKOFF_MS)
+        {
+            backoff = MAX_BACKOFF_MS;
+        }
+
+        if ((now - slot.send_time_ms) >= backoff)
         {
             if (slot.retries >= MAX_RETRIES)
             {
@@ -214,19 +234,26 @@ void SelectiveRepeat::tick()
                 continue;
             }
 
+            if (retx_count >= max_sends)
+            {
+                break; /* defer remaining retransmissions to next tick */
+            }
+
             slot.retries++;
             slot.send_time_ms = now;
 
-            ESP_LOGW(
-                TAG, "Timeout retransmit seq=%u retry=%u", seq, slot.retries);
+            ESP_LOGW(TAG, "Timeout retransmit seq=%u retry=%u backoff=%lums",
+                     seq, slot.retries, (unsigned long) backoff);
 
             if (send_cb_)
             {
                 send_cb_(
                     peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
             }
+            retx_count++;
         }
     }
+    return retx_count;
 }
 
 /* --- Receiver --- */
