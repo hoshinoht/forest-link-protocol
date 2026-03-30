@@ -24,12 +24,13 @@ struct FragmentSlot
     uint8_t retries = 0;
 };
 
-/* Callback for sending packets (ACK, NACK, retransmit data) */
-using SendCallback = std::function<void(uint16_t dst,
-                                        PacketType type,
-                                        uint16_t seq,
-                                        const uint8_t *data,
-                                        size_t len)>;
+/* Callback for sending packets (ACK, NACK, retransmit data).
+ * Returns 0 on success, -1 on failure (e.g. ESP_ERR_ESPNOW_NO_MEM). */
+using SendCallback = std::function<int(uint16_t dst,
+                                       PacketType type,
+                                       uint16_t seq,
+                                       const uint8_t *data,
+                                       size_t len)>;
 
 class SelectiveRepeat
 {
@@ -47,7 +48,10 @@ class SelectiveRepeat
     int send_fragment(uint16_t seq, const uint8_t *data, size_t len);
     void handle_ack(uint16_t seq);
     void handle_nack(uint16_t seq);
-    void tick();
+    /* Tick with external send budget.  Returns the number of
+     * retransmissions actually sent so the caller can decrement a
+     * shared budget across multiple send paths. */
+    uint8_t tick(uint8_t max_sends);
 
     uint16_t get_base_seq() const
     {
@@ -134,6 +138,25 @@ class SelectiveRepeat
     uint8_t exit_stride_ = 1;   /* total exit nodes (1 = single-exit) */
     uint8_t exit_offset_ = 0;   /* this ARQ's index */
     bool sender_failed_ = false; /* set when any fragment exceeds MAX_RETRIES */
+
+    /*
+     * Adaptive RTO estimation (TCP-style, RFC 6298).
+     *
+     * Instead of fixed exponential backoff (2^retries * timeout_ms_),
+     * we measure the actual round-trip time on each ACK and compute a
+     * smoothed RTO.  This adapts to the real end-to-end latency
+     * (source → mesh → exit → MQTT TLS → cloud ACK → exit → mesh → source)
+     * which varies from ~200ms to ~5000ms depending on load.
+     *
+     * Lecture ref: "Failure Detectors" (Coulouris §15.1) — "use timeout
+     * values that reflect the observed network delay conditions."
+     */
+    uint32_t srtt_ms_ = 0;          /* smoothed RTT */
+    uint32_t rttvar_ms_ = 0;        /* RTT variance */
+    uint32_t rto_ms_ = 0;           /* computed retransmit timeout */
+    bool rtt_initialized_ = false;  /* first sample bootstraps SRTT */
+    static constexpr uint32_t RTO_MIN_MS = 200;
+    static constexpr uint32_t RTO_MAX_MS = 16000;
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

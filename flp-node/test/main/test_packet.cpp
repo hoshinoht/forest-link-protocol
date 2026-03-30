@@ -50,9 +50,9 @@ static void test_default_ttl_constant_is_8(void)
     TEST_ASSERT_EQUAL_UINT8(8, DEFAULT_TTL);
 }
 
-static void test_arq_window_constant_is_32(void)
+static void test_arq_window_constant_is_64(void)
 {
-    TEST_ASSERT_EQUAL_UINT8(32, ARQ_WINDOW);
+    TEST_ASSERT_EQUAL_UINT8(64, ARQ_WINDOW);
 }
 
 static void test_fec_group_size_constant_is_7(void)
@@ -238,7 +238,7 @@ void run_packet_tests(void)
     RUN_TEST(test_exit_any_addr_is_0xFFFE);
     RUN_TEST(test_protocol_version_constant_is_1);
     RUN_TEST(test_default_ttl_constant_is_8);
-    RUN_TEST(test_arq_window_constant_is_32);
+    RUN_TEST(test_arq_window_constant_is_64);
     RUN_TEST(test_fec_group_size_constant_is_7);
 
     RUN_TEST(test_set_ver_type_version1_data_round_trips);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 
 #include "freertos/FreeRTOS.h"
@@ -50,12 +51,34 @@ struct FragmentPublishRequest
 /* Cloud ACK/NACK for selective-repeat ARQ */
 struct CloudAckItem
 {
+    uint16_t session_id;
     uint16_t seq;
 };
 
 struct CloudNackItem
 {
+    uint16_t session_id;
     uint16_t seq;
+};
+
+struct FragmentAckItem
+{
+    uint16_t session_id;
+    uint16_t seq;
+};
+
+struct TransferCompleteItem
+{
+    uint16_t session_id;
+};
+
+struct PendingFragmentPublish
+{
+    bool in_use = false;
+    int msg_id = -1;
+    uint16_t session_id = 0;
+    uint16_t seq = 0;
+    uint16_t src_node = 0;
 };
 
 /* Inbound mesh command from cloud (MQTT -> exit node -> mesh) */
@@ -124,10 +147,22 @@ class MqttClient
     bool receive_cmd(MeshCmdItem &out);
 
     /* Drain one cloud ACK (returns true if item was available) */
-    bool drain_cloud_ack(uint16_t &seq_out);
+    bool drain_cloud_ack(uint16_t session_id, uint16_t &seq_out);
 
     /* Drain one cloud NACK (returns true if item was available) */
-    bool drain_cloud_nack(uint16_t &seq_out);
+    bool drain_cloud_nack(uint16_t session_id, uint16_t &seq_out);
+
+    /* Drain one deferred fragment ACK (exit node: MQTT published OK) */
+    bool drain_fragment_ack(uint16_t session_id, uint16_t &seq_out);
+
+    /* Session consensus: cloud confirmed transfer complete.
+     * Returns true (once) when the cloud has published TRANSFER_COMPLETE
+     * for any session.  Exit node polls this and forwards a
+     * TRANSFER_DONE packet to the source via mesh. */
+    bool consume_transfer_complete(uint16_t session_id);
+
+    void activate_transfer_session(uint16_t session_id);
+    void clear_transfer_session(uint16_t session_id);
 
     TopicTable &topic_table()
     {
@@ -164,6 +199,14 @@ class MqttClient
     void register_default_topics();
     void process_file_publish(const FilePublishRequest &req);
     void process_fragment_publish();
+    int outbox_size_bytes() const;
+    void reset_transfer_runtime_state();
+    void remember_pending_fragment_publish(int msg_id,
+                                          uint16_t session_id,
+                                          uint16_t seq,
+                                          uint16_t src_node);
+    bool complete_pending_fragment_publish(int msg_id,
+                                           PendingFragmentPublish &out);
     void notify();
 
     /* Fix 13: optional event group signalled on first MQTT connect */
@@ -172,6 +215,18 @@ class MqttClient
 
     /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;
+
+    /* Deferred ACK queue: seq numbers of fragments successfully published
+     * to MQTT.  Drained by TransferEngine to send mesh ACKs after actual
+     * MQTT delivery, providing end-to-end backpressure. */
+    QueueHandle_t fragment_ack_queue_ = nullptr;
+    QueueHandle_t transfer_complete_queue_ = nullptr;
+
+    static constexpr size_t MAX_PENDING_FRAGMENT_PUBLISHES = 256;
+    std::array<PendingFragmentPublish, MAX_PENDING_FRAGMENT_PUBLISHES>
+        pending_fragment_publishes_ = {};
+    portMUX_TYPE pending_fragment_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    std::atomic<uint16_t> active_transfer_session_{0};
 };
 
 } /* namespace flp */

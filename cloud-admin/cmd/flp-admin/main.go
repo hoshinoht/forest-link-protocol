@@ -38,7 +38,7 @@ func main() {
 	broker := flag.String("broker", "localhost", "MQTT broker hostname")
 	port := flag.Int("port", 1883, "MQTT broker port")
 	webPort := flag.Int("web-port", 5050, "HTTP dashboard port")
-	srWindow := flag.Int("sr-window", 8, "Selective Repeat window size")
+	srWindow := flag.Int("sr-window", 64, "Selective Repeat window size")
 	srTimeout := flag.Float64("sr-timeout", 5.0, "Selective Repeat timeout (seconds)")
 	mqttUser := flag.String("mqtt-user", "", "MQTT username")
 	mqttPass := flag.String("mqtt-pass", "", "MQTT password")
@@ -49,7 +49,7 @@ func main() {
 
 	// Channels
 	metaCh := make(chan mqtt.FileMeta, 16)
-	chunkCh := make(chan mqtt.FileChunk, 256)
+	chunkCh := make(chan mqtt.FileChunk, 2048)
 	topoCh := make(chan mqtt.TopoMsg, 32)
 	metricCh := make(chan mqtt.MetricMsg, 64)
 

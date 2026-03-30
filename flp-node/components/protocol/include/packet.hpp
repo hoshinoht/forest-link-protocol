@@ -11,9 +11,9 @@ static constexpr uint16_t EXIT_ANY_ADDR = 0xFFFE; /* route toward nearest exit *
 static constexpr uint8_t PROTOCOL_VERSION = 1;
 static constexpr uint8_t DEFAULT_TTL = 8;
 static constexpr size_t MAX_MTU = 250;
-static constexpr uint8_t ARQ_WINDOW = 32;
+static constexpr uint8_t ARQ_WINDOW = 64;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
-static constexpr uint8_t MAX_RETRIES = 3;
+static constexpr uint8_t MAX_RETRIES = 5;
 static constexpr uint8_t MAX_NEIGHBORS = 16;
 static constexpr uint8_t MAX_EXIT_NODES = 4;
 static constexpr uint8_t FEC_GROUP_SIZE = 7;
@@ -31,6 +31,7 @@ enum class PacketType : uint8_t
     TRANSFER_ACK = 0x21, /* exit node response to transfer ad */
     ROUTE_ERROR = 0x13, /* link failure notification */
     EXIT_OFFLINE = 0x22, /* exit node going offline notification */
+    TRANSFER_DONE = 0x23, /* cloud confirmed transfer complete */
     MESH_PUB = 0x30, /* uplink relay: node → exit → MQTT */
     MESH_CMD = 0x31, /* downlink relay: MQTT → exit → node */
 };

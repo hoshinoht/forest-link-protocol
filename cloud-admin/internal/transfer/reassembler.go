@@ -3,6 +3,7 @@ package transfer
 import (
 	"fmt"
 	"hash/crc32"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -129,6 +130,10 @@ type FileReassembler struct {
 	ChunksReceived     int // total chunks (data + parity), for progress display
 	DataChunksReceived int // B1 fix: data-only counter, for completion check
 	fec                *FecDecoder
+
+	// Tracing
+	FECRecoveries  int // number of fragments recovered by FEC
+	ParityReceived int // number of parity chunks received
 }
 
 // NewFileReassembler creates a reassembler for the given transfer session.
@@ -150,14 +155,16 @@ func NewFileReassembler(sessionID, filename string, totalSize, chunkCount int, e
 	}
 }
 
-// WriteChunk writes a chunk at the given sequence number. Returns true if new.
-func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
+// WriteChunk writes a chunk at the given sequence number.
+// It returns whether the incoming chunk was new, plus any data-chunk sequence
+// recovered inline by FEC (-1 when no recovery happened).
+func (r *FileReassembler) WriteChunk(seq int, data []byte) (bool, int) {
 	if seq < 0 || seq >= r.ChunkCount {
-		return false
+		return false, -1
 	}
 
 	if r.Bitmap[seq/8]&(1<<uint(seq%8)) != 0 {
-		return false
+		return false, -1
 	}
 
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
@@ -168,6 +175,7 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 
 		// B5 fix: Ingest returns a single recovered fragment inline
 		rec := r.fec.Ingest(seq, data, isParity)
+		recoveredSeq := -1
 
 		if !isParity {
 			group := seq / (FECGroupSize + 1)
@@ -175,6 +183,8 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 			dataIdx := group*FECGroupSize + idxInGroup
 			r.writeToBufferAt(dataIdx, data)
 			r.DataChunksReceived++ // B1 fix: only count data chunks
+		} else {
+			r.ParityReceived++
 		}
 
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
@@ -182,6 +192,8 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 
 		// B5 fix: process the single recovered fragment inline
 		if rec != nil {
+			log.Printf("[trace/fec] recovered seq=%d from group %d (session=%s, recoveries=%d)",
+				rec.Seq, rec.Seq/(FECGroupSize+1), r.SessionID, r.FECRecoveries+1)
 			if r.Bitmap[rec.Seq/8]&(1<<uint(rec.Seq%8)) == 0 {
 				recGroup := rec.Seq / (FECGroupSize + 1)
 				recIdx := rec.Seq % (FECGroupSize + 1)
@@ -190,15 +202,18 @@ func (r *FileReassembler) WriteChunk(seq int, data []byte) bool {
 				r.Bitmap[rec.Seq/8] |= 1 << uint(rec.Seq%8)
 				r.ChunksReceived++
 				r.DataChunksReceived++ // recovered fragments are always data
+				r.FECRecoveries++
+				recoveredSeq = rec.Seq
 			}
 		}
+		return true, recoveredSeq
 	} else {
 		r.writeToBufferAt(seq, data)
 		r.Bitmap[seq/8] |= 1 << uint(seq%8)
 		r.ChunksReceived++
 		r.DataChunksReceived++ // B1 fix: no FEC, every chunk is data
 	}
-	return true
+	return true, -1
 }
 
 func (r *FileReassembler) writeToBufferAt(dataIdx int, data []byte) {

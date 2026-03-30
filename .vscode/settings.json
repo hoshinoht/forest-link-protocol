@@ -50,5 +50,6 @@
 },
 "[markdown]": {
     "editor.defaultFormatter": "yzhang.markdown-all-in-one"
-}
+},
+"cmake.sourceDirectory": "/Users/cantabile/projects/sit/csc2106/forest-link-protocol/flp-node"
 }

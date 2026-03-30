@@ -136,6 +136,16 @@ menu "Forest Link Protocol"
             depends on FLP_SD_ENABLED
     endmenu
 
+    config FLP_BLOCKED_PEER
+        string "Blocked peer address (hex, e.g. A1B2). Empty = none"
+        default ""
+        help
+            Hex address of a peer to ignore at the radio level.
+            Direct packets (hop_count==0) from this address are silently
+            dropped, forcing multi-hop routing through intermediate relays.
+            Useful for lab testing of multi-hop topologies when all boards
+            are physically close together.
+
     menu "OLED Display (SSD1306)"
         config FLP_OLED_ENABLED
             bool "Enable OLED display"

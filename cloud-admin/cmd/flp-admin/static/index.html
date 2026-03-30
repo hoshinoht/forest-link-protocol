@@ -3,129 +3,526 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FLP v3.7 — Dashboard</title>
+<title>Forest Link Protocol — Dashboard</title>
 <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500&display=swap" rel="stylesheet">
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; }
-header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
-header h1 { font-size: 18px; color: #58a6ff; }
-header span { font-size: 12px; color: #8b949e; }
-.tabs { display: flex; background: #161b22; border-bottom: 1px solid #30363d; }
-.tab { padding: 10px 20px; cursor: pointer; color: #8b949e; border-bottom: 2px solid transparent; font-size: 14px; }
-.tab:hover { color: #c9d1d9; }
-.tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
-.panel { display: none; padding: 20px; height: calc(100vh - 100px); overflow: auto; }
+/* ═══════════════════════════════════════════════════════════════════════
+   Material 3 Design Tokens — Dark theme, green primary (Forest theme)
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  /* Primary (green) */
+  --md-sys-color-primary: #A5D6A7;
+  --md-sys-color-on-primary: #003910;
+  --md-sys-color-primary-container: #00531A;
+  --md-sys-color-on-primary-container: #C1F4C1;
+
+  /* Secondary */
+  --md-sys-color-secondary: #B9CCB5;
+  --md-sys-color-on-secondary: #253424;
+  --md-sys-color-secondary-container: #3B4B39;
+  --md-sys-color-on-secondary-container: #D5E8D0;
+
+  /* Tertiary */
+  --md-sys-color-tertiary: #A1CED5;
+  --md-sys-color-on-tertiary: #00363C;
+  --md-sys-color-tertiary-container: #1F4D53;
+  --md-sys-color-on-tertiary-container: #BDE9F1;
+
+  /* Error */
+  --md-sys-color-error: #FFB4AB;
+  --md-sys-color-on-error: #690005;
+  --md-sys-color-error-container: #93000A;
+  --md-sys-color-on-error-container: #FFDAD6;
+
+  /* Surface / Background */
+  --md-sys-color-surface: #1A1C19;
+  --md-sys-color-on-surface: #E2E3DD;
+  --md-sys-color-on-surface-variant: #C2C9BD;
+  --md-sys-color-surface-container-lowest: #111311;
+  --md-sys-color-surface-container-low: #1E201D;
+  --md-sys-color-surface-container: #222522;
+  --md-sys-color-surface-container-high: #2D302C;
+  --md-sys-color-surface-container-highest: #383B37;
+  --md-sys-color-outline: #8C9388;
+  --md-sys-color-outline-variant: #42493F;
+  --md-sys-color-inverse-surface: #E2E3DD;
+  --md-sys-color-inverse-on-surface: #2F312D;
+
+  /* Elevation (tonal overlays) */
+  --md-sys-elevation-1: var(--md-sys-color-surface-container-low);
+  --md-sys-elevation-2: var(--md-sys-color-surface-container);
+  --md-sys-elevation-3: var(--md-sys-color-surface-container-high);
+
+  /* Shape */
+  --md-sys-shape-xs: 4px;
+  --md-sys-shape-sm: 8px;
+  --md-sys-shape-md: 12px;
+  --md-sys-shape-lg: 16px;
+  --md-sys-shape-xl: 28px;
+
+  /* Typography */
+  --md-sys-typescale-body-font: 'Google Sans Text', 'Segoe UI', system-ui, sans-serif;
+  --md-sys-typescale-display-font: 'Google Sans', 'Segoe UI', system-ui, sans-serif;
+
+  /* Custom status colors */
+  --flp-online: #66BB6A;
+  --flp-offline: #EF5350;
+  --flp-espnow: var(--md-sys-color-primary);
+  --flp-lora: var(--md-sys-color-tertiary);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Reset & Base
+   ═══════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: var(--md-sys-typescale-body-font);
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  display: flex;
+  overflow: hidden;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Navigation Rail (left side, 80px wide)
+   ═══════════════════════════════════════════════════════════════════ */
+.nav-rail {
+  width: 80px;
+  min-width: 80px;
+  height: 100vh;
+  background: var(--md-sys-color-surface-container-lowest);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  gap: 4px;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  z-index: 10;
+}
+.nav-rail .brand {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--md-sys-typescale-display-font);
+  font-weight: 700; font-size: 16px;
+  margin-bottom: 16px;
+}
+.nav-item {
+  width: 56px;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 4px; padding: 8px 0 6px;
+  border-radius: var(--md-sys-shape-lg);
+  cursor: pointer;
+  transition: background 0.15s;
+  color: var(--md-sys-color-on-surface-variant);
+  text-decoration: none;
+}
+.nav-item:hover { background: var(--md-sys-color-surface-container); }
+.nav-item.active {
+  color: var(--md-sys-color-on-primary-container);
+}
+.nav-item .icon-wrap {
+  width: 56px; height: 32px;
+  border-radius: var(--md-sys-shape-xl);
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.nav-item.active .icon-wrap {
+  background: var(--md-sys-color-primary-container);
+}
+.nav-item svg { width: 24px; height: 24px; fill: currentColor; }
+.nav-item .label {
+  font-size: 11px; font-weight: 500;
+  text-align: center; line-height: 1.2;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Main Content Area
+   ═══════════════════════════════════════════════════════════════════ */
+.main {
+  flex: 1;
+  display: flex; flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+.top-bar {
+  height: 56px;
+  display: flex; align-items: center;
+  padding: 0 24px;
+  background: var(--md-sys-color-surface);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  gap: 12px;
+}
+.top-bar h1 {
+  font-family: var(--md-sys-typescale-display-font);
+  font-size: 20px; font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+}
+.top-bar .subtitle {
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Panels (tab content)
+   ═══════════════════════════════════════════════════════════════════ */
+.panel { display: none; }
 .panel.active { display: block; }
-#topo-container { width: 100%; height: calc(100vh - 160px); background: #0d1117; border: 1px solid #30363d; border-radius: 6px; }
-.controls { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
-select, button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 12px; border-radius: 4px; font-size: 13px; }
-button:hover { background: #30363d; cursor: pointer; }
-.chart-wrap { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 16px; max-width: 900px; }
-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #21262d; font-size: 13px; }
-th { color: #8b949e; font-weight: 600; }
-tr:hover { background: #161b22; }
-.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; }
-.stat-card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; }
-.stat-card .value { font-size: 22px; font-weight: 600; color: #58a6ff; margin-top: 4px; }
-.online { color: #3fb950; }
-.offline { color: #f85149; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   M3 Cards
+   ═══════════════════════════════════════════════════════════════════ */
+.m3-card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-shape-md);
+  padding: 16px 20px;
+}
+.m3-card-outlined {
+  background: var(--md-sys-color-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-md);
+  padding: 16px 20px;
+}
+
+/* Stat cards */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat-card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-shape-md);
+  padding: 16px;
+}
+.stat-card .label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.stat-card .value {
+  font-family: var(--md-sys-typescale-display-font);
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--md-sys-color-primary);
+  margin-top: 6px;
+}
+.stat-card .value.online { color: var(--flp-online); }
+.stat-card .value.offline { color: var(--flp-offline); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   M3 Buttons, Selects, Inputs
+   ═══════════════════════════════════════════════════════════════════ */
+.m3-btn {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border: none;
+  padding: 10px 24px;
+  border-radius: var(--md-sys-shape-xl);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.m3-btn:hover {
+  box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  filter: brightness(1.1);
+}
+.m3-btn-tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border: none;
+  padding: 10px 24px;
+  border-radius: var(--md-sys-shape-xl);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.m3-btn-tonal:hover { filter: brightness(1.1); }
+
+.m3-select, .m3-input {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  padding: 10px 14px;
+  border-radius: var(--md-sys-shape-xs);
+  font-size: 14px;
+  font-family: var(--md-sys-typescale-body-font);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.m3-select:focus, .m3-input:focus {
+  border-color: var(--md-sys-color-primary);
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
+}
+.m3-select option { background: var(--md-sys-color-surface-container-high); }
+
+.controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   M3 Table
+   ═══════════════════════════════════════════════════════════════════ */
+.m3-table-wrap {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-shape-md);
+  overflow: hidden;
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+td {
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--md-sys-color-on-surface);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--md-sys-color-surface-container-high); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Chart containers
+   ═══════════════════════════════════════════════════════════════════ */
+.chart-wrap {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-shape-md);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Topology container
+   ═══════════════════════════════════════════════════════════════════ */
+#topo-container {
+  width: 100%;
+  height: calc(100vh - 240px);
+  background: var(--md-sys-color-surface-container-lowest);
+  border-radius: var(--md-sys-shape-md);
+  border: 1px solid var(--md-sys-color-outline-variant);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Active transfer progress bar (M3 linear indicator)
+   ═══════════════════════════════════════════════════════════════════ */
+.m3-progress-track {
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: var(--md-sys-shape-xl);
+  height: 8px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+.m3-progress-fill {
+  background: var(--md-sys-color-primary);
+  height: 100%;
+  border-radius: var(--md-sys-shape-xl);
+  transition: width 0.4s ease;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Messaging log
+   ═══════════════════════════════════════════════════════════════════ */
+.msg-log {
+  margin-top: 20px;
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-sys-shape-md);
+  padding: 16px 20px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 13px;
+  max-height: 400px;
+  overflow: auto;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.msg-log div { padding: 4px 0; border-bottom: 1px solid var(--md-sys-color-outline-variant); }
+.msg-log div:last-child { border-bottom: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Section headers
+   ═══════════════════════════════════════════════════════════════════ */
+.section-title {
+  font-family: var(--md-sys-typescale-display-font);
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: 16px;
+}
 </style>
 </head>
 <body>
-<header>
+
+<!-- ════════════════ Navigation Rail ════════════════ -->
+<nav class="nav-rail">
+  <div class="brand">FLP</div>
+
+  <a class="nav-item active" data-tab="topology">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+    </div>
+    <span class="label">Topology</span>
+  </a>
+
+  <a class="nav-item" data-tab="metrics">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z"/></svg>
+    </div>
+    <span class="label">Metrics</span>
+  </a>
+
+  <a class="nav-item" data-tab="transfers">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+    </div>
+    <span class="label">Transfers</span>
+  </a>
+
+  <a class="nav-item" data-tab="memory">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z"/></svg>
+    </div>
+    <span class="label">Memory</span>
+  </a>
+
+  <a class="nav-item" data-tab="messaging">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg>
+    </div>
+    <span class="label">Messaging</span>
+  </a>
+
+  <a class="nav-item" data-tab="comparison">
+    <div class="icon-wrap">
+      <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
+    </div>
+    <span class="label">Compare</span>
+  </a>
+</nav>
+
+<!-- ════════════════ Main Content ════════════════ -->
+<div class="main">
+  <div class="top-bar">
     <h1>Forest Link Protocol</h1>
-    <span>v3.7 — Mesh Network Dashboard</span>
-</header>
-<div class="tabs">
-    <div class="tab active" data-tab="topology">Topology</div>
-    <div class="tab" data-tab="metrics">Node Metrics</div>
-    <div class="tab" data-tab="transfers">Transfers</div>
-    <div class="tab" data-tab="memory">Memory</div>
-    <div class="tab" data-tab="messaging">Messaging</div>
-    <div class="tab" data-tab="comparison">Comparison</div>
-</div>
+    <span class="subtitle">Mesh Network Dashboard</span>
+  </div>
+  <div class="content">
 
-<div id="topology" class="panel active">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-        <div class="stat-grid" id="topo-stats" style="flex:1;margin-bottom:0;"></div>
-        <button id="crawl-btn" onclick="crawlMesh()">Crawl Mesh</button>
+    <!-- ════ Topology ════ -->
+    <div id="topology" class="panel active">
+      <div class="stat-grid" id="topo-stats"></div>
+      <div style="display:flex;gap:12px;margin-bottom:16px;">
+        <button class="m3-btn-tonal" id="crawl-btn" onclick="crawlMesh()">Crawl Mesh</button>
+      </div>
+      <div id="topo-container"></div>
     </div>
-    <div id="topo-container"></div>
-</div>
 
-<div id="metrics" class="panel">
-    <div class="controls">
-        <select id="node-select"><option value="">Select node...</option></select>
-        <select id="range-select">
-            <option value="300">5 min</option>
-            <option value="3600" selected>1 hour</option>
-            <option value="86400">24 hours</option>
+    <!-- ════ Metrics ════ -->
+    <div id="metrics" class="panel">
+      <div class="controls">
+        <select class="m3-select" id="node-select"><option value="">Select node...</option></select>
+        <select class="m3-select" id="range-select">
+          <option value="300">5 min</option>
+          <option value="3600" selected>1 hour</option>
+          <option value="86400">24 hours</option>
         </select>
-        <button onclick="loadMetrics()">Refresh</button>
+        <button class="m3-btn" onclick="loadMetrics()">Refresh</button>
+      </div>
+      <div class="chart-wrap"><canvas id="metrics-chart"></canvas></div>
     </div>
-    <div class="chart-wrap"><canvas id="metrics-chart"></canvas></div>
-</div>
 
-<div id="transfers" class="panel">
-    <div id="active-transfer" style="margin-bottom:16px;display:none;">
+    <!-- ════ Transfers ════ -->
+    <div id="transfers" class="panel">
+      <div id="active-transfer" style="margin-bottom:20px;display:none;">
+        <div class="section-title">Active Transfer</div>
         <div class="stat-grid" id="active-stats"></div>
-        <div style="background:#21262d;border-radius:4px;height:20px;margin-top:8px;">
-            <div id="active-bar" style="background:#58a6ff;height:100%;border-radius:4px;transition:width 0.3s;width:0%"></div>
+        <div class="m3-progress-track">
+          <div class="m3-progress-fill" id="active-bar" style="width:0%"></div>
         </div>
+      </div>
+      <div class="section-title">Transfer History</div>
+      <div class="stat-grid" id="transfer-stats"></div>
+      <div class="m3-table-wrap">
+        <table>
+          <thead><tr><th>Session</th><th>Timestamp</th><th>Size</th><th>Chunks</th><th>Duration</th><th>Goodput</th><th>Retransmits</th></tr></thead>
+          <tbody id="transfer-body"></tbody>
+        </table>
+      </div>
     </div>
-    <div class="stat-grid" id="transfer-stats"></div>
-    <table>
-        <thead><tr><th>Session</th><th>Size</th><th>Chunks</th><th>Duration</th><th>Goodput</th><th>Retransmits</th></tr></thead>
-        <tbody id="transfer-body"></tbody>
-    </table>
-</div>
 
-<div id="memory" class="panel">
-    <div class="controls">
-        <select id="heap-node-select"><option value="">Select node...</option></select>
-        <select id="heap-range-select">
-            <option value="300">5 min</option>
-            <option value="3600" selected>1 hour</option>
-            <option value="86400">24 hours</option>
+    <!-- ════ Memory ════ -->
+    <div id="memory" class="panel">
+      <div class="controls">
+        <select class="m3-select" id="heap-node-select"><option value="">Select node...</option></select>
+        <select class="m3-select" id="heap-range-select">
+          <option value="300">5 min</option>
+          <option value="3600" selected>1 hour</option>
+          <option value="86400">24 hours</option>
         </select>
-        <button onclick="loadHeap()">Refresh</button>
-        <button onclick="sendNodeCmd(document.getElementById('heap-node-select').value, 1)">Request Telemetry</button>
+        <button class="m3-btn" onclick="loadHeap()">Refresh</button>
+        <button class="m3-btn-tonal" onclick="sendNodeCmd(document.getElementById('heap-node-select').value, 1)">Request Telemetry</button>
+      </div>
+      <div class="stat-grid" id="heap-stats"></div>
+      <div class="chart-wrap"><canvas id="heap-chart"></canvas></div>
     </div>
-    <div class="stat-grid" id="heap-stats"></div>
-    <div class="chart-wrap"><canvas id="heap-chart"></canvas></div>
-</div>
 
-<div id="messaging" class="panel">
-    <div class="controls">
-        <select id="msg-node-select"><option value="FFFF">Broadcast (0xFFFF)</option></select>
-        <input id="msg-topic" type="text" placeholder="Topic (e.g. config)" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:6px 12px;border-radius:4px;font-size:13px;width:160px;">
-        <input id="msg-payload" type="text" placeholder="Payload hex (optional)" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:6px 12px;border-radius:4px;font-size:13px;width:200px;">
-        <button onclick="sendTopicMsg()">Send</button>
+    <!-- ════ Messaging ════ -->
+    <div id="messaging" class="panel">
+      <div class="controls">
+        <select class="m3-select" id="msg-node-select"><option value="FFFF">Broadcast (0xFFFF)</option></select>
+        <input class="m3-input" id="msg-topic" type="text" placeholder="Topic (e.g. config)" style="width:180px;">
+        <input class="m3-input" id="msg-payload" type="text" placeholder="Payload hex (optional)" style="width:220px;">
+        <button class="m3-btn" onclick="sendTopicMsg()">Send</button>
+      </div>
+      <div class="msg-log" id="msg-log"></div>
     </div>
-    <div id="msg-log" style="margin-top:16px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;font-family:monospace;font-size:13px;max-height:400px;overflow:auto;"></div>
-</div>
 
-<div id="comparison" class="panel">
-    <div class="chart-wrap" style="max-width:100%">
-        <canvas id="compare-pdr"></canvas>
+    <!-- ════ Comparison ════ -->
+    <div id="comparison" class="panel">
+      <div class="chart-wrap"><canvas id="compare-pdr"></canvas></div>
+      <div class="chart-wrap"><canvas id="compare-throughput"></canvas></div>
+      <div class="chart-wrap"><canvas id="compare-latency"></canvas></div>
     </div>
-    <div class="chart-wrap" style="max-width:100%">
-        <canvas id="compare-throughput"></canvas>
-    </div>
-    <div class="chart-wrap" style="max-width:100%">
-        <canvas id="compare-latency"></canvas>
-    </div>
+
+  </div>
 </div>
 
 <script>
-// --- Helpers for safe DOM manipulation ---
-function clearChildren(el) {
-    while (el.firstChild) el.removeChild(el.firstChild);
-}
+/* ═══════════════════════════════════════════════════════════════════════
+   Chart.js global defaults for M3 dark theme
+   ═══════════════════════════════════════════════════════════════════ */
+Chart.defaults.color = '#C2C9BD';
+Chart.defaults.borderColor = '#42493F';
+Chart.defaults.font.family = "'Google Sans Text', system-ui, sans-serif";
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Helpers
+   ═══════════════════════════════════════════════════════════════════ */
+function clearChildren(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 
 function createStatCard(label, value, cssClass) {
     const card = document.createElement('div');
@@ -143,15 +540,16 @@ function createStatCard(label, value, cssClass) {
 
 function createTransferRow(t) {
     const tr = document.createElement('tr');
-    const cells = [
+    const ts = t.start ? new Date(t.start * 1000).toLocaleString() : '-';
+    [
         t.session_id.substring(0, 8) + '...',
+        ts,
         (t.size_bytes / 1024).toFixed(1) + ' KB',
         String(t.chunks),
         (t.end - t.start).toFixed(1) + 's',
         (t.goodput_bps / 1000).toFixed(2) + ' kbps',
         String(t.retransmits)
-    ];
-    cells.forEach(text => {
+    ].forEach(text => {
         const td = document.createElement('td');
         td.textContent = text;
         tr.appendChild(td);
@@ -159,27 +557,33 @@ function createTransferRow(t) {
     return tr;
 }
 
-// --- Tab switching ---
-document.querySelectorAll('.tab').forEach(t => {
-    t.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+/* ═══════════════════════════════════════════════════════════════════════
+   Navigation Rail — Tab switching
+   ═══════════════════════════════════════════════════════════════════ */
+document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+        document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
         document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
-        t.classList.add('active');
-        document.getElementById(t.dataset.tab).classList.add('active');
-        if (t.dataset.tab === 'comparison') loadComparison();
-        if (t.dataset.tab === 'transfers') loadTransfers();
-        if (t.dataset.tab === 'memory') loadHeap();
+        item.classList.add('active');
+        document.getElementById(item.dataset.tab).classList.add('active');
+        if (item.dataset.tab === 'comparison') loadComparison();
+        if (item.dataset.tab === 'transfers') loadTransfers();
+        if (item.dataset.tab === 'memory') loadHeap();
     });
 });
 
-// --- Topology ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Topology
+   ═══════════════════════════════════════════════════════════════════ */
 const network = new vis.Network(
     document.getElementById('topo-container'),
     { nodes: new vis.DataSet(), edges: new vis.DataSet() },
     {
-        nodes: { shape: 'dot', size: 18, font: { color: '#c9d1d9', size: 12 } },
-        edges: { color: { color: '#30363d', highlight: '#58a6ff' }, font: { color: '#8b949e', size: 10, align: 'top' }, arrows: { to: false } },
-        physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -80, springLength: 120 } },
+        nodes: { shape: 'dot', size: 20, font: { color: '#E2E3DD', size: 13 },
+                 borderWidth: 2, shadow: { enabled: true, size: 6, color: 'rgba(0,0,0,0.3)' } },
+        edges: { color: { color: '#42493F', highlight: '#A5D6A7' },
+                 font: { color: '#8C9388', size: 10, align: 'top' }, arrows: { to: false }, width: 2 },
+        physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -80, springLength: 140 } },
         interaction: { hover: true }
     }
 );
@@ -188,274 +592,254 @@ const topoEdges = network.body.data.edges;
 
 async function pollTopology() {
     try {
-        const r = await fetch('/api/topology');
+        const r = await fetch('/api/topology', {credentials:'same-origin'});
         const data = await r.json();
-        const nodeIds = new Set();
-        const edgeIds = new Set();
-
+        const nodeIds = new Set(), edgeIds = new Set();
         let online = 0, offline = 0;
+
         data.nodes.forEach(n => {
             nodeIds.add(n.id);
-            const color = n.status === 'online' ? '#3fb950' : n.status === 'inferred' ? '#8b949e' : '#f85149';
+            const color = n.status === 'online' ? '#66BB6A' : n.status === 'inferred' ? '#8C9388' : '#EF5350';
             const label = n.id + '\n' + n.status;
             let title = n.id + ' (' + n.status + ')';
             if (n.heap) {
-                title += '\nPSRAM: ' + (n.heap.free_psram / 1024).toFixed(0) + ' KB free';
-                title += '\nSRAM: ' + (n.heap.free_internal / 1024).toFixed(0) + ' KB free';
-                title += '\nMin PSRAM: ' + (n.heap.min_psram / 1024).toFixed(0) + ' KB';
-                title += '\nLargest block: ' + (n.heap.largest_block / 1024).toFixed(0) + ' KB';
+                title += '\nPSRAM: ' + (n.heap.free_psram/1024).toFixed(0) + ' KB';
+                title += '\nSRAM: ' + (n.heap.free_internal/1024).toFixed(0) + ' KB';
             }
             if (topoNodes.get(n.id)) {
-                topoNodes.update({ id: n.id, label, title, color: { background: color, border: color } });
+                topoNodes.update({id:n.id, label, title, color:{background:color, border:color}});
             } else {
-                topoNodes.add({ id: n.id, label, title, color: { background: color, border: color } });
+                topoNodes.add({id:n.id, label, title, color:{background:color, border:color}});
             }
             if (n.status === 'online') online++; else if (n.status !== 'inferred') offline++;
-            // Populate node selectors
-            ['node-select', 'heap-node-select', 'msg-node-select'].forEach(selId => {
+            ['node-select','heap-node-select','msg-node-select'].forEach(selId => {
                 const sel = document.getElementById(selId);
-                if (!sel.querySelector('option[value="' + n.id + '"]')) {
+                if (!sel.querySelector('option[value="'+n.id+'"]')) {
                     const opt = document.createElement('option');
-                    opt.value = n.id;
-                    opt.textContent = n.id;
+                    opt.value = n.id; opt.textContent = n.id;
                     sel.appendChild(opt);
                 }
             });
         });
 
         data.edges.forEach(e => {
-            const eid = [e.source, e.target].sort().join('-');
+            const eid = [e.source,e.target].sort().join('-');
             edgeIds.add(eid);
             const label = e.rssi + 'dBm ' + e.transport;
-            const edgeColor = e.transport === 'ESP-NOW' ? '#58a6ff' : '#d2a8ff';
+            const edgeColor = e.transport === 'ESP-NOW' ? '#A5D6A7' : '#A1CED5';
             if (topoEdges.get(eid)) {
-                topoEdges.update({ id: eid, from: e.source, to: e.target, label, color: { color: edgeColor } });
+                topoEdges.update({id:eid, from:e.source, to:e.target, label, color:{color:edgeColor}});
             } else {
-                topoEdges.add({ id: eid, from: e.source, to: e.target, label, color: { color: edgeColor } });
+                topoEdges.add({id:eid, from:e.source, to:e.target, label, color:{color:edgeColor}});
             }
         });
 
-        // Remove stale
         topoNodes.getIds().forEach(id => { if (!nodeIds.has(id)) topoNodes.remove(id); });
         topoEdges.getIds().forEach(id => { if (!edgeIds.has(id)) topoEdges.remove(id); });
 
-        const statsEl = document.getElementById('topo-stats');
-        clearChildren(statsEl);
-        statsEl.appendChild(createStatCard('Nodes Online', online, 'online'));
-        statsEl.appendChild(createStatCard('Nodes Offline', offline, 'offline'));
-        statsEl.appendChild(createStatCard('Links', data.edges.length, ''));
-    } catch (e) { /* silent */ }
+        const s = document.getElementById('topo-stats');
+        clearChildren(s);
+        s.appendChild(createStatCard('Nodes Online', online, 'online'));
+        s.appendChild(createStatCard('Nodes Offline', offline, 'offline'));
+        s.appendChild(createStatCard('Links', data.edges.length, ''));
+    } catch (e) {}
 }
 setInterval(pollTopology, 5000);
 pollTopology();
 
-// --- Node Metrics ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Node Metrics
+   ═══════════════════════════════════════════════════════════════════ */
 let metricsChart = null;
 async function loadMetrics() {
     const nodeId = document.getElementById('node-select').value;
     const range = document.getElementById('range-select').value;
     if (!nodeId) return;
-    const r = await fetch('/api/metrics/' + encodeURIComponent(nodeId) + '?range=' + range);
+    const r = await fetch('/api/metrics/'+encodeURIComponent(nodeId)+'?range='+range, {credentials:'same-origin'});
     const data = await r.json();
     if (metricsChart) metricsChart.destroy();
-
-    const espnowData = data.filter(d => d.transport === 'ESP-NOW');
-    const loraData = data.filter(d => d.transport === 'LoRa');
-    const labels = espnowData.map(d => new Date(d.timestamp * 1000).toLocaleTimeString());
-
+    const espnow = data.filter(d => d.transport === 'ESP-NOW');
+    const lora = data.filter(d => d.transport === 'LoRa');
+    const labels = espnow.map(d => new Date(d.timestamp*1000).toLocaleTimeString());
     metricsChart = new Chart(document.getElementById('metrics-chart'), {
         type: 'line',
         data: {
             labels,
             datasets: [
-                { label: 'ESP-NOW TX', data: espnowData.map(d => d.tx), borderColor: '#58a6ff', tension: 0.3 },
-                { label: 'ESP-NOW RX', data: espnowData.map(d => d.rx), borderColor: '#3fb950', tension: 0.3 },
-                { label: 'ESP-NOW Fail', data: espnowData.map(d => d.fail), borderColor: '#f85149', tension: 0.3 },
-                { label: 'LoRa TX', data: loraData.map(d => d.tx), borderColor: '#d2a8ff', borderDash: [5,3], tension: 0.3 },
-                { label: 'LoRa Fail', data: loraData.map(d => d.fail), borderColor: '#f0883e', borderDash: [5,3], tension: 0.3 },
-                { label: 'ESP-NOW Latency (ms)', data: espnowData.map(d => d.latency_ms), borderColor: '#8b949e', yAxisID: 'y1', tension: 0.3 },
+                {label:'ESP-NOW TX', data:espnow.map(d=>d.tx), borderColor:'#A5D6A7', tension:.3},
+                {label:'ESP-NOW RX', data:espnow.map(d=>d.rx), borderColor:'#66BB6A', tension:.3},
+                {label:'ESP-NOW Fail', data:espnow.map(d=>d.fail), borderColor:'#EF5350', tension:.3},
+                {label:'LoRa TX', data:lora.map(d=>d.tx), borderColor:'#A1CED5', borderDash:[5,3], tension:.3},
+                {label:'LoRa Fail', data:lora.map(d=>d.fail), borderColor:'#FFB4AB', borderDash:[5,3], tension:.3},
+                {label:'Latency (ms)', data:espnow.map(d=>d.latency_ms), borderColor:'#8C9388', yAxisID:'y1', tension:.3},
             ]
         },
         options: {
-            responsive: true,
-            plugins: { legend: { labels: { color: '#c9d1d9' } } },
-            scales: {
-                x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-                y: { position: 'left', ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, title: { display: true, text: 'Packets', color: '#8b949e' } },
-                y1: { position: 'right', ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Latency (ms)', color: '#8b949e' } }
+            responsive:true,
+            plugins:{legend:{labels:{color:'#C2C9BD'}}},
+            scales:{
+                x:{ticks:{color:'#8C9388'},grid:{color:'#42493F'}},
+                y:{position:'left',ticks:{color:'#8C9388'},grid:{color:'#42493F'},title:{display:true,text:'Packets',color:'#8C9388'}},
+                y1:{position:'right',ticks:{color:'#8C9388'},grid:{drawOnChartArea:false},title:{display:true,text:'Latency (ms)',color:'#8C9388'}}
             }
         }
     });
 }
 
-// --- Transfers ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Transfers
+   ═══════════════════════════════════════════════════════════════════ */
 async function loadTransfers() {
-    const r = await fetch('/api/transfers');
+    const r = await fetch('/api/transfers', {credentials:'same-origin'});
     const data = await r.json();
     const tbody = document.getElementById('transfer-body');
     clearChildren(tbody);
     let totalBytes = 0;
-    data.forEach(t => {
-        totalBytes += t.size_bytes;
-        tbody.appendChild(createTransferRow(t));
-    });
-    const statsEl = document.getElementById('transfer-stats');
-    clearChildren(statsEl);
-    statsEl.appendChild(createStatCard('Total Transfers', data.length, ''));
-    statsEl.appendChild(createStatCard('Total Data', (totalBytes / 1024 / 1024).toFixed(2) + ' MB', ''));
-    const avgGoodput = data.length ? (data.reduce((s, t) => s + t.goodput_bps, 0) / data.length / 1000).toFixed(2) : '0';
-    statsEl.appendChild(createStatCard('Avg Goodput', avgGoodput + ' kbps', ''));
+    data.forEach(t => { totalBytes += t.size_bytes; tbody.appendChild(createTransferRow(t)); });
+    const s = document.getElementById('transfer-stats');
+    clearChildren(s);
+    s.appendChild(createStatCard('Total Transfers', data.length, ''));
+    s.appendChild(createStatCard('Total Data', (totalBytes/1024/1024).toFixed(2)+' MB', ''));
+    const avg = data.length ? (data.reduce((a,t)=>a+t.goodput_bps,0)/data.length/1000).toFixed(2) : '0';
+    s.appendChild(createStatCard('Avg Goodput', avg+' kbps', ''));
 }
 
-// --- Comparison ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Comparison
+   ═══════════════════════════════════════════════════════════════════ */
 let cmpCharts = [];
 async function loadComparison() {
-    const r = await fetch('/api/comparison');
+    const r = await fetch('/api/comparison', {credentials:'same-origin'});
     const data = await r.json();
-    cmpCharts.forEach(c => c.destroy());
-    cmpCharts = [];
+    cmpCharts.forEach(c => c.destroy()); cmpCharts = [];
     if (!data.length) return;
-
-    const names = data.map(d => d.name);
-    const colors = ['#58a6ff','#3fb950','#d2a8ff','#f0883e','#f85149','#8b949e'];
-    const bgColors = names.map((_, i) => colors[i % colors.length]);
-
-    function makeBar(canvasId, label, values, unit) {
-        const ctx = document.getElementById(canvasId);
-        const c = new Chart(ctx, {
-            type: 'bar',
-            data: { labels: names, datasets: [{ label: label + (unit ? ' (' + unit + ')' : ''), data: values, backgroundColor: bgColors }] },
-            options: {
-                responsive: true, indexAxis: 'y',
-                plugins: { legend: { labels: { color: '#c9d1d9' } } },
-                scales: { x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } }, y: { ticks: { color: '#c9d1d9' }, grid: { color: '#21262d' } } }
-            }
-        });
-        cmpCharts.push(c);
+    const names = data.map(d=>d.name);
+    const colors = ['#A5D6A7','#66BB6A','#A1CED5','#FFB4AB','#EF5350','#8C9388'];
+    const bg = names.map((_,i)=>colors[i%colors.length]);
+    function bar(id,label,vals,unit) {
+        cmpCharts.push(new Chart(document.getElementById(id), {
+            type:'bar', data:{labels:names, datasets:[{label:label+(unit?' ('+unit+')':''), data:vals, backgroundColor:bg}]},
+            options:{responsive:true, indexAxis:'y',
+                plugins:{legend:{labels:{color:'#C2C9BD'}}},
+                scales:{x:{ticks:{color:'#8C9388'},grid:{color:'#42493F'}},y:{ticks:{color:'#C2C9BD'},grid:{color:'#42493F'}}}}
+        }));
     }
-    makeBar('compare-pdr', 'PDR', data.map(d => d.pdr * 100), '%');
-    makeBar('compare-throughput', 'Throughput', data.map(d => d.throughput_bps / 1000), 'kbps');
-    makeBar('compare-latency', 'Latency', data.map(d => d.latency_ms), 'ms');
+    bar('compare-pdr','PDR',data.map(d=>d.pdr*100),'%');
+    bar('compare-throughput','Throughput',data.map(d=>d.throughput_bps/1000),'kbps');
+    bar('compare-latency','Latency',data.map(d=>d.latency_ms),'ms');
 }
 
-// --- Memory / Heap ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Memory / Heap
+   ═══════════════════════════════════════════════════════════════════ */
 let heapChart = null;
 async function loadHeap() {
     const nodeId = document.getElementById('heap-node-select').value;
     const range = document.getElementById('heap-range-select').value;
     if (!nodeId) return;
-    const r = await fetch('/api/heap/' + encodeURIComponent(nodeId) + '?range=' + range);
+    const r = await fetch('/api/heap/'+encodeURIComponent(nodeId)+'?range='+range, {credentials:'same-origin'});
     const data = await r.json();
     if (heapChart) heapChart.destroy();
     if (!data.length) return;
-
-    const labels = data.map(d => new Date(d.timestamp * 1000).toLocaleTimeString());
-
-    // Show latest stats as cards
-    const latest = data[data.length - 1];
-    const statsEl = document.getElementById('heap-stats');
-    clearChildren(statsEl);
-    statsEl.appendChild(createStatCard('Free PSRAM', (latest.free_psram / 1024).toFixed(0) + ' KB', ''));
-    statsEl.appendChild(createStatCard('Free SRAM', (latest.free_internal / 1024).toFixed(0) + ' KB', ''));
-    statsEl.appendChild(createStatCard('Min PSRAM', (latest.min_psram / 1024).toFixed(0) + ' KB', ''));
-    statsEl.appendChild(createStatCard('Min SRAM', (latest.min_internal / 1024).toFixed(0) + ' KB', ''));
-    statsEl.appendChild(createStatCard('Largest Block', (latest.largest_block / 1024).toFixed(0) + ' KB', ''));
-
+    const labels = data.map(d=>new Date(d.timestamp*1000).toLocaleTimeString());
+    const latest = data[data.length-1];
+    const s = document.getElementById('heap-stats');
+    clearChildren(s);
+    s.appendChild(createStatCard('Free PSRAM', (latest.free_psram/1024).toFixed(0)+' KB', ''));
+    s.appendChild(createStatCard('Free SRAM', (latest.free_internal/1024).toFixed(0)+' KB', ''));
+    s.appendChild(createStatCard('Min PSRAM', (latest.min_psram/1024).toFixed(0)+' KB', ''));
+    s.appendChild(createStatCard('Min SRAM', (latest.min_internal/1024).toFixed(0)+' KB', ''));
+    s.appendChild(createStatCard('Largest Block', (latest.largest_block/1024).toFixed(0)+' KB', ''));
     heapChart = new Chart(document.getElementById('heap-chart'), {
-        type: 'line',
-        data: {
-            labels,
-            datasets: [
-                { label: 'Free PSRAM (KB)', data: data.map(d => d.free_psram / 1024), borderColor: '#58a6ff', tension: 0.3 },
-                { label: 'Free SRAM (KB)', data: data.map(d => d.free_internal / 1024), borderColor: '#3fb950', tension: 0.3 },
-                { label: 'Min PSRAM (KB)', data: data.map(d => d.min_psram / 1024), borderColor: '#58a6ff', borderDash: [5,3], tension: 0.3 },
-                { label: 'Min SRAM (KB)', data: data.map(d => d.min_internal / 1024), borderColor: '#3fb950', borderDash: [5,3], tension: 0.3 },
-                { label: 'Largest Block (KB)', data: data.map(d => d.largest_block / 1024), borderColor: '#d2a8ff', tension: 0.3 },
-            ]
-        },
-        options: {
-            responsive: true,
-            plugins: { legend: { labels: { color: '#c9d1d9' } } },
-            scales: {
-                x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-                y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, title: { display: true, text: 'KB', color: '#8b949e' } }
-            }
-        }
+        type:'line', data:{labels, datasets:[
+            {label:'Free PSRAM (KB)',data:data.map(d=>d.free_psram/1024),borderColor:'#A5D6A7',tension:.3},
+            {label:'Free SRAM (KB)',data:data.map(d=>d.free_internal/1024),borderColor:'#66BB6A',tension:.3},
+            {label:'Min PSRAM (KB)',data:data.map(d=>d.min_psram/1024),borderColor:'#A5D6A7',borderDash:[5,3],tension:.3},
+            {label:'Min SRAM (KB)',data:data.map(d=>d.min_internal/1024),borderColor:'#66BB6A',borderDash:[5,3],tension:.3},
+            {label:'Largest Block (KB)',data:data.map(d=>d.largest_block/1024),borderColor:'#A1CED5',tension:.3},
+        ]},
+        options:{responsive:true,
+            plugins:{legend:{labels:{color:'#C2C9BD'}}},
+            scales:{x:{ticks:{color:'#8C9388'},grid:{color:'#42493F'}},
+                    y:{ticks:{color:'#8C9388'},grid:{color:'#42493F'},title:{display:true,text:'KB',color:'#8C9388'}}}}
     });
 }
 
-// --- Topic Messaging ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Messaging
+   ═══════════════════════════════════════════════════════════════════ */
 async function sendTopicMsg() {
     const nodeId = document.getElementById('msg-node-select').value;
     const topic = document.getElementById('msg-topic').value.trim();
     if (!topic) { alert('Topic is required'); return; }
     const payloadHex = document.getElementById('msg-payload').value.trim();
-    const r = await fetch('/api/topic_msg/' + encodeURIComponent(nodeId), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic: topic, data: payloadHex })
+    const r = await fetch('/api/topic_msg/'+encodeURIComponent(nodeId), {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({topic, data:payloadHex})
     });
+    if (!r.ok) { alert('Request failed: '+r.status); return; }
     const data = await r.json();
     const log = document.getElementById('msg-log');
     const ts = new Date().toLocaleTimeString();
     const entry = document.createElement('div');
-    const status = data.ok ? ' OK' : ' ERR: ' + (data.error || 'unknown');
-    entry.textContent = '[' + ts + '] -> 0x' + nodeId + ' topic="' + topic + '"'
-        + (payloadHex ? ' data=' + payloadHex : '') + status;
+    const status = data.ok ? ' OK' : ' ERR: '+(data.error||'unknown');
+    entry.textContent = '['+ts+'] -> 0x'+nodeId+' topic="'+topic+'"'+(payloadHex?' data='+payloadHex:'')+status;
     log.insertBefore(entry, log.firstChild);
 }
 
-// --- Active Transfer Progress ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Active Transfer Progress
+   ═══════════════════════════════════════════════════════════════════ */
 async function pollActiveTransfer() {
     try {
-        const r = await fetch('/api/active-transfer');
+        const r = await fetch('/api/active-transfer', {credentials:'same-origin'});
         const d = await r.json();
         const wrap = document.getElementById('active-transfer');
-        if (!d.active) {
-            wrap.style.display = 'none';
-            return;
-        }
-        wrap.style.display = 'block';
-        const statsEl = document.getElementById('active-stats');
-        clearChildren(statsEl);
-        statsEl.appendChild(createStatCard('File', d.filename, ''));
-        statsEl.appendChild(createStatCard('Progress', (d.progress * 100).toFixed(1) + '%', ''));
-        statsEl.appendChild(createStatCard('Chunks', d.received + ' / ' + d.chunk_count, ''));
-        statsEl.appendChild(createStatCard('Size', (d.total_size / 1024).toFixed(1) + ' KB', ''));
-        statsEl.appendChild(createStatCard('Elapsed', d.elapsed_sec.toFixed(1) + 's', ''));
-        document.getElementById('active-bar').style.width = (d.progress * 100).toFixed(1) + '%';
-    } catch (e) { /* silent */ }
+        if (!d.active) { wrap.style.display='none'; return; }
+        wrap.style.display='block';
+        const s = document.getElementById('active-stats');
+        clearChildren(s);
+        s.appendChild(createStatCard('File', d.filename, ''));
+        s.appendChild(createStatCard('Progress', (d.progress*100).toFixed(1)+'%', ''));
+        s.appendChild(createStatCard('Chunks', d.received+' / '+d.chunk_count, ''));
+        s.appendChild(createStatCard('Size', (d.total_size/1024).toFixed(1)+' KB', ''));
+        s.appendChild(createStatCard('Elapsed', d.elapsed_sec.toFixed(1)+'s', ''));
+        document.getElementById('active-bar').style.width = (d.progress*100).toFixed(1)+'%';
+    } catch (e) {}
 }
 setInterval(pollActiveTransfer, 2000);
 pollActiveTransfer();
 
-// --- Crawl Mesh ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Crawl Mesh
+   ═══════════════════════════════════════════════════════════════════ */
 async function crawlMesh() {
     const btn = document.getElementById('crawl-btn');
-    btn.disabled = true;
-    btn.textContent = 'Crawling...';
+    btn.disabled=true; btn.textContent='Crawling...';
     try {
-        const r = await fetch('/api/crawl');
+        const r = await fetch('/api/crawl', {credentials:'same-origin'});
         const d = await r.json();
-        btn.textContent = 'Pinged ' + d.nodes_pinged + ' nodes';
-        setTimeout(() => { btn.textContent = 'Crawl Mesh'; btn.disabled = false; }, 3000);
-    } catch (e) {
-        btn.textContent = 'Error';
-        setTimeout(() => { btn.textContent = 'Crawl Mesh'; btn.disabled = false; }, 3000);
+        btn.textContent='Pinged '+d.nodes_pinged+' nodes';
+        setTimeout(()=>{btn.textContent='Crawl Mesh';btn.disabled=false;},3000);
+    } catch(e) {
+        btn.textContent='Error';
+        setTimeout(()=>{btn.textContent='Crawl Mesh';btn.disabled=false;},3000);
     }
 }
 
-// --- Node Commands ---
+/* ═══════════════════════════════════════════════════════════════════════
+   Node Commands
+   ═══════════════════════════════════════════════════════════════════ */
 async function sendNodeCmd(nodeId, cmdId) {
-    const r = await fetch('/api/cmd/' + encodeURIComponent(nodeId), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cmd: cmdId })
+    const r = await fetch('/api/cmd/'+encodeURIComponent(nodeId), {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({cmd:cmdId})
     });
+    if (!r.ok) { alert('Command failed: '+r.status); return; }
     const data = await r.json();
-    if (data.ok) {
-        console.log('Command sent:', data);
-    }
+    if (data.ok) console.log('Command sent:', data);
 }
 </script>
 </body>
