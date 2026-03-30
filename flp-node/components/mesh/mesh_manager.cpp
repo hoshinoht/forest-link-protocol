@@ -30,7 +30,7 @@ namespace
 constexpr uint8_t kNodeMacLowByteIdx = 5;
 constexpr uint8_t kNodeMacHighByteIdx = 4;
 constexpr uint8_t kQueueDepth = 16;
-constexpr uint8_t kMaxQueueDrainPerLoop = 24;
+constexpr uint8_t kMaxQueueDrainPerLoop = 8;
 constexpr uint32_t kQueueWaitMs = 20;
 constexpr uint32_t kDiscoveryIntervalMs = 10000;
 constexpr uint32_t kPruneIntervalMs = 5000;
@@ -146,13 +146,7 @@ void MeshManager::init()
                const uint8_t *payload,
                size_t payload_len,
                uint16_t seq_num) -> int
-        {
-            if (type == PacketType::ACK || type == PacketType::NACK)
-            {
-                seq_num = seq_with_congestion(seq_num, buffer_pool_.is_congested());
-            }
-            return send_packet(dst, type, payload, payload_len, seq_num);
-        });
+        { return send_packet(dst, type, payload, payload_len, seq_num); });
 
     /* Wire up fragment forwarding to MQTT (returns false if queue full) */
     transfer_engine_.set_forward_to_mqtt(
