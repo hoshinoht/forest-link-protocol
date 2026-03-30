@@ -19,7 +19,7 @@ static const char *TAG = "mqtt";
 static constexpr size_t MQTT_CHUNK_PAYLOAD = 500;
 static constexpr UBaseType_t MQTT_PUBLISH_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
-static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 64;
+static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH = 128;
 static constexpr UBaseType_t MQTT_ACK_QUEUE_DEPTH = 32;
 static constexpr UBaseType_t MQTT_NACK_QUEUE_DEPTH = 16;
 static constexpr UBaseType_t MQTT_CMD_QUEUE_DEPTH = 8;
@@ -57,9 +57,10 @@ void MqttClient::init()
     ack_queue_ = xQueueCreate(MQTT_ACK_QUEUE_DEPTH, sizeof(CloudAckItem));
     nack_queue_ = xQueueCreate(MQTT_NACK_QUEUE_DEPTH, sizeof(CloudNackItem));
     cmd_queue_ = xQueueCreate(MQTT_CMD_QUEUE_DEPTH, sizeof(MeshCmdItem));
+    fragment_ack_queue_ = xQueueCreate(MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(uint16_t));
 
     if (!publish_queue_ || !file_publish_queue_ || !fragment_publish_queue_ ||
-        !ack_queue_ || !nack_queue_ || !cmd_queue_)
+        !ack_queue_ || !nack_queue_ || !cmd_queue_ || !fragment_ack_queue_)
     {
         ESP_LOGE(TAG, "Failed to create one or more MQTT queues");
         return;
@@ -80,7 +81,7 @@ void MqttClient::init()
      * areas" in usb_serial_jtag_end_select during esp_vfs_select().
      */
     mqtt_cfg.task.stack_size = 8192;
-    mqtt_cfg.outbox.limit = 8192; /* default 4096 too small for burst publishes */
+    mqtt_cfg.outbox.limit = 32768; /* headroom for QoS 1 in-flight fragments */
 
     client_ = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(
@@ -590,8 +591,19 @@ void MqttClient::process_fragment_publish()
         return;
     }
 
+    /*
+     * Limit publishes per run() iteration so we don't stuff the ESP-MQTT
+     * outbox faster than TLS can drain it.  Each fragment is ~250 bytes
+     * with QoS 1 overhead; the outbox is 32 KB.  Cap at 8 per tick to
+     * keep outbox utilisation low and avoid the "outbox full, deferring"
+     * stalls that delay deferred mesh ACKs.
+     */
+    static constexpr uint8_t MAX_PUBLISHES_PER_TICK = 8;
+    uint8_t published = 0;
+
     FragmentPublishRequest req;
-    while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
+    while (published < MAX_PUBLISHES_PER_TICK &&
+           xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
         /* B4 fix: Publish chunk with session ID prefix:
          * [session_id:2LE][seq:2LE][data] — enables cloud to filter
@@ -629,6 +641,21 @@ void MqttClient::process_fragment_publish()
                  req.seq,
                  req.len,
                  msg_id);
+
+        /* Signal that this fragment was successfully handed to ESP-MQTT.
+         * TransferEngine drains this queue and sends mesh ACKs, providing
+         * end-to-end backpressure: sender can't outrun MQTT throughput.
+         *
+         * Only push for relay-forwarded fragments (src_node != our addr).
+         * Local-exit fragments have their own cloud ACK path (ack_queue_)
+         * and must NOT pollute the deferred mesh-ACK queue — otherwise
+         * the relay receives ACKs with wrong seq numbers. */
+        if (fragment_ack_queue_ && req.src_node != node_addr_)
+        {
+            uint16_t ack_seq = req.seq;
+            xQueueSend(fragment_ack_queue_, &ack_seq, 0);
+        }
+        published++;
     }
 }
 
@@ -753,6 +780,15 @@ bool MqttClient::drain_cloud_nack(uint16_t &seq_out)
         return true;
     }
     return false;
+}
+
+bool MqttClient::drain_fragment_ack(uint16_t &seq_out)
+{
+    if (!fragment_ack_queue_)
+    {
+        return false;
+    }
+    return xQueueReceive(fragment_ack_queue_, &seq_out, 0) == pdTRUE;
 }
 
 } /* namespace flp */
