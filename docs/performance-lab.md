@@ -140,7 +140,7 @@ Single exit path:
 | # | Change | File | Risk |
 |-|-|-|-|
 | 1 | `ARQ_WINDOW` 8 → 32 | `packet.hpp` | +50 KB PSRAM (67 KB total) |
-| 2 | MQTT `run()` delay 500 → 10 ms | `mqtt_sn_client.cpp` | Higher CPU on exit node |
-| 3 | Fragment queue 8 → 64 | `mqtt_sn_client.cpp` | +30 KB RAM |
+| 2 | MQTT `run()` delay 500 → 10 ms | `mqtt_client.cpp` | Higher CPU on exit node |
+| 3 | Fragment queue 8 → 64 | `mqtt_client.cpp` | +30 KB RAM |
 | 4 | ESP-NOW inter-packet gap tuned | `espnow_transport.cpp` | None |
 | 5 | ARQ window size aligned to ESP-NOW MTU | `packet.hpp` | None |
