@@ -60,6 +60,8 @@ func NewQueue() *Queue {
 }
 
 // Enqueue adds a transfer or merges into an existing session.
+// Rejects sessions that have already completed to prevent stale
+// meta re-publishes from restarting finished transfers.
 func (q *Queue) Enqueue(sessionID, nodeID, filename string, totalSize, chunkCount int, crc32Val uint32, fragmentSize int) *Session {
 	if q.ActiveTransfer != nil && q.ActiveTransfer.SessionID == sessionID {
 		q.ActiveTransfer.ExitNodes[nodeID] = true
@@ -69,6 +71,14 @@ func (q *Queue) Enqueue(sessionID, nodeID, filename string, totalSize, chunkCoun
 	for _, s := range q.queue {
 		if s.SessionID == sessionID {
 			s.ExitNodes[nodeID] = true
+			return s
+		}
+	}
+
+	// Reject if this session already completed successfully
+	for _, s := range q.Completed {
+		if s.SessionID == sessionID {
+			log.Printf("[transfer] ignoring meta for already-completed session %s", sessionID)
 			return s
 		}
 	}
@@ -260,6 +270,44 @@ func RunEngine(
 		setupActive()
 	}
 
+	// drainChunks batch-drains up to 64 chunks from chunkCh in one go,
+	// avoiding the overhead of re-entering the select loop per chunk.
+	const maxBatchSize = 64
+	drainChunks := func(first mqtt.FileChunk) {
+		batch := make([]mqtt.FileChunk, 0, maxBatchSize)
+		batch = append(batch, first)
+		for len(batch) < maxBatchSize {
+			select {
+			case c := <-chunkCh:
+				batch = append(batch, c)
+			default:
+				goto process
+			}
+		}
+	process:
+		for _, chunk := range batch {
+			// B7 fix: stage chunks if no active session yet
+			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
+				if len(pendingChunks) < maxPendingChunks {
+					pendingChunks = append(pendingChunks, chunk)
+				}
+				continue
+			}
+
+			// B4 fix: filter stale chunks from wrong session
+			chunkSID := fmt.Sprintf("%d", chunk.SessionID)
+			if chunkSID != tq.ActiveTransfer.SessionID {
+				continue
+			}
+
+			complete, success := processChunk(chunk)
+			if complete {
+				completeTransfer(success)
+				return // transfer done, stop processing batch
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -290,24 +338,7 @@ func RunEngine(
 			}
 
 		case chunk := <-chunkCh:
-			// B7 fix: stage chunks if no active session yet
-			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
-				if len(pendingChunks) < maxPendingChunks {
-					pendingChunks = append(pendingChunks, chunk)
-				}
-				continue
-			}
-
-			// B4 fix: filter stale chunks from wrong session
-			chunkSID := fmt.Sprintf("%d", chunk.SessionID)
-			if chunkSID != tq.ActiveTransfer.SessionID {
-				continue
-			}
-
-			complete, success := processChunk(chunk)
-			if complete {
-				completeTransfer(success)
-			}
+			drainChunks(chunk)
 
 		case <-ticker.C:
 			if sr != nil {

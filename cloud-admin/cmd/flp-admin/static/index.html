@@ -468,7 +468,7 @@ tr:hover td { background: var(--md-sys-color-surface-container-high); }
       <div class="stat-grid" id="transfer-stats"></div>
       <div class="m3-table-wrap">
         <table>
-          <thead><tr><th>Session</th><th>Size</th><th>Chunks</th><th>Duration</th><th>Goodput</th><th>Retransmits</th></tr></thead>
+          <thead><tr><th>Session</th><th>Timestamp</th><th>Size</th><th>Chunks</th><th>Duration</th><th>Goodput</th><th>Retransmits</th></tr></thead>
           <tbody id="transfer-body"></tbody>
         </table>
       </div>
@@ -540,8 +540,10 @@ function createStatCard(label, value, cssClass) {
 
 function createTransferRow(t) {
     const tr = document.createElement('tr');
+    const ts = t.start ? new Date(t.start * 1000).toLocaleString() : '-';
     [
         t.session_id.substring(0, 8) + '...',
+        ts,
         (t.size_bytes / 1024).toFixed(1) + ' KB',
         String(t.chunks),
         (t.end - t.start).toFixed(1) + 's',

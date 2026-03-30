@@ -11,6 +11,12 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
+// ackItem is an internal ACK/NACK queued for async publish.
+type ackItem struct {
+	topic   string
+	payload []byte
+}
+
 // Client wraps paho MQTT and demuxes incoming messages into typed channels.
 type Client struct {
 	broker   string
@@ -22,6 +28,7 @@ type Client struct {
 	chunkCh  chan<- FileChunk
 	topoCh   chan<- TopoMsg
 	metricCh chan<- MetricMsg
+	ackCh    chan ackItem // async ACK publish queue
 }
 
 // NewClient creates a Client that fans out received messages to the provided channels.
@@ -38,6 +45,7 @@ func NewClient(broker string, port int, username, password string,
 		chunkCh:  chunkCh,
 		topoCh:   topoCh,
 		metricCh: metricCh,
+		ackCh:    make(chan ackItem, 512),
 	}
 }
 
@@ -84,6 +92,15 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("mqtt connect: %w", tok.Error())
 	}
 	log.Printf("[mqtt] connected to %s:%d", c.broker, c.port)
+
+	// Start async ACK publisher goroutine — decouples ACK publish latency
+	// from the engine's chunk processing loop.
+	go func() {
+		for item := range c.ackCh {
+			c.client.Publish(item.topic, 0, false, item.payload)
+		}
+	}()
+
 	return nil
 }
 
@@ -178,7 +195,8 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 	}
 }
 
-// PublishACK publishes an acknowledgement message to flp/admin/ack/<sessionID>.
+// PublishACK queues an ACK/NACK for async publish on a background goroutine.
+// This fully decouples ACK latency from the engine's chunk processing loop.
 // D2 fix: session-scoped topic prevents ambiguity in multi-transfer scenarios.
 func (c *Client) PublishACK(sessionID string, msgType string, seq int) {
 	payload, _ := json.Marshal(map[string]interface{}{
@@ -186,26 +204,23 @@ func (c *Client) PublishACK(sessionID string, msgType string, seq int) {
 		"seq":  seq,
 	})
 	topic := fmt.Sprintf("flp/admin/ack/%s", sessionID)
-	tok := c.client.Publish(topic, 1, false, payload)
-	tok.Wait()
-	if tok.Error() != nil {
-		log.Printf("[mqtt] publish ack error: %v", tok.Error())
+	select {
+	case c.ackCh <- ackItem{topic: topic, payload: payload}:
+	default:
+		// Drop if channel full — cloud ACKs are advisory
 	}
 }
 
 // PublishTransferNACK publishes missing seq numbers so exit nodes can re-request
 // retransmission from the source. D1+B3 fix: bridges the end-to-end gap.
+// QoS 0 fire-and-forget: stall detection will re-fire if the NACK is lost.
 func (c *Client) PublishTransferNACK(sessionID string, seqs []int) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"session_id": sessionID,
 		"seqs":       seqs,
 	})
 	topic := fmt.Sprintf("flp/admin/transfer_nack/%s", sessionID)
-	tok := c.client.Publish(topic, 1, false, payload)
-	tok.Wait()
-	if tok.Error() != nil {
-		log.Printf("[mqtt] publish transfer_nack error: %v", tok.Error())
-	}
+	c.client.Publish(topic, 0, false, payload)
 }
 
 // PublishTransferCmd publishes a transfer command to flp/admin/transfer_cmd.
