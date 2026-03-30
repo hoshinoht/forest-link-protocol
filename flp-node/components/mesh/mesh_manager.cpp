@@ -183,8 +183,8 @@ void MeshManager::init()
                PacketType type,
                const uint8_t *payload,
                size_t payload_len,
-               uint16_t seq_num)
-        { send_packet(dst, type, payload, payload_len, seq_num); });
+               uint16_t seq_num) -> int
+        { return send_packet(dst, type, payload, payload_len, seq_num); });
 
     /* Wire up fragment forwarding to MQTT (returns false if queue full) */
     transfer_engine_.set_forward_to_mqtt(
@@ -223,6 +223,17 @@ void MeshManager::init()
             return false;
         });
 
+    /* Wire up deferred fragment ACK drain (exit node: ACK after MQTT publish) */
+    transfer_engine_.set_fragment_ack_drain(
+        [this](uint16_t &seq_out) -> bool
+        {
+            if (mqtt_client_)
+            {
+                return mqtt_client_->drain_fragment_ack(seq_out);
+            }
+            return false;
+        });
+
     /* Wire up transfer meta forwarding (exit node publishes complete meta) */
     transfer_engine_.set_forward_meta(
         [this](uint32_t session_id,
@@ -254,6 +265,23 @@ void MeshManager::init()
         esp_wifi_get_channel(&current_channel_, &sec);
         channel_hop_idx_ = current_channel_;
         channel_hop_timer_ms_ = discovery_timer_ms_;
+    }
+
+    /* Parse blocked peer address from Kconfig (hex string, e.g. "A1B2") */
+    {
+        const char *hex = CONFIG_FLP_BLOCKED_PEER;
+        if (hex && hex[0] != '\0')
+        {
+            unsigned long val = strtoul(hex, nullptr, 16);
+            if (val > 0 && val <= 0xFFFF)
+            {
+                blocked_peer_ = static_cast<uint16_t>(val);
+                ESP_LOGW(TAG,
+                         "Peer blacklist active: dropping direct packets "
+                         "from 0x%04X",
+                         blocked_peer_);
+            }
+        }
     }
 
     /* Init heap monitor */
@@ -421,7 +449,15 @@ void MeshManager::run()
         if (!has_internet_ &&
             route_table_.min_hops_to_internet() >= ROUTE_HOPS_UNKNOWN)
         {
-            constexpr uint32_t kChannelHopIntervalMs = 5000;
+            /*
+             * Fast channel scan: dwell 1.5s per channel so a full
+             * 13-channel sweep completes in ~20s instead of ~65s.
+             * This ensures the relay finds the exit node quickly even
+             * if the exit boots while the relay is scanning a different
+             * channel.  Once a neighbor with internet is found, hopping
+             * stops and the relay stays on that channel.
+             */
+            constexpr uint32_t kChannelHopIntervalMs = 1500;
             if (now - channel_hop_timer_ms_ > kChannelHopIntervalMs)
             {
                 channel_hop_idx_ = (channel_hop_idx_ % 13) + 1;
@@ -461,6 +497,21 @@ void MeshManager::process_slab(BufferSlab *slab)
     /* Drop our own packets (e.g. LoRa broadcast echoes back to sender) */
     if (hdr.src_addr == my_addr_)
     {
+        return;
+    }
+
+    /*
+     * Lab peer blacklist: drop DIRECT packets from the blocked address.
+     * hop_count==0 means we heard this on the radio from the originator.
+     * Relayed packets (hop_count>0) are allowed so the mesh still works.
+     */
+    if (blocked_peer_ != 0 && hdr.src_addr == blocked_peer_ &&
+        hdr.hop_count() == 0)
+    {
+        ESP_LOGD(TAG,
+                 "Blacklist: dropping direct pkt from 0x%04X type=0x%02X",
+                 hdr.src_addr,
+                 static_cast<uint8_t>(hdr.type()));
         return;
     }
 
@@ -1308,18 +1359,18 @@ void MeshManager::start_file_transfer(const char *filename,
 
 /* -- send_packet / send_raw --------------------------------------------------- */
 
-void MeshManager::send_packet(uint16_t dst,
-                              PacketType type,
-                              const uint8_t *payload,
-                              size_t payload_len,
-                              uint16_t seq_num)
+int MeshManager::send_packet(uint16_t dst,
+                             PacketType type,
+                             const uint8_t *payload,
+                             size_t payload_len,
+                             uint16_t seq_num)
 {
     if (PACKET_HEADER_SIZE + payload_len > MAX_MTU)
     {
         ESP_LOGW(TAG,
                  "send_packet: payload %zu exceeds MAX_MTU, dropping",
                  payload_len);
-        return;
+        return -1;
     }
 
     uint8_t buf[MAX_MTU];
@@ -1343,52 +1394,49 @@ void MeshManager::send_packet(uint16_t dst,
         /* Broadcast over both transports for neighbor discovery */
         send_raw(Transport::ESPNOW, buf, total, dst);
         send_raw(Transport::LORA, buf, total, dst);
+        return 0;
     }
-    else
-    {
-        /*
-         * Use next_hop() to find the radio-level destination.
-         * The packet header carries the final dst_addr; the radio-level
-         * send must target the next relay, not the final destination.
-         * Without this, ESP-NOW unicast to multi-hop destinations fails
-         * (peer MAC not in table). LoRa accidentally works because it
-         * ignores peer_addr and always broadcasts.
-         */
-        uint16_t radio_dst = route_table_.next_hop(dst, my_addr_);
-        if (radio_dst == BROADCAST_ADDR)
-        {
-            /* No route known — broadcast if targeting EXIT_ANY_ADDR
-             * (bootstrap: a relay may hear us and forward toward exits) */
-            if (dst == EXIT_ANY_ADDR)
-            {
-                send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
-                send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
-            }
-            else
-            {
-                ESP_LOGW(TAG, "No route to 0x%04X, dropping", dst);
-            }
-            return;
-        }
 
-        NeighborEntry neighbor;
-        int8_t rssi = kDefaultRssi;
-        uint8_t hops = 0xFF;
-        if (route_table_.get_neighbor(radio_dst, neighbor))
+    /*
+     * Use next_hop() to find the radio-level destination.
+     * The packet header carries the final dst_addr; the radio-level
+     * send must target the next relay, not the final destination.
+     * Without this, ESP-NOW unicast to multi-hop destinations fails
+     * (peer MAC not in table). LoRa accidentally works because it
+     * ignores peer_addr and always broadcasts.
+     */
+    uint16_t radio_dst = route_table_.next_hop(dst, my_addr_);
+    if (radio_dst == BROADCAST_ADDR)
+    {
+        /* No route known — broadcast if targeting EXIT_ANY_ADDR
+         * (bootstrap: a relay may hear us and forward toward exits) */
+        if (dst == EXIT_ANY_ADDR)
         {
-            rssi = neighbor.rssi;
-            hops = neighbor.hop_count;
+            send_raw(Transport::ESPNOW, buf, total, BROADCAST_ADDR);
+            send_raw(Transport::LORA, buf, total, BROADCAST_ADDR);
+            return 0;
         }
-        Transport t =
-            protocol_selector_.select(rssi, hops, total, kLinkQualityPct);
-        send_raw(t, buf, total, radio_dst);
+        ESP_LOGW(TAG, "No route to 0x%04X, dropping", dst);
+        return -1;
     }
+
+    NeighborEntry neighbor;
+    int8_t rssi = kDefaultRssi;
+    uint8_t hops = 0xFF;
+    if (route_table_.get_neighbor(radio_dst, neighbor))
+    {
+        rssi = neighbor.rssi;
+        hops = neighbor.hop_count;
+    }
+    Transport t =
+        protocol_selector_.select(rssi, hops, total, kLinkQualityPct);
+    return send_raw(t, buf, total, radio_dst);
 }
 
-void MeshManager::send_raw(Transport transport,
-                           const uint8_t *data,
-                           size_t len,
-                           uint16_t peer_addr)
+int MeshManager::send_raw(Transport transport,
+                          const uint8_t *data,
+                          size_t len,
+                          uint16_t peer_addr)
 {
     /* Fix 9: use int64_t to avoid truncation of esp_timer_get_time() µs
      * values before the subtraction; cast to ms only for the final result. */
@@ -1413,4 +1461,5 @@ void MeshManager::send_raw(Transport transport,
     {
         route_table_.report_link_tx(peer_addr, rc == 0);
     }
+    return rc;
 }

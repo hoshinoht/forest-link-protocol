@@ -32,6 +32,7 @@
 #endif
 
 static const char *TAG = "flp_main";
+static const char *FILENAME = "demo.txt";
 
 static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
@@ -90,6 +91,23 @@ static void auto_demo_task(void *arg)
             vTaskDelay(interval);
             continue;
         }
+
+        /*
+         * Exit nodes with internet serve as relay forwarders — their MQTT
+         * pipeline (fragment_publish_queue_ + fragment_ack_queue_) is shared
+         * with relay-forwarded fragments.  Running a local-exit transfer
+         * blocks relay transfers and pollutes the deferred ACK queue.
+         * Skip auto-demo if we have internet; relay nodes will use us as
+         * an exit node instead.
+         */
+        if (mgr->has_internet())
+        {
+            ESP_LOGI(TAG,
+                     "Auto demo: skipping (exit node serves relay transfers)");
+            vTaskDelay(interval);
+            continue;
+        }
+
         ESP_LOGI(TAG,
                  "Auto demo transfer: demo.txt (%u bytes)",
                  (unsigned) s_demo_size);
@@ -155,9 +173,10 @@ static void button_task(void *arg)
         s_last_button_press = now;
 
         ESP_LOGI(TAG,
-                 "Demo transfer: demo.txt (%u bytes)",
+                 "Demo transfer: %s (%u bytes)",
+                 FILENAME,
                  (unsigned) s_demo_size);
-        mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
+        mgr->start_file_transfer(FILENAME, s_demo_size, s_demo_read_chunk);
     }
 }
 #endif
@@ -336,7 +355,9 @@ extern "C" void app_main()
     s_sd_err = flp::sdcard_init();
     if (s_sd_err == ESP_OK)
     {
-        esp_err_t cache_err = s_sd_cache.open("/sdcard/demo.txt");
+        char sd_path[96] = {};
+        std::snprintf(sd_path, sizeof(sd_path), "/sdcard/%s", FILENAME);
+        esp_err_t cache_err = s_sd_cache.open(sd_path);
         if (cache_err == ESP_OK)
         {
             s_demo_size = s_sd_cache.file_size();
@@ -348,15 +369,16 @@ extern "C" void app_main()
             };
             s_sd_status = "OK";
             ESP_LOGI(TAG,
-                     "Loaded demo.txt from SD card: %u bytes "
+                     "Loaded %s from SD card: %u bytes "
                      "(PSRAM read-ahead cache, %zu KB)",
+                     FILENAME,
                      (unsigned) s_demo_size,
                      flp::SdReadCache::CACHE_SIZE / 1024);
         }
         else
         {
             s_sd_status = "file not found";
-            ESP_LOGW(TAG, "demo.txt not found on SD card, using fallback");
+            ESP_LOGW(TAG, "%s not found on SD card, using fallback", FILENAME);
         }
     }
     else

@@ -137,11 +137,11 @@ class MeshManager
         return transfer_engine_.get_progress_pct();
     }
 
-    void send_packet(uint16_t dst,
-                     PacketType type,
-                     const uint8_t *payload,
-                     size_t payload_len,
-                     uint16_t seq_num = 0);
+    int send_packet(uint16_t dst,
+                    PacketType type,
+                    const uint8_t *payload,
+                    size_t payload_len,
+                    uint16_t seq_num = 0);
 
   private:
     void process_slab(BufferSlab *slab);
@@ -160,10 +160,10 @@ class MeshManager
                             size_t payload_len);
     void forward_packet(BufferSlab *slab, const PacketHeader &hdr);
     void send_discovery();
-    void send_raw(Transport transport,
-                  const uint8_t *data,
-                  size_t len,
-                  uint16_t peer_addr);
+    int send_raw(Transport transport,
+                 const uint8_t *data,
+                 size_t len,
+                 uint16_t peer_addr);
     void send_route_error(uint16_t dead_addr, uint16_t inet_origin,
                           uint16_t last_seq);
     void broadcast_exit_offline();
@@ -232,6 +232,9 @@ class MeshManager
 
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
+
+    /* Lab peer blacklist — drop direct (hop_count==0) packets from this addr */
+    uint16_t blocked_peer_ = 0; /* 0 = disabled */
 
     /*
      * Step 4: Enlarged dedup cache with timestamps.
