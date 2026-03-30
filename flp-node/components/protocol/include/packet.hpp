@@ -168,6 +168,13 @@ struct __attribute__((packed)) ExitOfflinePayload
 };
 static_assert(sizeof(ExitOfflinePayload) == 4, "ExitOfflinePayload must be 4 bytes");
 
+struct __attribute__((packed)) TransferDonePayload
+{
+    uint16_t session_id;
+    uint16_t exit_node_addr;
+};
+static_assert(sizeof(TransferDonePayload) == 4, "TransferDonePayload must be 4 bytes");
+
 /* Congestion bit helpers — high bit of 16-bit seq in ACK/NACK payload */
 static constexpr uint16_t CONGESTION_FLAG = 0x8000;
 static inline uint16_t seq_with_congestion(uint16_t seq, bool congested)

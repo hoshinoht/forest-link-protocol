@@ -98,6 +98,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
 
     uint8_t idx = seq % window_size_;
     FragmentSlot &slot = window_[idx];
+    uint16_t prev_next_seq = next_seq_;
 
     memcpy(slot.data, data, len);
     slot.len = len;
@@ -114,7 +115,15 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
     /* Send via callback */
     if (send_cb_)
     {
-        send_cb_(peer_addr_, PacketType::DATA, seq, data, len);
+        int rc = send_cb_(peer_addr_, PacketType::DATA, seq, data, len);
+        if (rc < 0)
+        {
+            slot.sent = false;
+            slot.acked = false;
+            slot.len = 0;
+            next_seq_ = prev_next_seq;
+            return -1;
+        }
     }
 
     ESP_LOGD(TAG,
@@ -217,12 +226,14 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
     uint8_t idx = seq % window_size_;
     FragmentSlot &slot = window_[idx];
 
+    slot.retries++;
     if (slot.retries >= MAX_RETRIES)
     {
-        ESP_LOGW(TAG, "NACK seq=%u retry counter exhausted, resetting", seq);
+        ESP_LOGE(TAG, "NACK seq=%u max retries exceeded, sender failed", seq);
+        sender_failed_ = true;
+        return;
     }
 
-    slot.retries = 0;
     slot.send_time_ms = now_ms();
 
     ESP_LOGD(TAG, "NACK retransmit seq=%u retry=%u", seq, slot.retries);
@@ -443,7 +454,8 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
                 uint16_t ridx_in_group = rec_seq % (FEC_GROUP_SIZE + 1);
                 uint16_t rdata_idx = rgroup * FEC_GROUP_SIZE + ridx_in_group;
                 size_t rmax_data = (fragment_size_ > 0)
-                                       ? (file_size_ / fragment_size_)
+                                       ? ((file_size_ + fragment_size_ - 1) /
+                                          fragment_size_)
                                        : 0;
                 if (rdata_idx < rmax_data)
                 {
@@ -511,7 +523,8 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
          * buffer covers only data positions. An out-of-range data_idx would
          * cause unsigned underflow in the file_size_ - offset subtraction. */
         size_t max_data_fragments = (fragment_size_ > 0)
-                                        ? (file_size_ / fragment_size_)
+                                        ? ((file_size_ + fragment_size_ - 1) /
+                                           fragment_size_)
                                         : 0;
         if (data_idx >= max_data_fragments)
         {

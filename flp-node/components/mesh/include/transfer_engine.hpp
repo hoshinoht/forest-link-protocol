@@ -32,6 +32,7 @@ struct ExitCandidate
     uint16_t addr;
     int8_t rssi_to_gw;
     uint8_t hops_to_gw;
+    uint8_t active_transfers;
 };
 
 /* Per-exit-path quality statistics for weighted scheduling (Phase 3).
@@ -219,9 +220,16 @@ class TransferEngine
     }
 
     /* Handle TRANSFER_DONE from exit node (source side) */
-    void handle_transfer_done(uint16_t sender);
+    void handle_transfer_done(uint16_t sender,
+                              const uint8_t *payload,
+                              size_t payload_len);
 
   private:
+    static uint8_t sanitize_hops_to_exit(uint8_t hops);
+    static uint32_t compute_election_timeout_ms(uint8_t hops_to_exit);
+    static uint32_t compute_arq_timeout_ms(uint8_t hops_to_exit);
+    static uint32_t compute_exit_timeout_ms(uint8_t hops_to_exit);
+
     void transfer_tick();
     void tick_local_exit_arq();
     void tick_mesh_arq();
@@ -240,9 +248,18 @@ class TransferEngine
                                    uint8_t max_retries = 3);
     int8_t arq_index_for_peer(uint16_t addr) const;
 
-    static constexpr uint32_t EXIT_NODE_TIMEOUT_MS = 30000;
+    static constexpr uint32_t BASE_ARQ_TIMEOUT_MS = 3000;
+    static constexpr uint32_t PER_HOP_ARQ_TIMEOUT_MS = 1000;
     static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 8000;
+    static constexpr uint32_t BASE_ELECTION_MS = 3000;
+    static constexpr uint32_t PER_HOP_ELECTION_MS = 1250;
+    static constexpr uint32_t MAX_ELECTION_MS = 9000;
+    static constexpr uint32_t BASE_EXIT_NODE_TIMEOUT_MS = 30000;
+    static constexpr uint32_t PER_HOP_EXIT_NODE_TIMEOUT_MS = 5000;
+    static constexpr uint32_t MAX_EXIT_NODE_TIMEOUT_MS = 60000;
     uint32_t election_timeout_ms_ = 3000; /* Step 6: adaptive election window */
+    uint32_t exit_node_timeout_ms_ = BASE_EXIT_NODE_TIMEOUT_MS;
+    uint8_t source_hops_to_exit_est_ = 1;
 
     SelectiveRepeat arq_[MAX_EXIT_NODES];
     ActiveTransfer transfer_ = {};
@@ -267,6 +284,7 @@ class TransferEngine
     TransferCompleteFn transfer_complete_fn_;
     SessionLifecycleFn mqtt_session_end_fn_;
     bool is_exit_node_ = false;
+    bool exit_pending_ = false;
     bool local_exit_ = false;
     uint16_t active_session_id_ = 0;
     uint16_t source_addr_ = 0;
@@ -294,7 +312,7 @@ class TransferEngine
 
     /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
      * already advanced past.  Drained throttled in tick_mesh_arq(). */
-    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 64;
+    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 128;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
     uint8_t oow_retx_count_ = 0;
 
@@ -306,6 +324,7 @@ class TransferEngine
      * auto-demo or a new TRANSFER_AD can proceed. */
     static constexpr uint32_t CLOUD_STALL_TIMEOUT_MS = 30000;
     uint32_t last_cloud_activity_ms_ = 0;
+    bool mesh_upload_done_ = false;
 
     /* Periodic meta re-publish: if the cloud restarts mid-transfer, it has
      * no session state. Re-publishing meta lets it pick up the session. */

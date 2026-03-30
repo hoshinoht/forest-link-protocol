@@ -44,12 +44,14 @@ class FecDecoder
   public:
     void reset()
     {
-        memset(slots_, 0, sizeof(slots_));
-        slot_count_ = 0;
-        has_parity_ = false;
+        for (auto &g : groups_)
+        {
+            g.reset();
+        }
         missing_idx_ = -1;
         recovered_ = false;
         recovered_len_ = 0;
+        last_used_ = 0;
     }
 
     /* Returns true if a fragment was recovered */
@@ -61,31 +63,41 @@ class FecDecoder
 
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
         uint8_t idx = seq % (FEC_GROUP_SIZE + 1);
-
-        /* New group? Reset. */
-        if (group != current_group_ || !active_)
-        {
-            reset();
-            current_group_ = group;
-            active_ = true;
-        }
-
         if (idx > FEC_GROUP_SIZE)
             return false;
 
-        if (!slots_[idx].received)
+        int gi = -1;
+        for (int i = 0; i < 2; i++)
         {
-            memcpy(slots_[idx].data, data, len);
-            slots_[idx].len = len;
-            slots_[idx].received = true;
-            slots_[idx].is_parity = is_parity;
-            slot_count_++;
+            if (groups_[i].active && groups_[i].current_group == group)
+            {
+                gi = i;
+                break;
+            }
+        }
+        if (gi < 0)
+        {
+            gi = (last_used_ == 0) ? 1 : 0;
+            groups_[gi].reset();
+            groups_[gi].current_group = group;
+            groups_[gi].active = true;
+        }
+        last_used_ = static_cast<uint8_t>(gi);
+
+        auto &g = groups_[gi];
+        if (!g.slots[idx].received)
+        {
+            memcpy(g.slots[idx].data, data, len);
+            g.slots[idx].len = len;
+            g.slots[idx].received = true;
+            g.slots[idx].is_parity = is_parity;
+            g.slot_count++;
         }
 
         /* Try recovery: need exactly K of K+1 */
-        if (slot_count_ == FEC_GROUP_SIZE)
+        if (g.slot_count == FEC_GROUP_SIZE)
         {
-            return try_recover();
+            return try_recover(g);
         }
         return false;
     }
@@ -93,66 +105,13 @@ class FecDecoder
     bool was_recovered() const { return recovered_; }
     uint16_t recovered_seq() const
     {
-        return current_group_ * (FEC_GROUP_SIZE + 1) +
+        return recovered_group_ * (FEC_GROUP_SIZE + 1) +
                static_cast<uint16_t>(missing_idx_);
     }
     const uint8_t *recovered_data() const { return recovered_buf_; }
     size_t recovered_len() const { return recovered_len_; }
 
   private:
-    bool try_recover()
-    {
-        /* Find the one missing slot */
-        int missing = -1;
-        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
-        {
-            if (!slots_[i].received)
-            {
-                if (missing >= 0)
-                    return false; /* more than one missing */
-                missing = i;
-            }
-        }
-        if (missing < 0)
-            return false; /* none missing (all received) */
-        if (static_cast<uint8_t>(missing) == FEC_GROUP_SIZE &&
-            !has_parity_check())
-        {
-            /* Missing the parity — nothing to recover, all data is present */
-            return false;
-        }
-
-        missing_idx_ = missing;
-
-        /* XOR all received slots to recover */
-        memset(recovered_buf_, 0, sizeof(recovered_buf_));
-        recovered_len_ = 0;
-        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
-        {
-            if (static_cast<int>(i) == missing)
-                continue;
-            if (slots_[i].len > recovered_len_)
-                recovered_len_ = slots_[i].len;
-            for (size_t j = 0; j < slots_[i].len; j++)
-            {
-                recovered_buf_[j] ^= slots_[i].data[j];
-            }
-        }
-        recovered_ = true;
-        return true;
-    }
-
-    bool has_parity_check() const
-    {
-        /* Check if any slot is parity */
-        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
-        {
-            if (slots_[i].received && slots_[i].is_parity)
-                return true;
-        }
-        return false;
-    }
-
     struct Slot
     {
         uint8_t data[MAX_MTU] = {};
@@ -161,15 +120,79 @@ class FecDecoder
         bool is_parity = false;
     };
 
-    Slot slots_[FEC_GROUP_SIZE + 1] = {};
-    uint8_t slot_count_ = 0;
-    bool has_parity_ = false;
+    struct GroupState
+    {
+        Slot slots[FEC_GROUP_SIZE + 1] = {};
+        uint8_t slot_count = 0;
+        uint16_t current_group = 0;
+        bool active = false;
+
+        void reset()
+        {
+            memset(slots, 0, sizeof(slots));
+            slot_count = 0;
+            current_group = 0;
+            active = false;
+        }
+    };
+
+    bool has_parity_check(const GroupState &g) const
+    {
+        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
+        {
+            if (g.slots[i].received && g.slots[i].is_parity)
+                return true;
+        }
+        return false;
+    }
+
+    bool try_recover(GroupState &g)
+    {
+        int missing = -1;
+        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
+        {
+            if (!g.slots[i].received)
+            {
+                if (missing >= 0)
+                    return false;
+                missing = i;
+            }
+        }
+        if (missing < 0)
+            return false;
+        if (static_cast<uint8_t>(missing) == FEC_GROUP_SIZE &&
+            !has_parity_check(g))
+        {
+            return false;
+        }
+
+        missing_idx_ = missing;
+        recovered_group_ = g.current_group;
+
+        memset(recovered_buf_, 0, sizeof(recovered_buf_));
+        recovered_len_ = 0;
+        for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
+        {
+            if (static_cast<int>(i) == missing)
+                continue;
+            if (g.slots[i].len > recovered_len_)
+                recovered_len_ = g.slots[i].len;
+            for (size_t j = 0; j < g.slots[i].len; j++)
+            {
+                recovered_buf_[j] ^= g.slots[i].data[j];
+            }
+        }
+        recovered_ = true;
+        return true;
+    }
+
+    GroupState groups_[2] = {};
+    uint8_t last_used_ = 0;
     int missing_idx_ = -1;
     bool recovered_ = false;
     uint8_t recovered_buf_[MAX_MTU] = {};
     size_t recovered_len_ = 0;
-    uint16_t current_group_ = 0;
-    bool active_ = false;
+    uint16_t recovered_group_ = 0;
 };
 
 } /* namespace flp */
