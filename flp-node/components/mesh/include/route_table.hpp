@@ -65,8 +65,11 @@ class RouteTable
                 neighbors_[i].rssi = rssi;
                 neighbors_[i].hop_count = hops;
                 neighbors_[i].last_seen_ms = now;
-                neighbors_[i].espnow_reachable = espnow;
-                neighbors_[i].lora_reachable = lora;
+                /* OR flags — a peer heard via both ESP-NOW and LoRa must
+                 * keep both flags set, not have one overwritten by the
+                 * latest packet's transport. */
+                neighbors_[i].espnow_reachable |= espnow;
+                neighbors_[i].lora_reachable |= lora;
                 neighbors_[i].early_stale_sent = false;
                 if (hops_to_inet != ROUTE_HOPS_UNKNOWN)
                 {
@@ -155,6 +158,26 @@ class RouteTable
         return false;
     }
 
+    /*
+     * LoRa-only penalty: neighbors reachable only via LoRa cannot carry
+     * data fragments (1456 bytes > 255 byte LoRa MTU). Add a large cost
+     * penalty so ESP-NOW-reachable relay paths are always preferred when
+     * available.  The penalty is additive to hops/ETX/queue cost.
+     */
+    static constexpr uint32_t LORA_ONLY_PENALTY = 500;
+
+    uint32_t route_cost(const NeighborEntry &n) const
+    {
+        uint32_t cost = (uint32_t)n.hops_to_internet * 100
+                      + n.etx_x100
+                      + n.queue_load;
+        if (n.lora_reachable && !n.espnow_reachable)
+        {
+            cost += LORA_ONLY_PENALTY;
+        }
+        return cost;
+    }
+
     /* Step 3c: ETX-weighted composite cost routing
      * my_addr: this node's address, used for loop avoidance (0 = disabled). */
     uint16_t next_hop(uint16_t dst_addr, uint16_t my_addr = 0) const
@@ -197,9 +220,7 @@ class RouteTable
             {
                 continue;
             }
-            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                          + neighbors_[i].etx_x100
-                          + neighbors_[i].queue_load;
+            uint32_t cost = route_cost(neighbors_[i]);
             if (cost < best_cost)
             {
                 best_cost = cost;
@@ -216,9 +237,7 @@ class RouteTable
                 {
                     continue;
                 }
-                uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                              + neighbors_[i].etx_x100
-                              + neighbors_[i].queue_load;
+                uint32_t cost = route_cost(neighbors_[i]);
                 if (cost < best_cost)
                 {
                     best_cost = cost;
@@ -462,9 +481,7 @@ class RouteTable
             if (neighbors_[i].addr == current_best &&
                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
-                current_cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                             + neighbors_[i].etx_x100
-                             + neighbors_[i].queue_load;
+                current_cost = route_cost(neighbors_[i]);
                 break;
             }
         }
@@ -486,9 +503,7 @@ class RouteTable
             {
                 continue;
             }
-            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                          + neighbors_[i].etx_x100
-                          + neighbors_[i].queue_load;
+            uint32_t cost = route_cost(neighbors_[i]);
             if (cost < alt_cost)
             {
                 alt_cost = cost;
@@ -565,22 +580,53 @@ class RouteTable
         return needed;
     }
 
-    uint8_t min_hops_to_internet() const
+    /* Minimum control-plane hops to internet.
+     * Control traffic can use either LoRa or ESP-NOW, so count any
+     * valid route advertisement. */
+    uint8_t min_control_hops_to_internet() const
     {
-        uint8_t best = ROUTE_HOPS_UNKNOWN;
+        uint8_t best_any = ROUTE_HOPS_UNKNOWN;
         for (uint8_t i = 0; i < count_; i++)
         {
             if (neighbors_[i].has_internet ||
                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
                 uint8_t h = neighbors_[i].hops_to_internet;
-                if (h < best)
+                if (h < best_any)
                 {
-                    best = h;
+                    best_any = h;
                 }
             }
         }
-        return best;
+        return best_any;
+    }
+
+    /* Minimum data-plane hops to internet.
+     * Bulk file DATA/PARITY packets are constrained to ESP-NOW, so only
+     * count routes whose next hop is ESP-NOW reachable. */
+    uint8_t min_data_hops_to_internet() const
+    {
+        uint8_t best_espnow = ROUTE_HOPS_UNKNOWN;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if ((neighbors_[i].has_internet ||
+                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN) &&
+                neighbors_[i].espnow_reachable)
+            {
+                uint8_t h = neighbors_[i].hops_to_internet;
+                if (h < best_espnow)
+                {
+                    best_espnow = h;
+                }
+            }
+        }
+        return best_espnow;
+    }
+
+    /* Backward-compatible accessor: use data-plane hops for transfer logic. */
+    uint8_t min_hops_to_internet() const
+    {
+        return min_data_hops_to_internet();
     }
 
   private:

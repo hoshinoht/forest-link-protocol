@@ -31,6 +31,11 @@ const char *rx_transport_name(RxTransport source)
     }
 }
 
+bool requires_espnow_data_path(PacketType type)
+{
+    return type == PacketType::DATA || type == PacketType::PARITY;
+}
+
 uint8_t compute_hops_to_internet(const RouteTable &route_table,
                                  bool has_internet)
 {
@@ -39,7 +44,7 @@ uint8_t compute_hops_to_internet(const RouteTable &route_table,
         return 0;
     }
 
-    const uint8_t min_hops = route_table.min_hops_to_internet();
+    const uint8_t min_hops = route_table.min_control_hops_to_internet();
     return (min_hops < 0xFE) ? static_cast<uint8_t>(min_hops + 1) : 0xFF;
 }
 } /* namespace */
@@ -516,8 +521,12 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
         rssi = neighbor.rssi;
     }
 
-    Transport t = protocol_selector_.select(
-        rssi, fwd_hdr->hop_count(), slab->len, kLinkQualityPct);
+    Transport t = requires_espnow_data_path(hdr.type())
+                      ? Transport::ESPNOW
+                      : protocol_selector_.select(rssi,
+                                                  fwd_hdr->hop_count(),
+                                                  slab->len,
+                                                  kLinkQualityPct);
 
     ESP_LOGD(TAG,
              "Forwarding to 0x%04X via 0x%04X (%s), ttl=%u",

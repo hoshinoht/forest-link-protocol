@@ -439,9 +439,16 @@ void TransferEngine::tick_mesh_arq()
     }
 
     /* New fragment sends.  Flow control is handled by the ESP-NOW TX
-     * semaphore — send() returns -1 when no slots available.  Cap at
-     * 8 per tick for fairness with retransmits. */
-    static constexpr uint8_t MAX_NEW_FRAGS_PER_TICK = 16;
+     * semaphore — send() returns -1 when no slots available.
+     *
+     * Multi-hop throttle: each relay has a 16-slot queue; sending 16
+     * fragments per tick overwhelms relay forwarding capacity, causing
+     * queue drops and ARQ retransmit storms.  Scale the per-tick budget
+     * down with estimated hop count so relay queues stay healthy. */
+    uint8_t max_new = (source_hops_to_exit_est_ >= 2)
+                          ? 4
+                          : 16;
+    const uint8_t MAX_NEW_FRAGS_PER_TICK = max_new;
     uint8_t new_sent = 0;
     while (transfer_.next_fragment < transfer_.fragment_count &&
            new_sent < MAX_NEW_FRAGS_PER_TICK)

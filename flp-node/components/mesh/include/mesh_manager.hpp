@@ -114,11 +114,21 @@ class MeshManager
     {
         return espnow_.get_peer_count();
     }
-    uint8_t get_hops_to_internet() const
+    uint8_t get_control_hops_to_internet() const
     {
         if (has_internet_) { return 0; }
-        const uint8_t min_h = route_table_.min_hops_to_internet();
+        const uint8_t min_h = route_table_.min_control_hops_to_internet();
         return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
+    }
+    uint8_t get_data_hops_to_internet() const
+    {
+        if (has_internet_) { return 0; }
+        const uint8_t min_h = route_table_.min_data_hops_to_internet();
+        return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
+    }
+    uint8_t get_hops_to_internet() const
+    {
+        return get_data_hops_to_internet();
     }
     bool has_recent_cloud_cmd() const
     {

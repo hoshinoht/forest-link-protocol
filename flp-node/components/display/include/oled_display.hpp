@@ -15,7 +15,8 @@ struct NodeStatus
     bool wifi_connected;
     uint8_t espnow_peers;
     uint8_t neighbor_count;
-    uint8_t hops_to_internet; /* 0xFF = unknown */
+    uint8_t control_hops_to_internet; /* 0xFF = unknown */
+    uint8_t data_hops_to_internet;    /* 0xFF = unknown */
     bool transfer_active;
     const char *filename;
     uint8_t transfer_pct; /* 0-100 */

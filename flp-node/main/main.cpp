@@ -285,7 +285,8 @@ static void display_task(void *arg)
         status.wifi_connected = mgr->has_internet();
         status.espnow_peers = mgr->get_espnow_peer_count();
         status.neighbor_count = mgr->get_neighbor_count();
-        status.hops_to_internet = mgr->get_hops_to_internet();
+        status.control_hops_to_internet = mgr->get_control_hops_to_internet();
+        status.data_hops_to_internet = mgr->get_data_hops_to_internet();
         status.transfer_active = mgr->is_transfer_active();
         status.filename = mgr->get_transfer_filename();
         status.transfer_pct = mgr->get_transfer_progress();

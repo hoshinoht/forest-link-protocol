@@ -38,6 +38,11 @@ const char *relay_topic_suffix(uint8_t topic_id)
             return "unknown";
     }
 }
+
+bool requires_espnow_data_path(PacketType type)
+{
+    return type == PacketType::DATA || type == PacketType::PARITY;
+}
 } /* namespace */
 
 void MeshManager::relay_publish(uint8_t relay_topic,
@@ -382,8 +387,12 @@ int MeshManager::send_packet(uint16_t dst,
         rssi = neighbor.rssi;
         hops = neighbor.hop_count;
     }
-    Transport t =
-        protocol_selector_.select(rssi, hops, total, kLinkQualityPct);
+    Transport t = requires_espnow_data_path(type)
+                      ? Transport::ESPNOW
+                      : protocol_selector_.select(rssi,
+                                                  hops,
+                                                  total,
+                                                  kLinkQualityPct);
     return send_raw(t, buf, total, radio_dst);
 }
 

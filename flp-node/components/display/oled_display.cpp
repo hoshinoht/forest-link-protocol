@@ -32,6 +32,26 @@ namespace flp
 
 _lock_t OledDisplay::lvgl_lock_;
 
+namespace
+{
+
+void format_hops(char *buf, size_t len, uint8_t hops)
+{
+    if (hops == 0xFF)
+    {
+        snprintf(buf, len, "--");
+        return;
+    }
+    if (hops > 99)
+    {
+        snprintf(buf, len, "99");
+        return;
+    }
+    snprintf(buf, len, "%u", hops);
+}
+
+} /* namespace */
+
 /* ── LVGL flush: convert I1 horizontal → SSD1306 vertical column-major ─ */
 
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
@@ -479,11 +499,13 @@ void OledDisplay::show_status(const NodeStatus &s)
              s.wifi_connected ? "W:OK" : "W:--", s.espnow_peers);
     lv_label_set_text(status_wifi_label_, line);
 
-    /* Mesh:  "N:3 GW:1h" = 9..12 chars */
-    if (s.hops_to_internet == 0xFF)
-        snprintf(line, sizeof(line), "N:%-2u GW:--", s.neighbor_count);
-    else
-        snprintf(line, sizeof(line), "N:%-2u GW:%uh", s.neighbor_count, s.hops_to_internet);
+    /* Mesh: "N16 C10 D10" = 11 chars max */
+    char ctrl_hops[3];
+    char data_hops[3];
+    format_hops(ctrl_hops, sizeof(ctrl_hops), s.control_hops_to_internet);
+    format_hops(data_hops, sizeof(data_hops), s.data_hops_to_internet);
+    snprintf(line, sizeof(line), "N%u C%s D%s",
+             s.neighbor_count, ctrl_hops, data_hops);
     lv_label_set_text(status_mesh_label_, line);
 
     /* Transfer:  "Xfer: idle" or "Xfer:name 47%" */
@@ -529,11 +551,13 @@ void OledDisplay::show_transfer(const NodeStatus &s)
         lv_bar_set_value(xfer_bar_, s.transfer_pct, LV_ANIM_ON);
     }
 
-    /* Mesh:  "N:3 GW:1h" */
-    if (s.hops_to_internet == 0xFF)
-        snprintf(line, sizeof(line), "N:%u GW:--", s.neighbor_count);
-    else
-        snprintf(line, sizeof(line), "N:%u GW:%uh", s.neighbor_count, s.hops_to_internet);
+    /* Mesh: "N16 C10 D10" = 11 chars max */
+    char ctrl_hops[3];
+    char data_hops[3];
+    format_hops(ctrl_hops, sizeof(ctrl_hops), s.control_hops_to_internet);
+    format_hops(data_hops, sizeof(data_hops), s.data_hops_to_internet);
+    snprintf(line, sizeof(line), "N%u C%s D%s",
+             s.neighbor_count, ctrl_hops, data_hops);
     lv_label_set_text(xfer_mesh_label_, line);
 
     snprintf(line, sizeof(line), "%lukB", (unsigned long)s.free_heap_kb);
