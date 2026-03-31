@@ -62,18 +62,23 @@ void MeshManager::process_slab(BufferSlab *slab)
     }
 
     /*
-     * Lab peer blacklist: drop DIRECT packets from the blocked address.
+     * Lab peer blacklist: drop DIRECT packets from blocked addresses.
      * hop_count==0 means we heard this on the radio from the originator.
      * Relayed packets (hop_count>0) are allowed so the mesh still works.
      */
-    if (blocked_peer_ != 0 && hdr.src_addr == blocked_peer_ &&
-        hdr.hop_count() == 0)
+    if (!blocked_peers_.empty() && hdr.hop_count() == 0)
     {
-        ESP_LOGD(TAG,
-                 "Blacklist: dropping direct pkt from 0x%04X type=0x%02X",
-                 hdr.src_addr,
-                 static_cast<uint8_t>(hdr.type()));
-        return;
+        for (uint16_t bp : blocked_peers_)
+        {
+            if (hdr.src_addr == bp)
+            {
+                ESP_LOGD(TAG,
+                         "Blacklist: dropping direct pkt from 0x%04X type=0x%02X",
+                         hdr.src_addr,
+                         static_cast<uint8_t>(hdr.type()));
+                return;
+            }
+        }
     }
 
     if (hdr.version() != PROTOCOL_VERSION)

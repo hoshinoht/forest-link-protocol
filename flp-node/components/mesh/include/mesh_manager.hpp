@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "buffer_pool.hpp"
 #include "espnow_transport.hpp"
@@ -233,8 +234,8 @@ class MeshManager
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
 
-    /* Lab peer blacklist — drop direct (hop_count==0) packets from this addr */
-    uint16_t blocked_peer_ = 0; /* 0 = disabled */
+    /* Lab peer blacklist — drop direct (hop_count==0) packets from these addrs */
+    std::vector<uint16_t> blocked_peers_; /* empty = disabled */
 
     /*
      * Step 4: Enlarged dedup cache with timestamps.

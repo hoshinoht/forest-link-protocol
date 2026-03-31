@@ -256,19 +256,28 @@ void MeshManager::init()
         channel_hop_timer_ms_ = discovery_timer_ms_;
     }
 
-    /* Parse blocked peer address from Kconfig (hex string, e.g. "A1B2") */
+    /* Parse blocked peer addresses from Kconfig (comma-separated hex, e.g. "A1B2, C3D4") */
     {
-        const char *hex = CONFIG_FLP_BLOCKED_PEER;
-        if (hex && hex[0] != '\0')
+        const char *raw = CONFIG_FLP_BLOCKED_PEER;
+        if (raw && raw[0] != '\0')
         {
-            unsigned long val = strtoul(hex, nullptr, 16);
-            if (val > 0 && val <= 0xFFFF)
+            char buf[128];
+            strncpy(buf, raw, sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
+            char *saveptr = nullptr;
+            char *tok = strtok_r(buf, ", ", &saveptr);
+            while (tok)
             {
-                blocked_peer_ = static_cast<uint16_t>(val);
-                ESP_LOGW(TAG,
-                         "Peer blacklist active: dropping direct packets "
-                         "from 0x%04X",
-                         blocked_peer_);
+                unsigned long val = strtoul(tok, nullptr, 16);
+                if (val > 0 && val <= 0xFFFF)
+                {
+                    blocked_peers_.push_back(static_cast<uint16_t>(val));
+                    ESP_LOGW(TAG,
+                             "Peer blacklist active: dropping direct packets "
+                             "from 0x%04X",
+                             static_cast<uint16_t>(val));
+                }
+                tok = strtok_r(nullptr, ", ", &saveptr);
             }
         }
     }
