@@ -8,6 +8,7 @@
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "flp_config.h"
 #include "freertos/FreeRTOS.h"
@@ -93,6 +94,51 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    /*
+     * I2C bus recovery — if a previous boot crashed mid-I2C-transaction
+     * (e.g. PSRAM corruption reboot), the SSD1306 slave may be holding SDA
+     * low waiting for clocks.  Toggle SCL 9+ times at GPIO level to clock
+     * out the stuck byte, then generate a STOP condition.  Without this the
+     * I2C master init succeeds but every subsequent transaction NAKs.
+     */
+    {
+        gpio_config_t scl_cfg = {};
+        scl_cfg.pin_bit_mask = 1ULL << scl_pin;
+        scl_cfg.mode = GPIO_MODE_OUTPUT_OD;
+        scl_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&scl_cfg);
+
+        gpio_config_t sda_cfg = {};
+        sda_cfg.pin_bit_mask = 1ULL << sda_pin;
+        sda_cfg.mode = GPIO_MODE_OUTPUT_OD;
+        sda_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&sda_cfg);
+
+        auto scl = static_cast<gpio_num_t>(scl_pin);
+        auto sda = static_cast<gpio_num_t>(sda_pin);
+
+        /* Clock out up to 9 bits to free a stuck slave */
+        gpio_set_level(sda, 1);
+        for (int i = 0; i < 9; i++) {
+            gpio_set_level(scl, 1);
+            esp_rom_delay_us(5);
+            gpio_set_level(scl, 0);
+            esp_rom_delay_us(5);
+        }
+
+        /* Generate STOP condition: SDA low→high while SCL is high */
+        gpio_set_level(sda, 0);
+        esp_rom_delay_us(5);
+        gpio_set_level(scl, 1);
+        esp_rom_delay_us(5);
+        gpio_set_level(sda, 1);
+        esp_rom_delay_us(5);
+
+        /* Release pins so I2C driver can reconfigure them */
+        gpio_reset_pin(scl);
+        gpio_reset_pin(sda);
+    }
+
     /* I2C */
     i2c_master_bus_handle_t i2c_bus = nullptr;
     i2c_master_bus_config_t bus_cfg = {};
@@ -123,6 +169,13 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     panel_cfg.vendor_config = &ssd_cfg;
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(io_handle_, &panel_cfg, &panel_handle_));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle_));
+    /*
+     * After a crash/reboot the SSD1306 may retain stale state (RST=-1 means
+     * no hardware reset pin).  Send a display-off command before init so the
+     * controller re-runs its internal power-on sequence cleanly.
+     */
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, false));
+    vTaskDelay(pdMS_TO_TICKS(20));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle_));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle_, true, true));
