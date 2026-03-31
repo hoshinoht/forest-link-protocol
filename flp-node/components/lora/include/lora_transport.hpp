@@ -116,6 +116,7 @@ class LoraTransport : public ITransport
     /* Step 7: ADR — adaptive spreading factor */
     void set_spreading_factor(uint8_t sf);
     uint8_t get_spreading_factor() const { return current_sf_; }
+    bool is_initialized() const { return initialized_; }
 
     /* Step 8: Dual-priority queue support */
     void set_hi_pri_queue(QueueHandle_t q) { hi_pri_queue_ = q; }
@@ -135,6 +136,9 @@ class LoraTransport : public ITransport
     void set_tx_power(int8_t dbm);
     void set_modulation_params(uint8_t sf, uint8_t bw, uint8_t cr);
     void set_packet_params(uint8_t payload_len);
+    void set_rf_switch_idle();
+    void set_rf_switch_rx();
+    void set_rf_switch_tx();
     void enter_rx_continuous();
 
     static void IRAM_ATTR dio1_isr_handler(void *arg);
@@ -145,6 +149,8 @@ class LoraTransport : public ITransport
     gpio_num_t rst_pin_ = GPIO_NUM_NC;
     gpio_num_t dio1_pin_ = GPIO_NUM_NC;
     gpio_num_t busy_pin_ = GPIO_NUM_NC;
+    gpio_num_t rx_en_pin_ = GPIO_NUM_NC;
+    gpio_num_t tx_en_pin_ = GPIO_NUM_NC;
     QueueHandle_t packet_queue_ = nullptr; /* shared MeshManager queue */
     BufferPool *buffer_pool_ = nullptr;
     SemaphoreHandle_t spi_mutex_ = nullptr;

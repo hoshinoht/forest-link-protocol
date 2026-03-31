@@ -46,11 +46,14 @@ void BufferPool::init()
     }
     /* Head of free list is slab[0] */
     top_.store(0, std::memory_order_release);
+    free_count_.store(POOL_SIZE, std::memory_order_relaxed);
 
     ESP_LOGI(TAG,
-             "BufferPool initialized: %u slabs (~%u bytes) in %s",
+             "BufferPool initialized: %u slabs x %uB = %uB (budget=%uB) in %s",
              POOL_SIZE,
-             (unsigned)(POOL_SIZE * sizeof(BufferSlab)),
+             static_cast<unsigned>(sizeof(BufferSlab)),
+             static_cast<unsigned>(POOL_SIZE * sizeof(BufferSlab)),
+             static_cast<unsigned>(POOL_BUDGET_BYTES),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM"
                                                              : "internal");
 }
@@ -64,6 +67,7 @@ BufferSlab *BufferPool::acquire()
         if (top_.compare_exchange_weak(
                 t, next, std::memory_order_acq_rel, std::memory_order_relaxed))
         {
+            free_count_.fetch_sub(1, std::memory_order_relaxed);
             slabs_[t].refcount.store(1, std::memory_order_relaxed);
             slabs_[t].len = 0;
             return &slabs_[t];
@@ -119,6 +123,7 @@ void BufferPool::release(BufferSlab *slab)
                 } while (!top_.compare_exchange_weak(
                     old_top, idx,
                     std::memory_order_acq_rel, std::memory_order_relaxed));
+                free_count_.fetch_add(1, std::memory_order_relaxed);
             }
             return;
         }

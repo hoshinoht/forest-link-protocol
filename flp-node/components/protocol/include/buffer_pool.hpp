@@ -24,15 +24,34 @@ struct BufferSlab
     std::atomic<int32_t> next_free{-1};
 };
 
+namespace detail
+{
+/* Legacy 250-byte slab layout used to preserve roughly the old PSRAM budget. */
+struct LegacyBufferSlab
+{
+    uint8_t data[250];
+    size_t len = 0;
+    int8_t rssi = 0;
+    RxTransport source = RxTransport::ESPNOW;
+    std::atomic<uint8_t> refcount{0};
+    std::atomic<int32_t> next_free{-1};
+};
+} /* namespace detail */
+
 class BufferPool
 {
   public:
     /*
-     * 96 slabs in PSRAM (~26 KB).  Enlarged to absorb ESP-NOW RX bursts
-     * during heavy transfers without exhaustion.  PSRAM is fine here —
-     * slabs are memcpy'd, not DMA-accessed.
+     * Raise the slab budget to restore concurrency after MAX_MTU increased.
+     * 288 legacy slabs keeps the pool under ~80 KiB while materially reducing
+     * RX drops on the exit node during sustained ESP-NOW bursts.
      */
-    static constexpr uint8_t POOL_SIZE = 96;
+    static constexpr size_t POOL_BUDGET_BYTES =
+        288 * sizeof(detail::LegacyBufferSlab);
+    static constexpr uint8_t POOL_SIZE =
+        static_cast<uint8_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
+                                 ? (POOL_BUDGET_BYTES / sizeof(BufferSlab))
+                                 : 1);
 
     void init();
     BufferSlab *acquire();
@@ -57,10 +76,21 @@ class BufferPool
     {
         return pool_overflow_count_.load(std::memory_order_relaxed);
     }
+    uint8_t get_free_count() const
+    {
+        int32_t free = free_count_.load(std::memory_order_relaxed);
+        return (free > 0) ? static_cast<uint8_t>(free) : 0;
+    }
+    bool is_congested() const
+    {
+        return free_count_.load(std::memory_order_relaxed) <
+               static_cast<int32_t>(POOL_SIZE / 4);
+    }
 
   private:
     std::atomic<uint32_t> pool_exhaustion_count_{0};
     std::atomic<uint32_t> pool_overflow_count_{0};
+    std::atomic<int32_t> free_count_{0};
     BufferSlab *slabs_ = nullptr; /* heap_caps_calloc'd in PSRAM */
     /*
      * Treiber stack head — index into slabs_[], or -1 when empty.

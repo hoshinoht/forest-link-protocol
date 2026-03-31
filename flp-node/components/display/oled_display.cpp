@@ -127,6 +127,15 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle_, true, true));
 
+    /*
+     * Force the panel RAM to a known state before LVGL starts issuing partial
+     * flushes. This avoids visible garbage after brownouts/reset loops where
+     * the SSD1306 can retain stale contents across reboots.
+     */
+    memset(oled_buf_, 0, sizeof(oled_buf_));
+    ESP_ERROR_CHECK(
+        esp_lcd_panel_draw_bitmap(panel_handle_, 0, 0, OLED_WIDTH, OLED_HEIGHT, oled_buf_));
+
     /* LVGL */
     lv_init();
     display_ = lv_display_create(OLED_WIDTH, OLED_HEIGHT);
@@ -138,6 +147,17 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     if (!draw_buf)
         draw_buf = heap_caps_calloc(1, buf_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     assert(draw_buf);
+
+    /*
+     * LVGL I1 format stores a 2-entry lv_color32_t palette at the start of
+     * the draw buffer.  Index 0 = "off" pixel (black), index 1 = "on" pixel.
+     * Without setting index 1 to white, every rendered pixel maps to black
+     * and the display stays blank.
+     */
+    auto *palette = static_cast<lv_color32_t *>(draw_buf);
+    palette[0] = lv_color_to_32(lv_color_black(), LV_OPA_COVER);
+    palette[1] = lv_color_to_32(lv_color_white(), LV_OPA_COVER);
+
     lv_display_set_buffers(display_, draw_buf, nullptr, buf_sz, LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_flush_cb(display_, lvgl_flush_cb);
 

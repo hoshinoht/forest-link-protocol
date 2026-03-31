@@ -1,10 +1,7 @@
 // Package transfer implements selective-repeat ARQ and file reassembly.
 package transfer
 
-import (
-	"log"
-	"time"
-)
+import "time"
 
 // SelectiveRepeat implements a receiver-side selective repeat protocol.
 // It tracks received chunks via a bitmap and issues NACKs for missing
@@ -18,15 +15,6 @@ type SelectiveRepeat struct {
 	lastNACKTime map[int]float64
 	AckCallback  func(msgType string, seq int)
 	NACKCount    int
-
-	// Tracing counters (cumulative per session)
-	traceACKsSent  int
-	traceNACKsSent int
-}
-
-// ExpectedBase returns the lowest unreceived sequence number.
-func (sr *SelectiveRepeat) ExpectedBase() int {
-	return sr.expectedBase
 }
 
 // NewSelectiveRepeat creates a new SR instance.
@@ -68,21 +56,12 @@ func (sr *SelectiveRepeat) OnChunkReceived(seq int) {
 	}
 	sr.markReceived(seq)
 
-	oldBase := sr.expectedBase
 	for sr.expectedBase < sr.totalChunks && sr.isReceived(sr.expectedBase) {
 		sr.expectedBase++
 	}
 
 	if sr.AckCallback != nil {
 		sr.AckCallback("ACK", seq)
-		sr.traceACKsSent++
-	}
-
-	// Log when base advances by a large jump (indicates burst of in-order data)
-	advance := sr.expectedBase - oldBase
-	if advance >= 32 {
-		log.Printf("[trace/arq] base jumped %d->%d (+%d) after seq=%d",
-			oldBase, sr.expectedBase, advance, seq)
 	}
 }
 
@@ -97,14 +76,9 @@ func (sr *SelectiveRepeat) CheckTimeouts() {
 	if end > sr.totalChunks {
 		end = sr.totalChunks
 	}
-	const nackCooldown = 5.0
-	const maxNACKsPerTick = 8
+	const nackCooldown = 2.0
 
-	nacksBatch := 0
 	for seq := sr.expectedBase; seq < end; seq++ {
-		if nacksBatch >= maxNACKsPerTick {
-			break
-		}
 		if sr.isReceived(seq) {
 			continue
 		}
@@ -114,15 +88,9 @@ func (sr *SelectiveRepeat) CheckTimeouts() {
 		}
 		sr.lastNACKTime[seq] = now
 		sr.NACKCount++
-		sr.traceNACKsSent++
-		nacksBatch++
 		if sr.AckCallback != nil {
 			sr.AckCallback("NACK", seq)
 		}
-	}
-	if nacksBatch > 0 {
-		log.Printf("[trace/arq] CheckTimeouts: sent %d NACKs (base=%d window=[%d,%d) total_nacks=%d)",
-			nacksBatch, sr.expectedBase, sr.expectedBase, end, sr.NACKCount)
 	}
 }
 
@@ -137,7 +105,7 @@ func (sr *SelectiveRepeat) CheckStall(lastChunkTime float64, stallSec float64) [
 	if now-lastChunkTime < stallSec {
 		return nil // still receiving, don't fire yet
 	}
-	const maxGaps = 16
+	const maxGaps = 32
 	var missing []int
 	for seq := sr.expectedBase; seq < sr.totalChunks && len(missing) < maxGaps; seq++ {
 		if !sr.isReceived(seq) {

@@ -14,7 +14,7 @@ FLP bridges this gap with an **adaptive multi-protocol mesh** running on commodi
 | ---------------- | ------------------- | -------------------------------------------------------------------- |
 | Short-range mesh | **ESP-NOW**         | High-bandwidth inter-node data relay (~34 KB/s per hop, 242 B MTU)   |
 | Long-range mesh  | **LoRa** (SX1276)   | Extended-range control signaling, discovery, route ads (247 B MTU)   |
-| Cloud gateway    | **WiFi + MQTT**     | Opportunistic data exfiltration when internet is available           |
+| Cloud backend    | **WiFi + MQTT**     | Opportunistic data exfiltration to Mosquitto + cloud-admin when internet is available |
 
 ### How It Works
 
@@ -129,14 +129,24 @@ After changing `sdkconfig.defaults`, run `idf.py fullclean && idf.py build`.
 | SPI2_HOST | SD card  | CS=13, MOSI=11, SCK=14, MISO=2 |
 | SPI3_HOST | LoRa     | CS=7, MOSI=6, SCK=5, MISO=3    |
 
-## Raspberry Pi Gateway
+## Cloud Backend
 
-The `cloud-admin/` directory contains the cloud-side MQTT admin for fragment reassembly.
+The `cloud-admin/` directory contains the cloud-side backend for FLP: a Mosquitto broker, the Go-based FLP admin dashboard/API, and Cloudflare Tunnel ingress for remote access.
 
 | Component           | Description                        | Port     |
 | ------------------- | ---------------------------------- | -------- |
-| Mosquitto           | MQTT broker                        | TCP 1883 |
-| FLP MQTT Admin      | Fragment reassembly and flow ctrl  | N/A      |
+| Mosquitto           | MQTT broker                        | TCP 1883 / WS 9001 |
+| FLP Admin           | Fragment reassembly, metrics, API  | HTTP 5050 |
+| Cloudflared         | Public tunnel ingress              | Hostname-mapped |
+
+Typical workflow from `cloud-admin/`:
+
+```bash
+./gen-passwd.sh
+./run.sh up
+```
+
+This exposes the dashboard locally at `http://localhost:5050` and, if configured, through the hostnames defined in `cloudflared-config.yml`.
 
 ## Paper
 

@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_heap_caps_init.h"
 #include "esp_psram.h"
+#include "esp_rom_sys.h"
 #include "soc/soc.h"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
@@ -33,6 +34,17 @@
 
 static const char *TAG = "flp_main";
 static const char *FILENAME = "demo.txt";
+
+static int rom_safe_log_vprintf(const char *fmt, va_list args)
+{
+    char buf[384];
+    int ret = vsnprintf(buf, sizeof(buf), fmt, args);
+    if (ret > 0)
+    {
+        esp_rom_printf("%s", buf);
+    }
+    return ret;
+}
 
 static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
@@ -274,6 +286,12 @@ static void display_task(void *arg)
 
 extern "C" void app_main()
 {
+    /*
+     * Work around USB-Serial/JTAG stdio/VFS instability on this board by
+     * bypassing the default newlib vprintf -> esp_vfs_write() path for logs.
+     */
+    esp_log_set_vprintf(rom_safe_log_vprintf);
+
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
 
     /* PSRAM / heap diagnostics */
@@ -296,6 +314,19 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(ret);
 
+    /*
+     * Init OLED before WiFi — WiFi PHY calibration on ESP32-S3 rev v0.2
+     * can corrupt PSRAM heap metadata (shared MSPI bus).  If
+     * i2c_new_master_bus runs after that, heap_caps_calloc iterates a
+     * corrupted PSRAM region and crashes (EXCVADDR = 0xAAAAAAAA).
+     * Allocating everything the display needs *before* WiFi start avoids
+     * the issue entirely.
+     */
+#if CONFIG_FLP_OLED_ENABLED
+    oled_display.init(
+        CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
+#endif
+
 #if CONFIG_FLP_WIFI_DISABLED
     /* Relay-only node: WiFi started in STA mode (no AP connect) for ESP-NOW */
     ESP_ERROR_CHECK(esp_netif_init());
@@ -313,6 +344,26 @@ extern "C" void app_main()
     ESP_LOGI(TAG,
              "WiFi STA started (no AP) for ESP-NOW, ch=%d",
              CONFIG_FLP_ESPNOW_CHANNEL);
+
+    /*
+     * ESP32-S3 rev v0.2 workaround: WiFi PHY calibration writes to NVS
+     * flash via the shared MSPI bus, which can corrupt PSRAM heap metadata.
+     * After calibration data is cached in NVS (second boot onward) the
+     * write doesn't happen and there is no corruption.  Detect this and
+     * auto-reboot so the second boot succeeds cleanly.
+     */
+#if CONFIG_SPIRAM
+    if (!heap_caps_check_integrity(MALLOC_CAP_SPIRAM, false))
+    {
+        ESP_LOGE(TAG,
+                 "PSRAM heap corrupted after WiFi PHY calibration "
+                 "(ESP32-S3 rev v0.2 MSPI bus issue). "
+                 "Rebooting — next boot will use cached cal data.");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    }
+#endif
+
 #else
     /* Initialize WiFi station */
     s_wifi_event_group = xEventGroupCreate();
@@ -343,6 +394,19 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
+
+    /* Same PSRAM integrity check for the gateway path (see relay path above) */
+#if CONFIG_SPIRAM
+    if (!heap_caps_check_integrity(MALLOC_CAP_SPIRAM, false))
+    {
+        ESP_LOGE(TAG,
+                 "PSRAM heap corrupted after WiFi PHY calibration "
+                 "(ESP32-S3 rev v0.2 MSPI bus issue). "
+                 "Rebooting — next boot will use cached cal data.");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    }
+#endif
 #endif
 
     /*
@@ -400,12 +464,6 @@ extern "C" void app_main()
         s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
             s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
     }
-
-    /* Init OLED early — it's local hardware, no network dependency */
-#if CONFIG_FLP_OLED_ENABLED
-    oled_display.init(
-        CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
-#endif
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
     mesh_manager.init();
