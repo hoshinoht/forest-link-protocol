@@ -127,6 +127,15 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle_, true, true));
 
+    /*
+     * Force the panel RAM to a known state before LVGL starts issuing partial
+     * flushes. This avoids visible garbage after brownouts/reset loops where
+     * the SSD1306 can retain stale contents across reboots.
+     */
+    memset(oled_buf_, 0, sizeof(oled_buf_));
+    ESP_ERROR_CHECK(
+        esp_lcd_panel_draw_bitmap(panel_handle_, 0, 0, OLED_WIDTH, OLED_HEIGHT, oled_buf_));
+
     /* LVGL */
     lv_init();
     display_ = lv_display_create(OLED_WIDTH, OLED_HEIGHT);

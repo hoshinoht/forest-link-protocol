@@ -82,9 +82,12 @@ esp_err_t flp::sdcard_init()
         return ret;
     }
 
-    sdmmc_card_print_info(stdout, card);
     s_mounted = true;
-    ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
+    ESP_LOGI(TAG,
+             "SD card mounted at %s (max=%ukHz real=%dkHz)",
+             MOUNT_POINT,
+             static_cast<unsigned>(card->max_freq_khz),
+             card->real_freq_khz);
     return ESP_OK;
 #endif
 }

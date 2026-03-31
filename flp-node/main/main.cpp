@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_heap_caps_init.h"
 #include "esp_psram.h"
+#include "esp_rom_sys.h"
 #include "soc/soc.h"
 #include "nvs_flash.h"
 #include "uart_ingest.hpp"
@@ -33,6 +34,17 @@
 
 static const char *TAG = "flp_main";
 static const char *FILENAME = "demo.txt";
+
+static int rom_safe_log_vprintf(const char *fmt, va_list args)
+{
+    char buf[384];
+    int ret = vsnprintf(buf, sizeof(buf), fmt, args);
+    if (ret > 0)
+    {
+        esp_rom_printf("%s", buf);
+    }
+    return ret;
+}
 
 static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
@@ -274,6 +286,12 @@ static void display_task(void *arg)
 
 extern "C" void app_main()
 {
+    /*
+     * Work around USB-Serial/JTAG stdio/VFS instability on this board by
+     * bypassing the default newlib vprintf -> esp_vfs_write() path for logs.
+     */
+    esp_log_set_vprintf(rom_safe_log_vprintf);
+
     ESP_LOGI(TAG, "FLP Node v%s starting...", FLP_VERSION);
 
     /* PSRAM / heap diagnostics */
@@ -350,6 +368,13 @@ extern "C" void app_main()
      * MeshManager
      */
 
+    /* Init OLED early — before SD card, whose SPI teardown on failure
+     * can corrupt adjacent heap metadata and crash i2c_new_master_bus. */
+#if CONFIG_FLP_OLED_ENABLED
+    oled_display.init(
+        CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
+#endif
+
     /* SD card init — after WiFi to avoid VFS/SPI conflicts */
 #if CONFIG_FLP_SD_ENABLED
     s_sd_err = flp::sdcard_init();
@@ -400,12 +425,6 @@ extern "C" void app_main()
         s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
             s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
     }
-
-    /* Init OLED early — it's local hardware, no network dependency */
-#if CONFIG_FLP_OLED_ENABLED
-    oled_display.init(
-        CONFIG_FLP_OLED_SDA, CONFIG_FLP_OLED_SCL, CONFIG_FLP_OLED_RST);
-#endif
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
     mesh_manager.init();
