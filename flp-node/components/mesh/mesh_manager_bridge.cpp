@@ -64,7 +64,11 @@ void MeshManager::relay_publish(uint8_t relay_topic,
          * Deep-field node: wrap in MESH_PUB and route to nearest exit.
          * Payload: [relay_topic:1][data:N]
          */
-        uint8_t payload[MAX_MTU - PACKET_HEADER_SIZE];
+        /* Telemetry payloads are small (topo≤113B, metrics≤48B, heap≤20B).
+         * Cap to 256B to avoid 1462B stack alloc; relay_publish is only
+         * called for telemetry, not bulk data. */
+        static constexpr size_t RELAY_BUF_SIZE = 256;
+        uint8_t payload[RELAY_BUF_SIZE];
         payload[0] = relay_topic;
         size_t copy_len = len;
         if (copy_len > sizeof(payload) - 1)
@@ -323,7 +327,7 @@ int MeshManager::send_packet(uint16_t dst,
         return -1;
     }
 
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, type);
     hdr.src_addr = my_addr_;

@@ -75,8 +75,9 @@ void MqttClient::init()
     publish_queue_ = xQueueCreateWithCaps(
         MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem),
         MALLOC_CAP_SPIRAM);
-    file_publish_queue_ =
-        xQueueCreate(MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest));
+    file_publish_queue_ = xQueueCreateWithCaps(
+        MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest),
+        MALLOC_CAP_SPIRAM);
     fragment_publish_queue_ = xQueueCreateWithCaps(
         MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest),
         MALLOC_CAP_SPIRAM);
@@ -650,7 +651,7 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
     char data_topic[64];
     snprintf(data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
-    uint8_t chunk_buf[2 + MQTT_CHUNK_PAYLOAD];
+    uint8_t *chunk_buf = chunk_scratch_;
     for (uint16_t seq = 0; seq < chunk_count; seq++)
     {
         size_t offset = static_cast<size_t>(seq) * MQTT_CHUNK_PAYLOAD;
@@ -817,7 +818,7 @@ void MqttClient::process_fragment_publish()
         snprintf(
             data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
-        uint8_t chunk_buf[4 + MAX_MTU];
+        uint8_t *chunk_buf = chunk_scratch_;
         chunk_buf[0] = static_cast<uint8_t>(req.session_id & 0xFF);
         chunk_buf[1] = static_cast<uint8_t>((req.session_id >> 8) & 0xFF);
         chunk_buf[2] = static_cast<uint8_t>(req.seq & 0xFF);

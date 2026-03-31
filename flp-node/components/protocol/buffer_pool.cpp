@@ -20,15 +20,14 @@ void BufferPool::init()
         slabs_ = nullptr;
     }
 
-    /* Allocate slab array in PSRAM (falls back to internal if unavailable) */
+    /* Allocate slab array in PSRAM */
     slabs_ = static_cast<BufferSlab *>(heap_caps_calloc(
         POOL_SIZE, sizeof(BufferSlab),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!slabs_)
     {
-        ESP_LOGW(TAG, "PSRAM alloc failed, falling back to internal RAM");
-        slabs_ = static_cast<BufferSlab *>(
-            heap_caps_calloc(POOL_SIZE, sizeof(BufferSlab), MALLOC_CAP_8BIT));
+        ESP_LOGE(TAG, "PSRAM alloc failed for buffer pool (%u x %uB) — cannot continue",
+                 POOL_SIZE, static_cast<unsigned>(sizeof(BufferSlab)));
     }
     assert(slabs_);
 
@@ -54,8 +53,7 @@ void BufferPool::init()
              static_cast<unsigned>(sizeof(BufferSlab)),
              static_cast<unsigned>(POOL_SIZE * sizeof(BufferSlab)),
              static_cast<unsigned>(POOL_BUDGET_BYTES),
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM"
-                                                             : "internal");
+             "PSRAM");
 }
 
 BufferSlab *BufferPool::acquire()

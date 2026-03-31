@@ -194,6 +194,10 @@ class MqttClient
     void reset_transfer_runtime_state();
     void notify();
 
+    /* Reusable scratch buffer for fragment chunk publishing — avoids 1474B
+     * stack alloc in process_fragment_publish (mqtt_task only). */
+    uint8_t chunk_scratch_[4 + MAX_MTU] = {};
+
     /* Fix 13: optional event group signalled on first MQTT connect */
     EventGroupHandle_t connected_event_group_ = nullptr;
     EventBits_t connected_event_bit_ = 0;

@@ -385,7 +385,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
          */
         if (source == RxTransport::LORA)
         {
-            uint8_t resp_buf[MAX_MTU];
+            uint8_t *resp_buf = scratch_buf_;
             PacketHeader resp_hdr = {};
             resp_hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
             resp_hdr.src_addr = my_addr_;
@@ -570,7 +570,7 @@ void MeshManager::send_discovery()
     disc.flags |= (sf_enc << kDiscoverySfShift);
 
     /* Build raw packet for direct transport control */
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
     hdr.src_addr = my_addr_;

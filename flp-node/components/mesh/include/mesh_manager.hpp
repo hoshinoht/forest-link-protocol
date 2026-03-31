@@ -252,6 +252,10 @@ class MeshManager
     static constexpr uint8_t SEEN_CACHE_SIZE = 64;
     SeenEntry seen_cache_[SEEN_CACHE_SIZE] = {};
     uint8_t seen_idx_ = 0;
+    /* Reusable packet-build scratch buffer — avoids 1470B stack allocs in
+     * send_packet / send_discovery / broadcast_exit_offline (mesh task only,
+     * not thread-safe — all callers run exclusively in the mesh task). */
+    uint8_t scratch_buf_[MAX_MTU] = {};
 
     bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq,
                       uint32_t window_ms)

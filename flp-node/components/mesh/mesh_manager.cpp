@@ -66,7 +66,7 @@ void MeshManager::broadcast_exit_offline()
     eop.session_id = session;
     eop.exit_node_addr = my_addr_;
 
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, PacketType::EXIT_OFFLINE);
     hdr.src_addr = my_addr_;

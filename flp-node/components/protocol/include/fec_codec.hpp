@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "esp_heap_caps.h"
 #include "packet.hpp"
 
 namespace flp
@@ -10,16 +11,35 @@ namespace flp
 class FecEncoder
 {
   public:
+    FecEncoder() = default;
+    ~FecEncoder()
+    {
+        if (parity_)
+        {
+            heap_caps_free(parity_);
+            parity_ = nullptr;
+        }
+    }
+
+    /* Non-copyable (owns heap memory) */
+    FecEncoder(const FecEncoder &) = delete;
+    FecEncoder &operator=(const FecEncoder &) = delete;
+
     void reset()
     {
         count_ = 0;
         parity_len_ = 0;
-        memset(parity_, 0, sizeof(parity_));
+        ensure_allocated();
+        if (parity_)
+        {
+            memset(parity_, 0, MAX_MTU);
+        }
     }
 
     void ingest(const uint8_t *frag, size_t len)
     {
-        /* XOR into accumulator */
+        ensure_allocated();
+        if (!parity_) return;
         if (len > parity_len_)
             parity_len_ = len;
         for (size_t i = 0; i < len; i++)
@@ -34,7 +54,14 @@ class FecEncoder
     size_t parity_len() const { return parity_len_; }
 
   private:
-    uint8_t parity_[MAX_MTU] = {};
+    void ensure_allocated()
+    {
+        if (parity_) return;
+        parity_ = static_cast<uint8_t *>(
+            heap_caps_calloc(1, MAX_MTU, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+
+    uint8_t *parity_ = nullptr;
     size_t parity_len_ = 0;
     uint8_t count_ = 0;
 };
@@ -42,9 +69,25 @@ class FecEncoder
 class FecDecoder
 {
   public:
+    FecDecoder() = default;
+    ~FecDecoder()
+    {
+        if (heap_mem_)
+        {
+            heap_caps_free(heap_mem_);
+            heap_mem_ = nullptr;
+        }
+    }
+
+    /* Non-copyable (owns heap memory) */
+    FecDecoder(const FecDecoder &) = delete;
+    FecDecoder &operator=(const FecDecoder &) = delete;
+
     void reset()
     {
-        for (auto &g : groups_)
+        ensure_allocated();
+        if (!heap_mem_) return;
+        for (auto &g : heap_mem_->groups)
         {
             g.reset();
         }
@@ -57,8 +100,7 @@ class FecDecoder
     /* Returns true if a fragment was recovered */
     bool ingest(uint16_t seq, const uint8_t *data, size_t len, bool is_parity)
     {
-        /* Guard: reject oversized payloads before any buffer access */
-        if (len > MAX_MTU)
+        if (!heap_mem_ || len > MAX_MTU)
             return false;
 
         uint16_t group = seq / (FEC_GROUP_SIZE + 1);
@@ -69,7 +111,7 @@ class FecDecoder
         int gi = -1;
         for (int i = 0; i < 2; i++)
         {
-            if (groups_[i].active && groups_[i].current_group == group)
+            if (heap_mem_->groups[i].active && heap_mem_->groups[i].current_group == group)
             {
                 gi = i;
                 break;
@@ -78,13 +120,13 @@ class FecDecoder
         if (gi < 0)
         {
             gi = (last_used_ == 0) ? 1 : 0;
-            groups_[gi].reset();
-            groups_[gi].current_group = group;
-            groups_[gi].active = true;
+            heap_mem_->groups[gi].reset();
+            heap_mem_->groups[gi].current_group = group;
+            heap_mem_->groups[gi].active = true;
         }
         last_used_ = static_cast<uint8_t>(gi);
 
-        auto &g = groups_[gi];
+        auto &g = heap_mem_->groups[gi];
         if (!g.slots[idx].received)
         {
             memcpy(g.slots[idx].data, data, len);
@@ -94,7 +136,6 @@ class FecDecoder
             g.slot_count++;
         }
 
-        /* Try recovery: need exactly K of K+1 */
         if (g.slot_count == FEC_GROUP_SIZE)
         {
             return try_recover(g);
@@ -108,7 +149,7 @@ class FecDecoder
         return recovered_group_ * (FEC_GROUP_SIZE + 1) +
                static_cast<uint16_t>(missing_idx_);
     }
-    const uint8_t *recovered_data() const { return recovered_buf_; }
+    const uint8_t *recovered_data() const { return heap_mem_ ? heap_mem_->recovered_buf : nullptr; }
     size_t recovered_len() const { return recovered_len_; }
 
   private:
@@ -136,6 +177,23 @@ class FecDecoder
         }
     };
 
+    /* All large buffers live in a single PSRAM allocation */
+    struct HeapState
+    {
+        GroupState groups[2] = {};
+        uint8_t recovered_buf[MAX_MTU] = {};
+    };
+
+    HeapState *heap_mem_ = nullptr;
+
+    void ensure_allocated()
+    {
+        if (heap_mem_) return;
+        heap_mem_ = static_cast<HeapState *>(
+            heap_caps_calloc(1, sizeof(HeapState), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        /* No internal fallback — PSRAM is required for FEC state */
+    }
+
     bool has_parity_check(const GroupState &g) const
     {
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
@@ -148,6 +206,8 @@ class FecDecoder
 
     bool try_recover(GroupState &g)
     {
+        if (!heap_mem_) return false;
+
         int missing = -1;
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
         {
@@ -169,7 +229,7 @@ class FecDecoder
         missing_idx_ = missing;
         recovered_group_ = g.current_group;
 
-        memset(recovered_buf_, 0, sizeof(recovered_buf_));
+        memset(heap_mem_->recovered_buf, 0, sizeof(heap_mem_->recovered_buf));
         recovered_len_ = 0;
         for (uint8_t i = 0; i <= FEC_GROUP_SIZE; i++)
         {
@@ -179,18 +239,16 @@ class FecDecoder
                 recovered_len_ = g.slots[i].len;
             for (size_t j = 0; j < g.slots[i].len; j++)
             {
-                recovered_buf_[j] ^= g.slots[i].data[j];
+                heap_mem_->recovered_buf[j] ^= g.slots[i].data[j];
             }
         }
         recovered_ = true;
         return true;
     }
 
-    GroupState groups_[2] = {};
     uint8_t last_used_ = 0;
     int missing_idx_ = -1;
     bool recovered_ = false;
-    uint8_t recovered_buf_[MAX_MTU] = {};
     size_t recovered_len_ = 0;
     uint16_t recovered_group_ = 0;
 };

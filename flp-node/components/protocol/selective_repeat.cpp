@@ -31,13 +31,7 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
         window_ = static_cast<FragmentSlot *>(heap_caps_calloc(
             ARQ_WINDOW, sizeof(FragmentSlot),
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!window_)
-        {
-            /* Fall back to internal RAM */
-            window_ = static_cast<FragmentSlot *>(
-                heap_caps_calloc(ARQ_WINDOW, sizeof(FragmentSlot),
-                                 MALLOC_CAP_8BIT));
-        }
+        /* No internal RAM fallback — PSRAM is required for ARQ windows */
         if (!window_)
         {
             ESP_LOGE(TAG, "Failed to allocate ARQ window (%zu bytes)",
@@ -347,16 +341,10 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
-    /* Try PSRAM first, fall back to regular heap */
+    /* Allocate reassembly buffer from PSRAM */
     reassembly_buf_ =
         static_cast<uint8_t *>(heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM));
-    if (!reassembly_buf_)
-    {
-        ESP_LOGW(TAG,
-                 "PSRAM alloc failed (%zu bytes), trying regular heap",
-                 file_size);
-        reassembly_buf_ = static_cast<uint8_t *>(malloc(file_size));
-    }
+    /* No internal RAM fallback — PSRAM is required for reassembly */
     if (!reassembly_buf_)
     {
         ESP_LOGE(
@@ -366,7 +354,8 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
 
     /* Bitmap: 1 bit per fragment, rounded up to bytes */
     size_t bitmap_bytes = (total_fragments + 7) / 8;
-    recv_bitmap_ = static_cast<uint8_t *>(calloc(1, bitmap_bytes));
+    recv_bitmap_ = static_cast<uint8_t *>(
+        heap_caps_calloc(1, bitmap_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!recv_bitmap_)
     {
         ESP_LOGE(TAG, "Failed to allocate bitmap (%zu bytes)", bitmap_bytes);
@@ -377,11 +366,12 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
 
     /* Per-seq NACK cooldown timestamps */
     nack_sent_ms_ = static_cast<uint32_t *>(
-        calloc(total_fragments, sizeof(uint32_t)));
+        heap_caps_calloc(total_fragments, sizeof(uint32_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!nack_sent_ms_)
     {
         ESP_LOGE(TAG, "Failed to allocate NACK cooldown array");
-        free(recv_bitmap_);
+        heap_caps_free(recv_bitmap_);
         recv_bitmap_ = nullptr;
         heap_caps_free(reassembly_buf_);
         reassembly_buf_ = nullptr;
@@ -612,12 +602,12 @@ void SelectiveRepeat::cleanup_receiver()
     }
     if (recv_bitmap_)
     {
-        free(recv_bitmap_);
+        heap_caps_free(recv_bitmap_);
         recv_bitmap_ = nullptr;
     }
     if (nack_sent_ms_)
     {
-        free(nack_sent_ms_);
+        heap_caps_free(nack_sent_ms_);
         nack_sent_ms_ = nullptr;
     }
     total_fragments_ = 0;

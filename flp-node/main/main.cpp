@@ -67,7 +67,7 @@ static size_t s_demo_size = 0;
 
 /* Fallback: 8 KB synthetic pattern if SD card is unavailable */
 static constexpr size_t FALLBACK_PAYLOAD_SIZE = 8192;
-static uint8_t s_fallback_payload[FALLBACK_PAYLOAD_SIZE];
+static uint8_t *s_fallback_payload = nullptr;
 
 /* SD card status for deferred logging (early boot logs lost to USB reconnect) */
 #if CONFIG_FLP_SD_ENABLED
@@ -502,13 +502,22 @@ extern "C" void app_main()
 #endif
     if (!s_demo_read_chunk)
     {
-        for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
+        s_fallback_payload = static_cast<uint8_t *>(
+            heap_caps_malloc(FALLBACK_PAYLOAD_SIZE, MALLOC_CAP_SPIRAM));
+        if (!s_fallback_payload)
         {
-            s_fallback_payload[i] = static_cast<uint8_t>('A' + (i % 26));
+            ESP_LOGE(TAG, "Failed to allocate fallback payload in PSRAM");
         }
-        s_demo_size = FALLBACK_PAYLOAD_SIZE;
-        s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
-            s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
+        else
+        {
+            for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
+            {
+                s_fallback_payload[i] = static_cast<uint8_t>('A' + (i % 26));
+            }
+            s_demo_size = FALLBACK_PAYLOAD_SIZE;
+            s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
+                s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
+        }
     }
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
