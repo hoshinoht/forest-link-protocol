@@ -147,6 +147,17 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     if (!draw_buf)
         draw_buf = heap_caps_calloc(1, buf_sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     assert(draw_buf);
+
+    /*
+     * LVGL I1 format stores a 2-entry lv_color32_t palette at the start of
+     * the draw buffer.  Index 0 = "off" pixel (black), index 1 = "on" pixel.
+     * Without setting index 1 to white, every rendered pixel maps to black
+     * and the display stays blank.
+     */
+    auto *palette = static_cast<lv_color32_t *>(draw_buf);
+    palette[0] = lv_color_to_32(lv_color_black(), LV_OPA_COVER);
+    palette[1] = lv_color_to_32(lv_color_white(), LV_OPA_COVER);
+
     lv_display_set_buffers(display_, draw_buf, nullptr, buf_sz, LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_flush_cb(display_, lvgl_flush_cb);
 
