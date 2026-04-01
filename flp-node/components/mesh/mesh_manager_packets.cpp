@@ -14,7 +14,6 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr uint8_t kQueueDepth = 16;
 constexpr int8_t kDefaultRssi = -90;
 constexpr float kLinkQualityPct = 100.0f;
 
@@ -459,7 +458,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
     /* Step 5b: Congestion-aware forwarding */
     UBaseType_t hi_spaces = uxQueueSpacesAvailable(hi_pri_queue_);
     UBaseType_t lo_spaces = uxQueueSpacesAvailable(lo_pri_queue_);
-    bool congested = (hi_spaces + lo_spaces) < 8;
+    bool congested = (hi_spaces + lo_spaces) < (kQueueDepth / 2);
 
     if (congested)
     {

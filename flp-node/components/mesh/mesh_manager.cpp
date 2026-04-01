@@ -29,8 +29,7 @@ namespace
 {
 constexpr uint8_t kNodeMacLowByteIdx = 5;
 constexpr uint8_t kNodeMacHighByteIdx = 4;
-constexpr uint8_t kQueueDepth = 16;
-constexpr uint8_t kMaxQueueDrainPerLoop = 24;
+constexpr uint8_t kMaxQueueDrainPerLoop = 64;
 constexpr uint32_t kQueueWaitMs = 20;
 constexpr uint32_t kDiscoveryIntervalMs = 10000;
 constexpr uint32_t kPruneIntervalMs = 5000;

@@ -15,7 +15,6 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr uint8_t kQueueDepth = 16;
 constexpr int8_t kDefaultRssi = -90;
 constexpr float kLinkQualityPct = 100.0f;
 constexpr uint8_t kMeshCmdMaxDataLen = 64;

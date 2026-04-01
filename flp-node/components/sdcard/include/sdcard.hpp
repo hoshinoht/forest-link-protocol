@@ -37,13 +37,13 @@ size_t sdcard_read_chunk(const char *path,
  * For files larger than MAX_CACHE_SIZE, a sliding window auto-refills
  * from SD on cache miss.
  *
- * With 1 MB cache and a typical 524 KB demo file, the entire file
- * is resident in PSRAM after open() — transfer reads never touch SD.
+ * With 512 KB cache and a typical demo file, small files are fully
+ * resident in PSRAM after open() — transfer reads never touch SD.
  */
 class SdReadCache
 {
   public:
-    static constexpr size_t MAX_CACHE_SIZE = 1024 * 1024; /* 1 MB cap */
+    static constexpr size_t MAX_CACHE_SIZE = 512 * 1024;  /* 512 KB cap */
 
     SdReadCache() = default;
     ~SdReadCache();

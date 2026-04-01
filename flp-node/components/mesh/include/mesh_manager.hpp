@@ -43,6 +43,8 @@ inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 namespace flp
 {
 
+static constexpr uint8_t kQueueDepth = 48;
+
 class MqttClient; /* forward declaration */
 
 class MeshManager

@@ -425,7 +425,7 @@ void TransferEngine::tick_mesh_arq()
     }
 
     /* Time-based pacing: enforce a minimum interval between new fragment
-     * sends so relay forwarding queues (16 slots each) are not overwhelmed.
+     * sends so relay forwarding queues (48 slots each) are not overwhelmed.
      * Scales with hop count: more hops → more time for each relay to drain.
      * Retransmits (ARQ tick + OOW queue above) are NOT gated — they are
      * already rate-limited by their own budgets and backoff logic. */
@@ -454,7 +454,7 @@ void TransferEngine::tick_mesh_arq()
     /* New fragment sends.  Flow control is handled by the ESP-NOW TX
      * semaphore — send() returns -1 when no slots available.
      *
-     * Multi-hop throttle: each relay has a 16-slot queue; sending 16
+     * Multi-hop throttle: each relay has a 48-slot queue; sending 48
      * fragments per tick overwhelms relay forwarding capacity, causing
      * queue drops and ARQ retransmit storms.  Scale the per-tick budget
      * down with estimated hop count so relay queues stay healthy. */

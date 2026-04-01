@@ -42,12 +42,12 @@ class BufferPool
 {
   public:
     /*
-     * Raise the slab budget to restore concurrency after MAX_MTU increased.
-     * 288 legacy slabs keeps the pool under ~80 KiB while materially reducing
-     * RX drops on the exit node during sustained ESP-NOW bursts.
+     * Size the slab pool to cover 48-deep dual-priority forwarding queues.
+     * Max in-flight = 2 × 48 = 96 slab pointers; 660 legacy slabs yields
+     * ~117 actual slabs (~174 KB PSRAM), leaving ~21 spare for RX bursts.
      */
     static constexpr size_t POOL_BUDGET_BYTES =
-        288 * sizeof(detail::LegacyBufferSlab);
+        660 * sizeof(detail::LegacyBufferSlab);
     static constexpr uint8_t POOL_SIZE =
         static_cast<uint8_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
                                  ? (POOL_BUDGET_BYTES / sizeof(BufferSlab))
