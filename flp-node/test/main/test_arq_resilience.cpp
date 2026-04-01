@@ -344,6 +344,83 @@ static void test_nack_not_sent_before_cooldown(void)
 }
 
 /* =========================================================================
+ * Group 4: HOL blocking removal (in_flight_ counter)
+ * ========================================================================= */
+
+/* With gap at seq=0, ACKing 1-7 must NOT fill the window.  Old code would
+ * report window full because base_seq_ stays at 0. */
+static void test_window_not_full_with_gap(void)
+{
+    SelectiveRepeat arq;
+    uint8_t data[16] = {0};
+
+    arq.init(32, 2000);
+    arq.set_send_callback(record_packet);
+
+    g_mock_time_us = 0;
+    for (uint16_t i = 0; i < 8; i++)
+    {
+        TEST_ASSERT_EQUAL(0, arq.send_fragment(i, data, sizeof(data)));
+    }
+
+    /* ACK 1-7, skip 0 — creates a gap at base_seq_ */
+    for (uint16_t i = 1; i <= 7; i++)
+    {
+        arq.handle_ack(i);
+    }
+
+    /* Window should NOT be full: only 1 fragment in-flight (seq=0) */
+    TEST_ASSERT_FALSE(arq.sender_window_full());
+    TEST_ASSERT_EQUAL_UINT16(1, arq.sender_window_used());
+}
+
+/* Verify in_flight_ accurately tracks ACKs. */
+static void test_in_flight_tracks_ack(void)
+{
+    SelectiveRepeat arq;
+    uint8_t data[16] = {0};
+
+    arq.init(32, 2000);
+    arq.set_send_callback(record_packet);
+
+    g_mock_time_us = 0;
+    /* Send 4 fragments */
+    for (uint16_t i = 0; i < 4; i++)
+    {
+        TEST_ASSERT_EQUAL(0, arq.send_fragment(i, data, sizeof(data)));
+    }
+    TEST_ASSERT_EQUAL_UINT16(4, arq.sender_window_used());
+
+    /* ACK 2 of them */
+    arq.handle_ack(0);
+    arq.handle_ack(2);
+    TEST_ASSERT_EQUAL_UINT16(2, arq.sender_window_used());
+
+    /* Duplicate ACK should NOT double-decrement */
+    arq.handle_ack(0);
+    TEST_ASSERT_EQUAL_UINT16(2, arq.sender_window_used());
+}
+
+/* Verify reset_sender clears in_flight_. */
+static void test_in_flight_resets(void)
+{
+    SelectiveRepeat arq;
+    uint8_t data[16] = {0};
+
+    arq.init(32, 2000);
+    arq.set_send_callback(record_packet);
+
+    g_mock_time_us = 0;
+    arq.send_fragment(0, data, sizeof(data));
+    arq.send_fragment(1, data, sizeof(data));
+    TEST_ASSERT_EQUAL_UINT16(2, arq.sender_window_used());
+
+    arq.reset_sender();
+    TEST_ASSERT_EQUAL_UINT16(0, arq.sender_window_used());
+    TEST_ASSERT_FALSE(arq.sender_window_full());
+}
+
+/* =========================================================================
  * Test runner
  * ========================================================================= */
 void run_arq_resilience_tests(void)
@@ -361,4 +438,9 @@ void run_arq_resilience_tests(void)
     RUN_TEST(test_nack_cooldown_fires_at_one_third_timeout);
     RUN_TEST(test_nack_cooldown_fallback_for_small_timeout);
     RUN_TEST(test_nack_not_sent_before_cooldown);
+
+    /* Group 4: HOL blocking removal */
+    RUN_TEST(test_window_not_full_with_gap);
+    RUN_TEST(test_in_flight_tracks_ack);
+    RUN_TEST(test_in_flight_resets);
 }

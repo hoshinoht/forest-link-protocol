@@ -138,6 +138,7 @@ class SelectiveRepeat
     uint8_t exit_stride_ = 1;   /* total exit nodes (1 = single-exit) */
     uint8_t exit_offset_ = 0;   /* this ARQ's index */
     bool sender_failed_ = false; /* set when any fragment exceeds MAX_RETRIES */
+    uint16_t in_flight_ = 0;    /* count of sent-but-not-ACKed fragments */
 
     /*
      * Adaptive RTO estimation (TCP-style, RFC 6298).

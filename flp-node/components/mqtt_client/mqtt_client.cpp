@@ -69,6 +69,16 @@ void MqttClient::notify()
     }
 }
 
+bool MqttClient::is_fragment_queue_congested() const
+{
+    if (!fragment_publish_queue_)
+    {
+        return false;
+    }
+    UBaseType_t spaces = uxQueueSpacesAvailable(fragment_publish_queue_);
+    return spaces < (MQTT_FRAGMENT_QUEUE_DEPTH / 4);
+}
+
 void MqttClient::init()
 {
     /* Large data queues live in PSRAM; small control queues stay internal. */

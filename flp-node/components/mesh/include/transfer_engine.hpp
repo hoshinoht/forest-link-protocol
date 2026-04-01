@@ -294,7 +294,7 @@ class TransferEngine
 
     /* Cloud selective-repeat ARQ state (local-exit path) */
     static constexpr uint8_t CLOUD_WINDOW_SIZE = 16;
-    static constexpr uint16_t MAX_CLOUD_FRAGMENTS = 2200;
+    static constexpr uint16_t MAX_CLOUD_FRAGMENTS = 8192;
     static constexpr uint16_t CLOUD_ACK_BITMAP_BYTES =
         (MAX_CLOUD_FRAGMENTS + 7) / 8;  /* 275 bytes */
     uint8_t cloud_ack_bitmap_[CLOUD_ACK_BITMAP_BYTES] = {};
@@ -312,9 +312,9 @@ class TransferEngine
 
     /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
      * already advanced past.  Drained throttled in tick_mesh_arq(). */
-    static constexpr uint8_t OOW_RETX_QUEUE_SIZE = 128;
+    static constexpr uint16_t OOW_RETX_QUEUE_SIZE = 1024;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
-    uint8_t oow_retx_count_ = 0;
+    uint16_t oow_retx_count_ = 0;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;

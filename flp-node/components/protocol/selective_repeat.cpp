@@ -56,6 +56,7 @@ void SelectiveRepeat::reset_sender()
     exit_stride_ = 1;
     exit_offset_ = 0;
     sender_failed_ = false;
+    in_flight_ = 0;
     /* Reset adaptive RTT state for the next transfer */
     srtt_ms_ = 0;
     rttvar_ms_ = 0;
@@ -69,12 +70,12 @@ void SelectiveRepeat::reset_sender()
 
 bool SelectiveRepeat::sender_window_full() const
 {
-    return (next_seq_ - base_seq_) >= window_size_;
+    return in_flight_ >= window_size_;
 }
 
 uint16_t SelectiveRepeat::sender_window_used() const
 {
-    return next_seq_ - base_seq_;
+    return in_flight_;
 }
 
 int SelectiveRepeat::send_fragment(uint16_t seq,
@@ -99,6 +100,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
     slot.send_time_ms = now_ms();
     slot.acked = false;
     slot.sent = true;
+    in_flight_++;
     slot.retries = 0;
 
     if (seq >= next_seq_)
@@ -181,6 +183,10 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
         }
     }
 
+    if (slot.sent && !slot.acked)
+    {
+        if (in_flight_ > 0) { in_flight_--; }
+    }
     slot.acked = true;
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);

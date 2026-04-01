@@ -471,8 +471,17 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
                               t == PacketType::EXIT_OFFLINE);
         if (!high_priority)
         {
-            ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X",
-                     static_cast<uint8_t>(t), hdr.src_addr);
+            /* Relay congestion echo: immediately NACK dropped DATA/PARITY
+             * fragments so the sender's ARQ retransmits without waiting
+             * for the full timeout.  The congestion flag triggers
+             * signal_congestion() on the sender, throttling it. */
+            if (t == PacketType::DATA || t == PacketType::PARITY)
+            {
+                uint16_t nack_seq = seq_with_congestion(hdr.seq_num, true);
+                send_packet(hdr.src_addr, PacketType::NACK, nullptr, 0, nack_seq);
+            }
+            ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X seq=%u",
+                     static_cast<uint8_t>(t), hdr.src_addr, hdr.seq_num);
             return;
         }
     }
@@ -507,7 +516,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 
     /* Piggyback congestion signal on forwarded ACK/NACK packets.
      * Set the high bit of hdr.seq_num (bit 15). Safe because the max
-     * fragment count is 2200 (0x0898) — bit 15 is always clear. */
+     * fragment count is 8192 (0x2000) — bit 15 is always clear. */
     if ((hdr.type() == PacketType::ACK || hdr.type() == PacketType::NACK) &&
         congested)
     {

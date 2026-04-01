@@ -133,6 +133,11 @@ class MqttClient
         return connected_;
     }
 
+    /* Check if the fragment publish queue is nearly full.
+     * Used by MeshManager to piggyback congestion signals on mesh ACKs,
+     * giving the sender early warning before the queue overflows. */
+    bool is_fragment_queue_congested() const;
+
     /* Drain one pending mesh command (returns true if item was available) */
     bool receive_cmd(MeshCmdItem &out);
 

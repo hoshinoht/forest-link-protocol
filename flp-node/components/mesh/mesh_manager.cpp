@@ -149,7 +149,9 @@ void MeshManager::init()
         {
             if (type == PacketType::ACK || type == PacketType::NACK)
             {
-                seq_num = seq_with_congestion(seq_num, buffer_pool_.is_congested());
+                bool congested = buffer_pool_.is_congested() ||
+                                 (mqtt_client_ && mqtt_client_->is_fragment_queue_congested());
+                seq_num = seq_with_congestion(seq_num, congested);
             }
             return send_packet(dst, type, payload, payload_len, seq_num);
         });
@@ -359,7 +361,11 @@ void MeshManager::run()
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
         /* Discovery broadcast every 10 seconds */
-        if (now - discovery_timer_ms_ > kDiscoveryIntervalMs)
+        uint32_t effective_disc_interval =
+            transfer_engine_.is_transfer_active()
+                ? kDiscoveryIntervalMs * 3
+                : kDiscoveryIntervalMs;
+        if (now - discovery_timer_ms_ > effective_disc_interval)
         {
             send_discovery();
             discovery_timer_ms_ = now;
