@@ -573,7 +573,8 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
             uint8_t nm = 1 << (i % 8);
             if (!(recv_bitmap_[ni] & nm))
             {
-                if ((now - nack_sent_ms_[i]) >= timeout_ms_)
+                uint32_t nack_cooldown = (timeout_ms_ > 1000) ? timeout_ms_ / 3 : timeout_ms_;
+                if ((now - nack_sent_ms_[i]) >= nack_cooldown)
                 {
                     if (send_cb_)
                     {

@@ -7,6 +7,7 @@ idf_component_register(
         "test_buffer_pool.cpp"
         "test_selective_repeat.cpp"
         "test_mesh_improvements.cpp"
+        "test_arq_resilience.cpp"
         "../mocks/mock_impl.cpp"
         "../../components/protocol/buffer_pool.cpp"
         "../../components/protocol/selective_repeat.cpp"

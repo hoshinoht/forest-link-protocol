@@ -324,6 +324,7 @@ class TransferEngine
      * auto-demo or a new TRANSFER_AD can proceed. */
     static constexpr uint32_t CLOUD_STALL_TIMEOUT_MS = 30000;
     uint32_t last_cloud_activity_ms_ = 0;
+    uint32_t last_mesh_frag_send_ms_ = 0;
     bool mesh_upload_done_ = false;
 
     /* Periodic meta re-publish: if the cloud restarts mid-transfer, it has

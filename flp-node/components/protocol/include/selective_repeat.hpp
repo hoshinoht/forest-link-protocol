@@ -156,7 +156,7 @@ class SelectiveRepeat
     uint32_t rto_ms_ = 0;           /* computed retransmit timeout */
     bool rtt_initialized_ = false;  /* first sample bootstraps SRTT */
     static constexpr uint32_t RTO_MIN_MS = 200;
-    static constexpr uint32_t RTO_MAX_MS = 16000;
+    static constexpr uint32_t RTO_MAX_MS = 5000;
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

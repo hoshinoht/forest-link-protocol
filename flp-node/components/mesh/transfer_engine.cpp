@@ -83,6 +83,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     election_active_ = false;
     candidate_count_ = 0;
     congestion_backoff_ticks_ = 0;
+    last_mesh_frag_send_ms_ = 0;
     redist_count_ = 0;
     oow_retx_count_ = 0;
     weight_recompute_counter_ = 0;

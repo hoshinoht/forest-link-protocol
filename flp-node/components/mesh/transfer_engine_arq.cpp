@@ -424,6 +424,19 @@ void TransferEngine::tick_mesh_arq()
         redist_count_ = new_count;
     }
 
+    /* Time-based pacing: enforce a minimum interval between new fragment
+     * sends so relay forwarding queues (16 slots each) are not overwhelmed.
+     * Scales with hop count: more hops → more time for each relay to drain.
+     * Retransmits (ARQ tick + OOW queue above) are NOT gated — they are
+     * already rate-limited by their own budgets and backoff logic. */
+    uint32_t now_pace = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    uint32_t pacing_interval_ms =
+        10 + 5 * static_cast<uint32_t>(source_hops_to_exit_est_);
+    if ((now_pace - last_mesh_frag_send_ms_) < pacing_interval_ms)
+    {
+        return; /* wait for pacing interval before sending new fragments */
+    }
+
     /*
      * Phase 3: Window-aware weighted fragment assignment.
      * Replaces blind round-robin with score = weight * free_window_slots.
@@ -446,8 +459,8 @@ void TransferEngine::tick_mesh_arq()
      * queue drops and ARQ retransmit storms.  Scale the per-tick budget
      * down with estimated hop count so relay queues stay healthy. */
     uint8_t max_new = (source_hops_to_exit_est_ >= 2)
-                          ? 4
-                          : 16;
+                          ? 1
+                          : 2;
     const uint8_t MAX_NEW_FRAGS_PER_TICK = max_new;
     uint8_t new_sent = 0;
     while (transfer_.next_fragment < transfer_.fragment_count &&
@@ -525,6 +538,7 @@ void TransferEngine::tick_mesh_arq()
         path_stats_[arq_idx].sent++;
         weight_recompute_counter_++;
         transfer_.next_fragment++;
+        last_mesh_frag_send_ms_ = now_pace;
         new_sent++;
     }
 
