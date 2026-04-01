@@ -20,7 +20,7 @@ SelectiveRepeat::~SelectiveRepeat()
     cleanup_receiver();
 }
 
-void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
+bool SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
 {
     window_size_ = (window_size > ARQ_WINDOW) ? ARQ_WINDOW : window_size;
     timeout_ms_ = timeout_ms;
@@ -31,18 +31,12 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
         window_ = static_cast<FragmentSlot *>(heap_caps_calloc(
             ARQ_WINDOW, sizeof(FragmentSlot),
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!window_)
-        {
-            /* Fall back to internal RAM */
-            window_ = static_cast<FragmentSlot *>(
-                heap_caps_calloc(ARQ_WINDOW, sizeof(FragmentSlot),
-                                 MALLOC_CAP_8BIT));
-        }
+        /* No internal RAM fallback — PSRAM is required for ARQ windows */
         if (!window_)
         {
             ESP_LOGE(TAG, "Failed to allocate ARQ window (%zu bytes)",
                      ARQ_WINDOW * sizeof(FragmentSlot));
-            return;
+            return false;
         }
         ESP_LOGI(TAG, "ARQ window allocated: %zu bytes",
                  ARQ_WINDOW * sizeof(FragmentSlot));
@@ -51,6 +45,7 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
     reset_sender();
     ESP_LOGI(
         TAG, "ARQ init: window=%u timeout=%lums", window_size_, timeout_ms_);
+    return true;
 }
 
 /* --- Sender --- */
@@ -62,6 +57,7 @@ void SelectiveRepeat::reset_sender()
     exit_stride_ = 1;
     exit_offset_ = 0;
     sender_failed_ = false;
+    in_flight_ = 0;
     /* Reset adaptive RTT state for the next transfer */
     srtt_ms_ = 0;
     rttvar_ms_ = 0;
@@ -75,18 +71,20 @@ void SelectiveRepeat::reset_sender()
 
 bool SelectiveRepeat::sender_window_full() const
 {
-    return (next_seq_ - base_seq_) >= window_size_;
+    return in_flight_ >= window_size_;
 }
 
 uint16_t SelectiveRepeat::sender_window_used() const
 {
-    return next_seq_ - base_seq_;
+    return in_flight_;
 }
 
 int SelectiveRepeat::send_fragment(uint16_t seq,
                                    const uint8_t *data,
                                    size_t len)
 {
+    if (!window_) return -1;
+
     /* send_cb_ hands this payload to MeshManager::send_packet(), which adds
      * an 8-byte PacketHeader. Guard against storing/sending fragments larger
      * than the actual mesh payload budget. */
@@ -105,6 +103,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
     slot.send_time_ms = now_ms();
     slot.acked = false;
     slot.sent = true;
+    in_flight_++;
     slot.retries = 0;
 
     if (seq >= next_seq_)
@@ -137,6 +136,8 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
 
 void SelectiveRepeat::handle_ack(uint16_t seq)
 {
+    if (!window_) return;
+
     if (seq < base_seq_ || seq >= next_seq_)
     {
         ESP_LOGW(
@@ -187,6 +188,10 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
         }
     }
 
+    if (slot.sent && !slot.acked)
+    {
+        if (in_flight_ > 0) { in_flight_--; }
+    }
     slot.acked = true;
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);
@@ -213,6 +218,8 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 
 void SelectiveRepeat::handle_nack(uint16_t seq)
 {
+    if (!window_) return;
+
     if (seq < base_seq_ || seq >= next_seq_)
     {
         ESP_LOGW(TAG,
@@ -246,6 +253,8 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
 
 uint8_t SelectiveRepeat::tick(uint8_t max_sends)
 {
+    if (!window_) return 0;
+
     uint32_t now = now_ms();
     uint8_t retx_count = 0;
 
@@ -347,16 +356,10 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
         return false;
     }
 
-    /* Try PSRAM first, fall back to regular heap */
+    /* Allocate reassembly buffer from PSRAM */
     reassembly_buf_ =
         static_cast<uint8_t *>(heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM));
-    if (!reassembly_buf_)
-    {
-        ESP_LOGW(TAG,
-                 "PSRAM alloc failed (%zu bytes), trying regular heap",
-                 file_size);
-        reassembly_buf_ = static_cast<uint8_t *>(malloc(file_size));
-    }
+    /* No internal RAM fallback — PSRAM is required for reassembly */
     if (!reassembly_buf_)
     {
         ESP_LOGE(
@@ -366,7 +369,8 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
 
     /* Bitmap: 1 bit per fragment, rounded up to bytes */
     size_t bitmap_bytes = (total_fragments + 7) / 8;
-    recv_bitmap_ = static_cast<uint8_t *>(calloc(1, bitmap_bytes));
+    recv_bitmap_ = static_cast<uint8_t *>(
+        heap_caps_calloc(1, bitmap_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!recv_bitmap_)
     {
         ESP_LOGE(TAG, "Failed to allocate bitmap (%zu bytes)", bitmap_bytes);
@@ -377,11 +381,12 @@ bool SelectiveRepeat::init_receiver(uint16_t total_fragments,
 
     /* Per-seq NACK cooldown timestamps */
     nack_sent_ms_ = static_cast<uint32_t *>(
-        calloc(total_fragments, sizeof(uint32_t)));
+        heap_caps_calloc(total_fragments, sizeof(uint32_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!nack_sent_ms_)
     {
         ESP_LOGE(TAG, "Failed to allocate NACK cooldown array");
-        free(recv_bitmap_);
+        heap_caps_free(recv_bitmap_);
         recv_bitmap_ = nullptr;
         heap_caps_free(reassembly_buf_);
         reassembly_buf_ = nullptr;
@@ -583,7 +588,8 @@ bool SelectiveRepeat::receive_fragment(uint16_t seq,
             uint8_t nm = 1 << (i % 8);
             if (!(recv_bitmap_[ni] & nm))
             {
-                if ((now - nack_sent_ms_[i]) >= timeout_ms_)
+                uint32_t nack_cooldown = (timeout_ms_ > 1000) ? timeout_ms_ / 3 : timeout_ms_;
+                if ((now - nack_sent_ms_[i]) >= nack_cooldown)
                 {
                     if (send_cb_)
                     {
@@ -612,12 +618,12 @@ void SelectiveRepeat::cleanup_receiver()
     }
     if (recv_bitmap_)
     {
-        free(recv_bitmap_);
+        heap_caps_free(recv_bitmap_);
         recv_bitmap_ = nullptr;
     }
     if (nack_sent_ms_)
     {
-        free(nack_sent_ms_);
+        heap_caps_free(nack_sent_ms_);
         nack_sent_ms_ = nullptr;
     }
     total_fragments_ = 0;

@@ -262,21 +262,29 @@ void UartIngest::handle_file_end()
      * Hand off to mesh manager — it reads from this buffer throughout the
      * multi-minute transfer. Do NOT free it here.
      */
-    mgr_->start_file_transfer(
-        filename_,
-        received_size_,
-        flp::TransferEngine::make_buffer_reader(ingest_buf_, received_size_));
-    send_ack(UART_CMD_FILE_END);
-
-    /*
-     * Wait for the mesh transfer to complete before freeing the buffer.
-     * MeshManager sets FLP_EVT_TRANSFER_COMPLETE when all fragments are ACKed.
-     */
     EventGroupHandle_t events = mgr_->get_events();
     if (events)
     {
-        xEventGroupWaitBits(
-            events, FLP_EVT_TRANSFER_COMPLETE, pdTRUE, pdTRUE, portMAX_DELAY);
+        xEventGroupClearBits(events, FLP_EVT_TRANSFER_COMPLETE);
+    }
+
+    bool started = mgr_->start_file_transfer(
+        filename_,
+        received_size_,
+        flp::TransferEngine::make_buffer_reader(ingest_buf_, received_size_));
+
+    if (started)
+    {
+        send_ack(UART_CMD_FILE_END);
+        if (events)
+        {
+            xEventGroupWaitBits(
+                events, FLP_EVT_TRANSFER_COMPLETE, pdTRUE, pdTRUE, portMAX_DELAY);
+        }
+    }
+    else
+    {
+        send_nack(UART_CMD_FILE_END, UART_ERR_NO_TRANSFER);
     }
 
     heap_caps_free(ingest_buf_);

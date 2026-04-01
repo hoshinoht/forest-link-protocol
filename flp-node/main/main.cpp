@@ -46,6 +46,24 @@ static int rom_safe_log_vprintf(const char *fmt, va_list args)
     return ret;
 }
 
+static bool verify_psram_integrity()
+{
+    volatile uint32_t *canary =
+        (volatile uint32_t *)heap_caps_malloc(16, MALLOC_CAP_SPIRAM);
+    bool psram_ok = false;
+    if (canary)
+    {
+        canary[0] = 0xDEADBEEF;
+        canary[1] = 0xCAFEBABE;
+        canary[2] = 0x12345678;
+        canary[3] = 0x9ABCDEF0;
+        psram_ok = (canary[0] == 0xDEADBEEF && canary[1] == 0xCAFEBABE &&
+                    canary[2] == 0x12345678 && canary[3] == 0x9ABCDEF0);
+        heap_caps_free((void *)canary);
+    }
+    return psram_ok;
+}
+
 static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
 
@@ -67,7 +85,7 @@ static size_t s_demo_size = 0;
 
 /* Fallback: 8 KB synthetic pattern if SD card is unavailable */
 static constexpr size_t FALLBACK_PAYLOAD_SIZE = 8192;
-static uint8_t s_fallback_payload[FALLBACK_PAYLOAD_SIZE];
+static uint8_t *s_fallback_payload = nullptr;
 
 /* SD card status for deferred logging (early boot logs lost to USB reconnect) */
 #if CONFIG_FLP_SD_ENABLED
@@ -124,6 +142,14 @@ static void auto_demo_task(void *arg)
                  "Auto demo transfer: demo.txt (%u bytes)",
                  (unsigned) s_demo_size);
         mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
+
+        /* Wait for transfer to finish before starting the interval timer */
+        while (mgr->is_transfer_active())
+        {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        ESP_LOGI(TAG, "Auto demo: transfer done, waiting %ds",
+                 CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
         vTaskDelay(interval);
     }
 }
@@ -155,6 +181,14 @@ static void auto_demo_task(void *arg)
                  "Auto demo transfer: demo.txt (%u bytes)",
                  (unsigned) s_demo_size);
         mgr->start_file_transfer("demo.txt", s_demo_size, s_demo_read_chunk);
+
+        /* Wait for transfer to finish before starting the interval timer */
+        while (mgr->is_transfer_active())
+        {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        ESP_LOGI(TAG, "Auto demo (relay): transfer done, waiting %ds",
+                 CONFIG_FLP_DEMO_AUTO_INTERVAL_S);
         vTaskDelay(interval);
     }
 }
@@ -265,17 +299,7 @@ static void display_task(void *arg)
     while (true)
     {
         flp::NodeStatus status = {};
-        status.node_addr = mgr->get_addr();
-        status.wifi_connected = mgr->has_internet();
-        status.espnow_peers = mgr->get_espnow_peer_count();
-        status.neighbor_count = mgr->get_neighbor_count();
-        status.hops_to_internet = mgr->get_hops_to_internet();
-        status.transfer_active = mgr->is_transfer_active();
-        status.filename = mgr->get_transfer_filename();
-        status.transfer_pct = mgr->get_transfer_progress();
-        status.free_heap_kb = esp_get_free_heap_size() / 1024;
-        status.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
-        status.cloud_cmd_received = mgr->has_recent_cloud_cmd();
+        mgr->snapshot_display_state(status);
 
         oled_display.update(status);
 
@@ -351,16 +375,21 @@ extern "C" void app_main()
      * After calibration data is cached in NVS (second boot onward) the
      * write doesn't happen and there is no corruption.  Detect this and
      * auto-reboot so the second boot succeeds cleanly.
+     *
+     * NOTE: heap_caps_check_integrity() itself crashes when the heap
+     * metadata lock is corrupted (EXCVADDR 0xAAAAAAAA).  Use a simple
+     * canary write/read instead — it is safe regardless of heap state.
      */
 #if CONFIG_SPIRAM
-    if (!heap_caps_check_integrity(MALLOC_CAP_SPIRAM, false))
     {
-        ESP_LOGE(TAG,
-                 "PSRAM heap corrupted after WiFi PHY calibration "
-                 "(ESP32-S3 rev v0.2 MSPI bus issue). "
-                 "Rebooting — next boot will use cached cal data.");
-        vTaskDelay(pdMS_TO_TICKS(100));
-        esp_restart();
+        if (!verify_psram_integrity()) {
+            ESP_LOGE(TAG,
+                     "PSRAM corrupted after WiFi PHY calibration "
+                     "(ESP32-S3 rev v0.2 MSPI bus issue). "
+                     "Rebooting — next boot will use cached cal data.");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        }
     }
 #endif
 
@@ -395,16 +424,17 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "WiFi station initialized, connecting...");
 
-    /* Same PSRAM integrity check for the gateway path (see relay path above) */
+    /* Same PSRAM canary check for the gateway path (see relay path above) */
 #if CONFIG_SPIRAM
-    if (!heap_caps_check_integrity(MALLOC_CAP_SPIRAM, false))
     {
-        ESP_LOGE(TAG,
-                 "PSRAM heap corrupted after WiFi PHY calibration "
-                 "(ESP32-S3 rev v0.2 MSPI bus issue). "
-                 "Rebooting — next boot will use cached cal data.");
-        vTaskDelay(pdMS_TO_TICKS(100));
-        esp_restart();
+        if (!verify_psram_integrity()) {
+            ESP_LOGE(TAG,
+                     "PSRAM corrupted after WiFi PHY calibration "
+                     "(ESP32-S3 rev v0.2 MSPI bus issue). "
+                     "Rebooting — next boot will use cached cal data.");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        }
     }
 #endif
 #endif
@@ -456,13 +486,22 @@ extern "C" void app_main()
 #endif
     if (!s_demo_read_chunk)
     {
-        for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
+        s_fallback_payload = static_cast<uint8_t *>(
+            heap_caps_malloc(FALLBACK_PAYLOAD_SIZE, MALLOC_CAP_SPIRAM));
+        if (!s_fallback_payload)
         {
-            s_fallback_payload[i] = static_cast<uint8_t>('A' + (i % 26));
+            ESP_LOGE(TAG, "Failed to allocate fallback payload in PSRAM");
         }
-        s_demo_size = FALLBACK_PAYLOAD_SIZE;
-        s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
-            s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
+        else
+        {
+            for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
+            {
+                s_fallback_payload[i] = static_cast<uint8_t>('A' + (i % 26));
+            }
+            s_demo_size = FALLBACK_PAYLOAD_SIZE;
+            s_demo_read_chunk = flp::TransferEngine::make_buffer_reader(
+                s_fallback_payload, FALLBACK_PAYLOAD_SIZE);
+        }
     }
 
     mesh_manager.set_lora_rx_priority(FLP_LORA_RX_TASK_PRIORITY);
@@ -549,12 +588,30 @@ extern "C" void app_main()
 #endif
 
 #if CONFIG_FLP_OLED_ENABLED
-    xTaskCreate(display_task,
-                "display",
-                FLP_DISPLAY_TASK_STACK,
-                &mesh_manager,
-                FLP_DISPLAY_TASK_PRIORITY,
-                nullptr);
+    {
+        /*
+         * display_task is low priority (3) and non-critical.  Allocate its
+         * stack from PSRAM so it doesn't compete with WiFi / mesh / ARQ
+         * for scarce internal SRAM.  Log if creation fails.
+         */
+        StaticTask_t *tcb = (StaticTask_t *)heap_caps_calloc(
+            1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        StackType_t *stack = (StackType_t *)heap_caps_calloc(
+            FLP_DISPLAY_TASK_STACK, sizeof(StackType_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (tcb && stack) {
+            xTaskCreateStatic(display_task,
+                              "display",
+                              FLP_DISPLAY_TASK_STACK,
+                              &mesh_manager,
+                              FLP_DISPLAY_TASK_PRIORITY,
+                              stack,
+                              tcb);
+        } else {
+            ESP_LOGE(TAG, "Failed to allocate display_task (tcb=%p stack=%p)",
+                     tcb, stack);
+        }
+    }
 #endif
 
 #if CONFIG_FLP_DEMO_AUTO

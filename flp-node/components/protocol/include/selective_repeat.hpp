@@ -42,7 +42,7 @@ class SelectiveRepeat
     SelectiveRepeat(const SelectiveRepeat &) = delete;
     SelectiveRepeat &operator=(const SelectiveRepeat &) = delete;
 
-    void init(uint8_t window_size, uint32_t timeout_ms);
+    bool init(uint8_t window_size, uint32_t timeout_ms);
 
     /* Sender API */
     int send_fragment(uint16_t seq, const uint8_t *data, size_t len);
@@ -138,6 +138,7 @@ class SelectiveRepeat
     uint8_t exit_stride_ = 1;   /* total exit nodes (1 = single-exit) */
     uint8_t exit_offset_ = 0;   /* this ARQ's index */
     bool sender_failed_ = false; /* set when any fragment exceeds MAX_RETRIES */
+    uint16_t in_flight_ = 0;    /* count of sent-but-not-ACKed fragments */
 
     /*
      * Adaptive RTO estimation (TCP-style, RFC 6298).
@@ -156,7 +157,7 @@ class SelectiveRepeat
     uint32_t rto_ms_ = 0;           /* computed retransmit timeout */
     bool rtt_initialized_ = false;  /* first sample bootstraps SRTT */
     static constexpr uint32_t RTO_MIN_MS = 200;
-    static constexpr uint32_t RTO_MAX_MS = 16000;
+    static constexpr uint32_t RTO_MAX_MS = 5000;
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

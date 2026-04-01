@@ -19,7 +19,7 @@ static constexpr uint8_t DEFAULT_TTL = 8;
 static constexpr size_t MAX_MTU = 1470;
 static constexpr uint8_t ARQ_WINDOW = 64;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
-static constexpr uint8_t MAX_RETRIES = 5;
+static constexpr uint8_t MAX_RETRIES = 12;
 static constexpr uint8_t MAX_NEIGHBORS = 16;
 static constexpr uint8_t MAX_EXIT_NODES = 4;
 static constexpr uint8_t FEC_GROUP_SIZE = 7;
@@ -30,7 +30,7 @@ enum class PacketType : uint8_t
     ACK = 0x02,
     NACK = 0x03,
     DISCOVERY = 0x10,
-    ROUTE_REQ = 0x11,
+    /* 0x11 reserved */
     ROUTE_REPLY = 0x12,
     PARITY = 0x06,
     TRANSFER_AD = 0x20, /* file transfer advertisement */
@@ -57,10 +57,10 @@ static constexpr uint8_t STATUS = 0x04;
 /* Command IDs for MESH_CMD payload[0]. */
 namespace MeshCmd
 {
-static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
-static constexpr uint8_t CONFIG_UPDATE = 0x02;
-static constexpr uint8_t REBOOT = 0x03;
-static constexpr uint8_t TOPIC_MSG = 0x10;
+    static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
+    /* 0x02 reserved */
+    static constexpr uint8_t REBOOT = 0x03;
+    static constexpr uint8_t TOPIC_MSG = 0x10;
 } /* namespace MeshCmd */
 
 struct __attribute__((packed)) PacketHeader

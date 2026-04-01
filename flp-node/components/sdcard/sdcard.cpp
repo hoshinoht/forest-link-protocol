@@ -205,7 +205,7 @@ esp_err_t flp::SdReadCache::open(const char *path)
     }
 
     /*
-     * Allocate min(file_size, MAX_CACHE_SIZE) in PSRAM.
+     * Allocate min(file_size, MAX_CACHE_SIZE) in PSRAM (currently 512 KB).
      * For files that fit entirely, this pre-loads the whole file so
      * every fragment read during transfer is a zero-cost PSRAM memcpy.
      */
@@ -327,7 +327,8 @@ size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
     }
 
     /* Edge case: request spans two cache windows (shouldn't happen with
-     * 240-byte fragments and 64 KB cache, but handle it defensively). */
+     * 1470-byte MAX_MTU-sized fragments and a 512 KB cache, but handle it
+     * defensively). */
     size_t first = cache_start_ + cache_len_ - offset;
     if (first > len) { first = len; }
     memcpy(buf, cache_buf_ + (offset - cache_start_), first);

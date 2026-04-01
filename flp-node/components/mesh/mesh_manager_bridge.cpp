@@ -15,9 +15,6 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr uint8_t kQueueDepth = 16;
-constexpr int8_t kDefaultRssi = -90;
-constexpr float kLinkQualityPct = 100.0f;
 constexpr uint8_t kMeshCmdMaxDataLen = 64;
 constexpr size_t kMeshCmdBufLen = static_cast<size_t>(kMeshCmdMaxDataLen) + 1;
 constexpr size_t kTopicBufLen = 32;
@@ -38,6 +35,7 @@ const char *relay_topic_suffix(uint8_t topic_id)
             return "unknown";
     }
 }
+
 } /* namespace */
 
 void MeshManager::relay_publish(uint8_t relay_topic,
@@ -64,7 +62,11 @@ void MeshManager::relay_publish(uint8_t relay_topic,
          * Deep-field node: wrap in MESH_PUB and route to nearest exit.
          * Payload: [relay_topic:1][data:N]
          */
-        uint8_t payload[MAX_MTU - PACKET_HEADER_SIZE];
+        /* Telemetry payloads are small (topo≤113B, metrics≤48B, heap≤20B).
+         * Cap to 256B to avoid 1462B stack alloc; relay_publish is only
+         * called for telemetry, not bulk data. */
+        static constexpr size_t RELAY_BUF_SIZE = 256;
+        uint8_t payload[RELAY_BUF_SIZE];
         payload[0] = relay_topic;
         size_t copy_len = len;
         if (copy_len > sizeof(payload) - 1)
@@ -300,12 +302,12 @@ void MeshManager::drain_cmd_queue()
     }
 }
 
-void MeshManager::start_file_transfer(const char *filename,
+bool MeshManager::start_file_transfer(const char *filename,
                                       size_t size,
                                       ReadChunkFn read_chunk)
 {
     bool mqtt_ready = mqtt_client_ && mqtt_client_->is_connected();
-    transfer_engine_.start_file_transfer(
+    return transfer_engine_.start_file_transfer(
         filename, size, read_chunk, has_internet_, mqtt_ready, get_hops_to_internet());
 }
 
@@ -323,7 +325,7 @@ int MeshManager::send_packet(uint16_t dst,
         return -1;
     }
 
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, type);
     hdr.src_addr = my_addr_;
@@ -378,8 +380,12 @@ int MeshManager::send_packet(uint16_t dst,
         rssi = neighbor.rssi;
         hops = neighbor.hop_count;
     }
-    Transport t =
-        protocol_selector_.select(rssi, hops, total, kLinkQualityPct);
+    Transport t = requires_espnow_data_path(type)
+                      ? Transport::ESPNOW
+                      : protocol_selector_.select(rssi,
+                                                  hops,
+                                                  total,
+                                                  kLinkQualityPct);
     return send_raw(t, buf, total, radio_dst);
 }
 

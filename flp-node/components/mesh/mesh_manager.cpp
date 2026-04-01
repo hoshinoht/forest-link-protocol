@@ -29,8 +29,7 @@ namespace
 {
 constexpr uint8_t kNodeMacLowByteIdx = 5;
 constexpr uint8_t kNodeMacHighByteIdx = 4;
-constexpr uint8_t kQueueDepth = 16;
-constexpr uint8_t kMaxQueueDrainPerLoop = 24;
+constexpr uint8_t kMaxQueueDrainPerLoop = 64;
 constexpr uint32_t kQueueWaitMs = 20;
 constexpr uint32_t kDiscoveryIntervalMs = 10000;
 constexpr uint32_t kPruneIntervalMs = 5000;
@@ -38,6 +37,8 @@ constexpr uint32_t kNeighborStaleTimeoutMs = 30000;
 constexpr uint32_t kEarlyStaleTimeoutMs = 15000;
 constexpr uint32_t kBiasIntervalMs = 10000;
 constexpr uint32_t kTelemetryIntervalMs = 30000;
+constexpr uint32_t kChannelHopIntervalMs = 1500;
+constexpr uint8_t kMaxWifiChannels = 13;
 } /* namespace */
 
 void MeshManager::set_has_internet(bool v)
@@ -66,7 +67,7 @@ void MeshManager::broadcast_exit_offline()
     eop.session_id = session;
     eop.exit_node_addr = my_addr_;
 
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, PacketType::EXIT_OFFLINE);
     hdr.src_addr = my_addr_;
@@ -120,6 +121,11 @@ void MeshManager::init()
     events_ = xEventGroupCreate();
     assert(events_);
 
+    display_mutex_ = xSemaphoreCreateMutex();
+    assert(display_mutex_);
+    display_snapshot_.filename = display_filename_buf_;
+    display_filename_buf_[0] = '\0';
+
     /* Pass dual queues and buffer pool to transports */
     espnow_.set_packet_queue(hi_pri_queue_); /* fallback */
     espnow_.set_hi_pri_queue(hi_pri_queue_);
@@ -149,7 +155,9 @@ void MeshManager::init()
         {
             if (type == PacketType::ACK || type == PacketType::NACK)
             {
-                seq_num = seq_with_congestion(seq_num, buffer_pool_.is_congested());
+                bool congested = buffer_pool_.is_congested() ||
+                                 (mqtt_client_ && mqtt_client_->is_fragment_queue_congested());
+                seq_num = seq_with_congestion(seq_num, congested);
             }
             return send_packet(dst, type, payload, payload_len, seq_num);
         });
@@ -256,19 +264,28 @@ void MeshManager::init()
         channel_hop_timer_ms_ = discovery_timer_ms_;
     }
 
-    /* Parse blocked peer address from Kconfig (hex string, e.g. "A1B2") */
+    /* Parse blocked peer addresses from Kconfig (comma-separated hex, e.g. "A1B2, C3D4") */
     {
-        const char *hex = CONFIG_FLP_BLOCKED_PEER;
-        if (hex && hex[0] != '\0')
+        const char *raw = CONFIG_FLP_BLOCKED_PEER;
+        if (raw && raw[0] != '\0')
         {
-            unsigned long val = strtoul(hex, nullptr, 16);
-            if (val > 0 && val <= 0xFFFF)
+            char buf[128];
+            strncpy(buf, raw, sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
+            char *saveptr = nullptr;
+            char *tok = strtok_r(buf, ", ", &saveptr);
+            while (tok)
             {
-                blocked_peer_ = static_cast<uint16_t>(val);
-                ESP_LOGW(TAG,
-                         "Peer blacklist active: dropping direct packets "
-                         "from 0x%04X",
-                         blocked_peer_);
+                unsigned long val = strtoul(tok, nullptr, 16);
+                if (val > 0 && val <= 0xFFFF)
+                {
+                    blocked_peers_.push_back(static_cast<uint16_t>(val));
+                    ESP_LOGW(TAG,
+                             "Peer blacklist active: dropping direct packets "
+                             "from 0x%04X",
+                             static_cast<uint16_t>(val));
+                }
+                tok = strtok_r(nullptr, ", ", &saveptr);
             }
         }
     }
@@ -277,6 +294,16 @@ void MeshManager::init()
     heap_monitor_.init();
 
     ESP_LOGI(TAG, "MeshManager initialized");
+}
+
+void MeshManager::snapshot_display_state(NodeStatus &out) const
+{
+    if (display_mutex_ &&
+        xSemaphoreTake(display_mutex_, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        out = display_snapshot_;
+        xSemaphoreGive(display_mutex_);
+    }
 }
 
 void MeshManager::run()
@@ -350,7 +377,11 @@ void MeshManager::run()
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 
         /* Discovery broadcast every 10 seconds */
-        if (now - discovery_timer_ms_ > kDiscoveryIntervalMs)
+        uint32_t effective_disc_interval =
+            transfer_engine_.is_transfer_active()
+                ? kDiscoveryIntervalMs * 3
+                : kDiscoveryIntervalMs;
+        if (now - discovery_timer_ms_ > effective_disc_interval)
         {
             send_discovery();
             discovery_timer_ms_ = now;
@@ -453,10 +484,9 @@ void MeshManager::run()
              * channel.  Once a neighbor with internet is found, hopping
              * stops and the relay stays on that channel.
              */
-            constexpr uint32_t kChannelHopIntervalMs = 1500;
             if (now - channel_hop_timer_ms_ > kChannelHopIntervalMs)
             {
-                channel_hop_idx_ = (channel_hop_idx_ % 13) + 1;
+                channel_hop_idx_ = (channel_hop_idx_ % kMaxWifiChannels) + 1;
                 esp_wifi_set_channel(channel_hop_idx_, WIFI_SECOND_CHAN_NONE);
                 current_channel_ = channel_hop_idx_;
                 ESP_LOGI(TAG, "Channel hop: trying ch=%u", channel_hop_idx_);
@@ -474,5 +504,39 @@ void MeshManager::run()
 
         /* Transfer engine tick (ARQ, election, broadcast retry, fragment feed) */
         transfer_engine_.tick(now);
+
+        /* Update display snapshot for the display task */
+        if (display_mutex_ && xSemaphoreTake(display_mutex_, 0) == pdTRUE)
+        {
+            display_snapshot_.node_addr = my_addr_;
+            display_snapshot_.wifi_connected = has_internet_;
+            display_snapshot_.espnow_peers = espnow_.get_peer_count();
+            display_snapshot_.neighbor_count = route_table_.get_count();
+            display_snapshot_.control_hops_to_internet =
+                get_control_hops_to_internet();
+            display_snapshot_.data_hops_to_internet =
+                get_data_hops_to_internet();
+            display_snapshot_.transfer_active =
+                transfer_engine_.is_transfer_active();
+            display_snapshot_.transfer_pct = transfer_engine_.get_progress_pct();
+            display_snapshot_.free_heap_kb = esp_get_free_heap_size() / 1024;
+            display_snapshot_.uptime_s =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+            display_snapshot_.cloud_cmd_received = has_recent_cloud_cmd();
+
+            const char *fn = transfer_engine_.current_filename();
+            if (fn)
+            {
+                strncpy(display_filename_buf_, fn, sizeof(display_filename_buf_) - 1);
+                display_filename_buf_[sizeof(display_filename_buf_) - 1] = '\0';
+            }
+            else
+            {
+                display_filename_buf_[0] = '\0';
+            }
+            display_snapshot_.filename = display_filename_buf_;
+
+            xSemaphoreGive(display_mutex_);
+        }
     }
 }

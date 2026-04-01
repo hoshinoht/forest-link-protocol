@@ -11,6 +11,14 @@ using namespace flp;
 static const char *TAG = "xfer_eng";
 constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
 
+namespace
+{
+constexpr uint32_t kPacingBaseMs = 10;
+constexpr uint32_t kPacingPerHopMs = 5;
+constexpr uint8_t kMaxNewFragsSingleHop = 2;
+constexpr uint8_t kMaxNewFragsMultiHop = 1;
+} /* namespace */
+
 void TransferEngine::transfer_tick()
 {
     if (!transfer_.active || election_active_)
@@ -424,6 +432,20 @@ void TransferEngine::tick_mesh_arq()
         redist_count_ = new_count;
     }
 
+    /* Time-based pacing: enforce a minimum interval between new fragment
+     * sends so relay forwarding queues (48 slots each) are not overwhelmed.
+     * Scales with hop count: more hops → more time for each relay to drain.
+     * Retransmits (ARQ tick + OOW queue above) are NOT gated — they are
+     * already rate-limited by their own budgets and backoff logic. */
+    uint32_t now_pace = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    uint32_t pacing_interval_ms =
+        kPacingBaseMs +
+        kPacingPerHopMs * static_cast<uint32_t>(source_hops_to_exit_est_);
+    if ((now_pace - last_mesh_frag_send_ms_) < pacing_interval_ms)
+    {
+        return; /* wait for pacing interval before sending new fragments */
+    }
+
     /*
      * Phase 3: Window-aware weighted fragment assignment.
      * Replaces blind round-robin with score = weight * free_window_slots.
@@ -439,9 +461,16 @@ void TransferEngine::tick_mesh_arq()
     }
 
     /* New fragment sends.  Flow control is handled by the ESP-NOW TX
-     * semaphore — send() returns -1 when no slots available.  Cap at
-     * 8 per tick for fairness with retransmits. */
-    static constexpr uint8_t MAX_NEW_FRAGS_PER_TICK = 16;
+     * semaphore — send() returns -1 when no slots available.
+     *
+     * Multi-hop throttle: each relay has a 48-slot queue; sending 48
+     * fragments per tick overwhelms relay forwarding capacity, causing
+     * queue drops and ARQ retransmit storms.  Scale the per-tick budget
+     * down with estimated hop count so relay queues stay healthy. */
+    uint8_t max_new = (source_hops_to_exit_est_ >= 2)
+                          ? kMaxNewFragsMultiHop
+                          : kMaxNewFragsSingleHop;
+    const uint8_t MAX_NEW_FRAGS_PER_TICK = max_new;
     uint8_t new_sent = 0;
     while (transfer_.next_fragment < transfer_.fragment_count &&
            new_sent < MAX_NEW_FRAGS_PER_TICK)
@@ -518,6 +547,7 @@ void TransferEngine::tick_mesh_arq()
         path_stats_[arq_idx].sent++;
         weight_recompute_counter_++;
         transfer_.next_fragment++;
+        last_mesh_frag_send_ms_ = now_pace;
         new_sent++;
     }
 

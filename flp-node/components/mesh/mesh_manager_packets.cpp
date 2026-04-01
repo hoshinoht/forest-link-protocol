@@ -14,9 +14,8 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr uint8_t kQueueDepth = 16;
-constexpr int8_t kDefaultRssi = -90;
-constexpr float kLinkQualityPct = 100.0f;
+constexpr uint32_t kArqDedupWindowMs = 200;
+constexpr uint32_t kControlDedupWindowMs = 10000;
 
 const char *rx_transport_name(RxTransport source)
 {
@@ -39,7 +38,7 @@ uint8_t compute_hops_to_internet(const RouteTable &route_table,
         return 0;
     }
 
-    const uint8_t min_hops = route_table.min_hops_to_internet();
+    const uint8_t min_hops = route_table.min_control_hops_to_internet();
     return (min_hops < 0xFE) ? static_cast<uint8_t>(min_hops + 1) : 0xFF;
 }
 } /* namespace */
@@ -62,18 +61,23 @@ void MeshManager::process_slab(BufferSlab *slab)
     }
 
     /*
-     * Lab peer blacklist: drop DIRECT packets from the blocked address.
+     * Lab peer blacklist: drop DIRECT packets from blocked addresses.
      * hop_count==0 means we heard this on the radio from the originator.
      * Relayed packets (hop_count>0) are allowed so the mesh still works.
      */
-    if (blocked_peer_ != 0 && hdr.src_addr == blocked_peer_ &&
-        hdr.hop_count() == 0)
+    if (!blocked_peers_.empty() && hdr.hop_count() == 0)
     {
-        ESP_LOGD(TAG,
-                 "Blacklist: dropping direct pkt from 0x%04X type=0x%02X",
-                 hdr.src_addr,
-                 static_cast<uint8_t>(hdr.type()));
-        return;
+        for (uint16_t bp : blocked_peers_)
+        {
+            if (hdr.src_addr == bp)
+            {
+                ESP_LOGD(TAG,
+                         "Blacklist: dropping direct pkt from 0x%04X type=0x%02X",
+                         hdr.src_addr,
+                         static_cast<uint8_t>(hdr.type()));
+                return;
+            }
+        }
     }
 
     if (hdr.version() != PROTOCOL_VERSION)
@@ -239,7 +243,8 @@ void MeshManager::process_slab(BufferSlab *slab)
                          ptype == PacketType::PARITY ||
                          ptype == PacketType::ACK ||
                          ptype == PacketType::NACK);
-        uint32_t dedup_window = arq_type ? 200 : 10000;
+        uint32_t dedup_window = arq_type ? kArqDedupWindowMs
+                                         : kControlDedupWindowMs;
 
         if (already_seen(hdr.src_addr,
                          hdr.dst_addr,
@@ -361,12 +366,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         }
 
         /* Populate queue load for load-aware routing (same as broadcast) */
-        {
-            UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
-            UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
-            uint32_t ql = hi_used + lo_used;
-            resp.queue_load = (ql > 255) ? 255 : static_cast<uint8_t>(ql);
-        }
+        resp.queue_load = saturated_queue_load();
 
         /* Step 7c: Encode current SF in flags bits 5-7 */
         uint8_t sf_enc =
@@ -380,7 +380,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
          */
         if (source == RxTransport::LORA)
         {
-            uint8_t resp_buf[MAX_MTU];
+            uint8_t *resp_buf = scratch_buf_;
             PacketHeader resp_hdr = {};
             resp_hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
             resp_hdr.src_addr = my_addr_;
@@ -449,7 +449,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
     /* Step 5b: Congestion-aware forwarding */
     UBaseType_t hi_spaces = uxQueueSpacesAvailable(hi_pri_queue_);
     UBaseType_t lo_spaces = uxQueueSpacesAvailable(lo_pri_queue_);
-    bool congested = (hi_spaces + lo_spaces) < 8;
+    bool congested = (hi_spaces + lo_spaces) < (kQueueDepth / 2);
 
     if (congested)
     {
@@ -461,8 +461,17 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
                               t == PacketType::EXIT_OFFLINE);
         if (!high_priority)
         {
-            ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X",
-                     static_cast<uint8_t>(t), hdr.src_addr);
+            /* Relay congestion echo: immediately NACK dropped DATA/PARITY
+             * fragments so the sender's ARQ retransmits without waiting
+             * for the full timeout.  The congestion flag triggers
+             * signal_congestion() on the sender, throttling it. */
+            if (t == PacketType::DATA || t == PacketType::PARITY)
+            {
+                uint16_t nack_seq = seq_with_congestion(hdr.seq_num, true);
+                send_packet(hdr.src_addr, PacketType::NACK, nullptr, 0, nack_seq);
+            }
+            ESP_LOGD(TAG, "Congestion drop: type=0x%02X from 0x%04X seq=%u",
+                     static_cast<uint8_t>(t), hdr.src_addr, hdr.seq_num);
             return;
         }
     }
@@ -497,7 +506,7 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 
     /* Piggyback congestion signal on forwarded ACK/NACK packets.
      * Set the high bit of hdr.seq_num (bit 15). Safe because the max
-     * fragment count is 2200 (0x0898) — bit 15 is always clear. */
+     * fragment count is 8192 (0x2000) — bit 15 is always clear. */
     if ((hdr.type() == PacketType::ACK || hdr.type() == PacketType::NACK) &&
         congested)
     {
@@ -511,8 +520,12 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
         rssi = neighbor.rssi;
     }
 
-    Transport t = protocol_selector_.select(
-        rssi, fwd_hdr->hop_count(), slab->len, kLinkQualityPct);
+    Transport t = requires_espnow_data_path(hdr.type())
+                      ? Transport::ESPNOW
+                      : protocol_selector_.select(rssi,
+                                                  fwd_hdr->hop_count(),
+                                                  slab->len,
+                                                  kLinkQualityPct);
 
     ESP_LOGD(TAG,
              "Forwarding to 0x%04X via 0x%04X (%s), ttl=%u",
@@ -522,6 +535,14 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
              fwd_hdr->ttl());
 
     send_raw(t, slab->data, slab->len, next);
+}
+
+uint8_t MeshManager::saturated_queue_load() const
+{
+    UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
+    UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
+    uint32_t total = hi_used + lo_used;
+    return (total > 255) ? 255 : static_cast<uint8_t>(total);
 }
 
 void MeshManager::send_discovery()
@@ -552,12 +573,7 @@ void MeshManager::send_discovery()
     }
 
     /* Populate queue load for load-aware routing */
-    {
-        UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
-        UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
-        uint32_t total = hi_used + lo_used;
-        disc.queue_load = (total > 255) ? 255 : static_cast<uint8_t>(total);
-    }
+    disc.queue_load = saturated_queue_load();
 
     /* Step 7c: Encode current SF in flags bits 5-7 */
     uint8_t sf_enc =
@@ -565,7 +581,7 @@ void MeshManager::send_discovery()
     disc.flags |= (sf_enc << kDiscoverySfShift);
 
     /* Build raw packet for direct transport control */
-    uint8_t buf[MAX_MTU];
+    uint8_t *buf = scratch_buf_;
     PacketHeader hdr = {};
     hdr.set_ver_type(PROTOCOL_VERSION, PacketType::DISCOVERY);
     hdr.src_addr = my_addr_;

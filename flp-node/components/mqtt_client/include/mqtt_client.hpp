@@ -133,6 +133,11 @@ class MqttClient
         return connected_;
     }
 
+    /* Check if the fragment publish queue is nearly full.
+     * Used by MeshManager to piggyback congestion signals on mesh ACKs,
+     * giving the sender early warning before the queue overflows. */
+    bool is_fragment_queue_congested() const;
+
     /* Drain one pending mesh command (returns true if item was available) */
     bool receive_cmd(MeshCmdItem &out);
 
@@ -179,8 +184,6 @@ class MqttClient
 
     /* Captured topic IDs from register_default_topics() */
     uint16_t status_topic_id_ = 0;
-    uint16_t file_data_topic_id_ = 0;
-    uint16_t file_meta_topic_id_ = 0;
 
     static void mqtt_event_handler(void *handler_args,
                                    esp_event_base_t base,
@@ -193,6 +196,10 @@ class MqttClient
     int outbox_size_bytes() const;
     void reset_transfer_runtime_state();
     void notify();
+
+    /* Reusable scratch buffer for fragment chunk publishing — avoids 1474B
+     * stack alloc in process_fragment_publish (mqtt_task only). */
+    uint8_t chunk_scratch_[4 + MAX_MTU] = {};
 
     /* Fix 13: optional event group signalled on first MQTT connect */
     EventGroupHandle_t connected_event_group_ = nullptr;

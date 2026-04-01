@@ -44,6 +44,10 @@ struct NeighborEntry
 class RouteTable
 {
   public:
+    static constexpr uint8_t kSerializedNeighborSize = 7;
+    static constexpr uint8_t kRouteHysteresisCycles = 3;
+    static constexpr uint16_t kMinRouteCostImprovement = 50;
+
     RouteTable()
     {
         memset(neighbors_, 0, sizeof(neighbors_));
@@ -65,8 +69,11 @@ class RouteTable
                 neighbors_[i].rssi = rssi;
                 neighbors_[i].hop_count = hops;
                 neighbors_[i].last_seen_ms = now;
-                neighbors_[i].espnow_reachable = espnow;
-                neighbors_[i].lora_reachable = lora;
+                /* OR flags — a peer heard via both ESP-NOW and LoRa must
+                 * keep both flags set, not have one overwritten by the
+                 * latest packet's transport. */
+                neighbors_[i].espnow_reachable |= espnow;
+                neighbors_[i].lora_reachable |= lora;
                 neighbors_[i].early_stale_sent = false;
                 if (hops_to_inet != ROUTE_HOPS_UNKNOWN)
                 {
@@ -155,6 +162,26 @@ class RouteTable
         return false;
     }
 
+    /*
+     * LoRa-only penalty: neighbors reachable only via LoRa cannot carry
+     * data fragments (1456 bytes > 255 byte LoRa MTU). Add a large cost
+     * penalty so ESP-NOW-reachable relay paths are always preferred when
+     * available.  The penalty is additive to hops/ETX/queue cost.
+     */
+    static constexpr uint32_t LORA_ONLY_PENALTY = 500;
+
+    uint32_t route_cost(const NeighborEntry &n) const
+    {
+        uint32_t cost = (uint32_t)n.hops_to_internet * 100
+                      + n.etx_x100
+                      + n.queue_load;
+        if (n.lora_reachable && !n.espnow_reachable)
+        {
+            cost += LORA_ONLY_PENALTY;
+        }
+        return cost;
+    }
+
     /* Step 3c: ETX-weighted composite cost routing
      * my_addr: this node's address, used for loop avoidance (0 = disabled). */
     uint16_t next_hop(uint16_t dst_addr, uint16_t my_addr = 0) const
@@ -197,9 +224,7 @@ class RouteTable
             {
                 continue;
             }
-            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                          + neighbors_[i].etx_x100
-                          + neighbors_[i].queue_load;
+            uint32_t cost = route_cost(neighbors_[i]);
             if (cost < best_cost)
             {
                 best_cost = cost;
@@ -216,9 +241,7 @@ class RouteTable
                 {
                     continue;
                 }
-                uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                              + neighbors_[i].etx_x100
-                              + neighbors_[i].queue_load;
+                uint32_t cost = route_cost(neighbors_[i]);
                 if (cost < best_cost)
                 {
                     best_cost = cost;
@@ -388,6 +411,7 @@ class RouteTable
         return count_;
     }
 
+    /* Test-only: not used by production firmware. */
     bool has_internet_neighbor() const
     {
         for (uint8_t i = 0; i < count_; i++)
@@ -416,6 +440,7 @@ class RouteTable
         }
     }
 
+    /* Test-only: not used by production firmware. */
     void set_hops_to_internet(uint16_t addr, uint8_t hops)
     {
         for (uint8_t i = 0; i < count_; i++)
@@ -441,9 +466,6 @@ class RouteTable
     }
 
     /* --- Hysteresis: better route tracking --- */
-    static constexpr uint8_t SWITCH_THRESHOLD_CYCLES = 3;
-    static constexpr uint32_t MIN_COST_IMPROVEMENT = 50;
-
     struct BetterRouteResult
     {
         bool should_switch;
@@ -462,9 +484,7 @@ class RouteTable
             if (neighbors_[i].addr == current_best &&
                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
-                current_cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                             + neighbors_[i].etx_x100
-                             + neighbors_[i].queue_load;
+                current_cost = route_cost(neighbors_[i]);
                 break;
             }
         }
@@ -486,9 +506,7 @@ class RouteTable
             {
                 continue;
             }
-            uint32_t cost = (uint32_t)neighbors_[i].hops_to_internet * 100
-                          + neighbors_[i].etx_x100
-                          + neighbors_[i].queue_load;
+            uint32_t cost = route_cost(neighbors_[i]);
             if (cost < alt_cost)
             {
                 alt_cost = cost;
@@ -498,7 +516,7 @@ class RouteTable
 
         /* Check if alternative is meaningfully better */
         if (alt_addr != 0 && current_cost > alt_cost &&
-            (current_cost - alt_cost) >= MIN_COST_IMPROVEMENT)
+            (current_cost - alt_cost) >= kMinRouteCostImprovement)
         {
             if (better_route_.candidate_addr == alt_addr)
             {
@@ -511,7 +529,7 @@ class RouteTable
                 better_route_.consecutive_cycles = 1;
             }
 
-            if (better_route_.consecutive_cycles >= SWITCH_THRESHOLD_CYCLES)
+            if (better_route_.consecutive_cycles >= kRouteHysteresisCycles)
             {
                 uint16_t result = better_route_.candidate_addr;
                 better_route_ = {}; /* reset after switch */
@@ -533,7 +551,7 @@ class RouteTable
          * flags:1, queue_load:1}*N] flags: bit0=espnow_reachable,
          * bit1=lora_reachable, bit2=has_internet
          */
-        size_t needed = 1 + count_ * 7;
+        size_t needed = 1 + count_ * kSerializedNeighborSize;
         if (needed > max_len)
         {
             return 0;
@@ -541,7 +559,7 @@ class RouteTable
         buf[0] = count_;
         for (uint8_t i = 0; i < count_; i++)
         {
-            size_t off = 1 + i * 7;
+            size_t off = 1 + i * kSerializedNeighborSize;
             memcpy(buf + off, &neighbors_[i].addr, 2); /* little-endian on ESP32 */
             buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
             buf[off + 3] = neighbors_[i].hop_count;
@@ -565,22 +583,53 @@ class RouteTable
         return needed;
     }
 
-    uint8_t min_hops_to_internet() const
+    /* Minimum control-plane hops to internet.
+     * Control traffic can use either LoRa or ESP-NOW, so count any
+     * valid route advertisement. */
+    uint8_t min_control_hops_to_internet() const
     {
-        uint8_t best = ROUTE_HOPS_UNKNOWN;
+        uint8_t best_any = ROUTE_HOPS_UNKNOWN;
         for (uint8_t i = 0; i < count_; i++)
         {
             if (neighbors_[i].has_internet ||
                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN)
             {
                 uint8_t h = neighbors_[i].hops_to_internet;
-                if (h < best)
+                if (h < best_any)
                 {
-                    best = h;
+                    best_any = h;
                 }
             }
         }
-        return best;
+        return best_any;
+    }
+
+    /* Minimum data-plane hops to internet.
+     * Bulk file DATA/PARITY packets are constrained to ESP-NOW, so only
+     * count routes whose next hop is ESP-NOW reachable. */
+    uint8_t min_data_hops_to_internet() const
+    {
+        uint8_t best_espnow = ROUTE_HOPS_UNKNOWN;
+        for (uint8_t i = 0; i < count_; i++)
+        {
+            if ((neighbors_[i].has_internet ||
+                 neighbors_[i].hops_to_internet < ROUTE_HOPS_UNKNOWN) &&
+                neighbors_[i].espnow_reachable)
+            {
+                uint8_t h = neighbors_[i].hops_to_internet;
+                if (h < best_espnow)
+                {
+                    best_espnow = h;
+                }
+            }
+        }
+        return best_espnow;
+    }
+
+    /* Backward-compatible accessor: use data-plane hops for transfer logic. */
+    uint8_t min_hops_to_internet() const
+    {
+        return min_data_hops_to_internet();
     }
 
   private:

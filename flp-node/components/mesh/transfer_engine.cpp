@@ -83,6 +83,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     election_active_ = false;
     candidate_count_ = 0;
     congestion_backoff_ticks_ = 0;
+    last_mesh_frag_send_ms_ = 0;
     redist_count_ = 0;
     oow_retx_count_ = 0;
     weight_recompute_counter_ = 0;
@@ -148,7 +149,10 @@ void TransferEngine::init(EventGroupHandle_t events,
 
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
-        arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS);
+        if (!arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS))
+        {
+            ESP_LOGE(TAG, "Failed to init ARQ window %d", i);
+        }
         arq_[i].set_send_callback(
             [this](uint16_t dst,
                    PacketType type,
@@ -227,7 +231,7 @@ void TransferEngine::handle_transfer_done(uint16_t sender,
     reset_sender_transfer_state(true);
 }
 
-void TransferEngine::start_file_transfer(const char *filename,
+bool TransferEngine::start_file_transfer(const char *filename,
                                          size_t size,
                                          ReadChunkFn read_chunk,
                                          bool has_internet,
@@ -237,7 +241,7 @@ void TransferEngine::start_file_transfer(const char *filename,
     if (transfer_.active)
     {
         ESP_LOGW(TAG, "Transfer already in progress");
-        return;
+        return false;
     }
 
     /* Reject if serving as exit node — the MQTT pipeline is shared */
@@ -245,7 +249,7 @@ void TransferEngine::start_file_transfer(const char *filename,
     {
         ESP_LOGW(TAG, "Cannot start transfer: serving as exit node "
                  "(session=%u)", active_session_id_);
-        return;
+        return false;
     }
 
     fec_encoder_.reset();
@@ -306,7 +310,7 @@ void TransferEngine::start_file_transfer(const char *filename,
                      "Local-exit transfer rejected: %u fragments exceeds bitmap capacity %u",
                      data_frags, MAX_CLOUD_FRAGMENTS);
             transfer_.active = false;
-            return;
+            return false;
         }
         transfer_.fragment_count = data_frags;
         if (transfer_.fragment_count > 60000)
@@ -315,7 +319,7 @@ void TransferEngine::start_file_transfer(const char *filename,
                      "Transfer rejected: %u fragments too close to uint16_t wrap",
                      transfer_.fragment_count);
             transfer_.active = false;
-            return;
+            return false;
         }
 
         ESP_LOGI(TAG,
@@ -345,7 +349,7 @@ void TransferEngine::start_file_transfer(const char *filename,
                              transfer_.fragment_size,
                              crc);
         }
-        return; /* transfer_tick() will publish fragments */
+        return true; /* transfer_tick() will publish fragments */
     }
 
     /* Normal mesh path — include FEC parity fragments */
@@ -358,7 +362,7 @@ void TransferEngine::start_file_transfer(const char *filename,
                  "Transfer rejected: %u fragments too close to uint16_t wrap",
                  transfer_.fragment_count);
         transfer_.active = false;
-        return;
+        return false;
     }
 
     ESP_LOGI(TAG,
@@ -409,6 +413,8 @@ void TransferEngine::start_file_transfer(const char *filename,
                               reinterpret_cast<const uint8_t *>(&ad),
                               sizeof(ad),
                               EXIT_ANY_ADDR);
+
+    return true;
 }
 
 /* -- Periodic tick ------------------------------------------------------------ */

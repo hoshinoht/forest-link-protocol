@@ -283,7 +283,27 @@ void TransferEngine::handle_ack(uint16_t seq, uint16_t from_addr)
 void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
 {
     int8_t idx = arq_index_for_peer(from_addr);
-    if (idx < 0)
+
+    /* Relay-originated congestion NACK: from_addr is the relay, not an exit
+     * node, so arq_index_for_peer() returns -1.  Scan active ARQ instances
+     * to find which one owns this seq.  This enables relay congestion echo
+     * (Fix #1) where relays immediately NACK dropped DATA fragments. */
+    if (idx < 0 && transfer_.active)
+    {
+        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+        {
+            if (seq >= arq_[i].get_base_seq() && seq < arq_[i].get_next_seq())
+            {
+                idx = static_cast<int8_t>(i);
+                break;
+            }
+        }
+        if (idx < 0)
+        {
+            return;
+        }
+    }
+    else if (idx < 0)
     {
         return;
     }

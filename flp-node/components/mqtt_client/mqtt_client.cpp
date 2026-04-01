@@ -69,14 +69,25 @@ void MqttClient::notify()
     }
 }
 
+bool MqttClient::is_fragment_queue_congested() const
+{
+    if (!fragment_publish_queue_)
+    {
+        return false;
+    }
+    UBaseType_t spaces = uxQueueSpacesAvailable(fragment_publish_queue_);
+    return spaces < (MQTT_FRAGMENT_QUEUE_DEPTH / 4);
+}
+
 void MqttClient::init()
 {
     /* Large data queues live in PSRAM; small control queues stay internal. */
     publish_queue_ = xQueueCreateWithCaps(
         MQTT_PUBLISH_QUEUE_DEPTH, sizeof(MqttPublishItem),
         MALLOC_CAP_SPIRAM);
-    file_publish_queue_ =
-        xQueueCreate(MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest));
+    file_publish_queue_ = xQueueCreateWithCaps(
+        MQTT_FILE_QUEUE_DEPTH, sizeof(FilePublishRequest),
+        MALLOC_CAP_SPIRAM);
     fragment_publish_queue_ = xQueueCreateWithCaps(
         MQTT_FRAGMENT_QUEUE_DEPTH, sizeof(FragmentPublishRequest),
         MALLOC_CAP_SPIRAM);
@@ -146,11 +157,11 @@ void MqttClient::register_default_topics()
 
     /* Topic 2: flp/<node_id>/file/data (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/data", node_addr_);
-    file_data_topic_id_ = topic_table_.register_topic(topic_buf);
+    topic_table_.register_topic(topic_buf);
 
     /* Topic 3: flp/<node_id>/file/meta (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/meta", node_addr_);
-    file_meta_topic_id_ = topic_table_.register_topic(topic_buf);
+    topic_table_.register_topic(topic_buf);
 
     /* Topic 4: flp/admin/cmd (Cloud->Node, QoS 1) */
     topic_table_.register_topic("flp/admin/cmd");
@@ -650,7 +661,7 @@ void MqttClient::process_file_publish(const FilePublishRequest &req)
     char data_topic[64];
     snprintf(data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
-    uint8_t chunk_buf[2 + MQTT_CHUNK_PAYLOAD];
+    uint8_t *chunk_buf = chunk_scratch_;
     for (uint16_t seq = 0; seq < chunk_count; seq++)
     {
         size_t offset = static_cast<size_t>(seq) * MQTT_CHUNK_PAYLOAD;
@@ -817,7 +828,7 @@ void MqttClient::process_fragment_publish()
         snprintf(
             data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
 
-        uint8_t chunk_buf[4 + MAX_MTU];
+        uint8_t *chunk_buf = chunk_scratch_;
         chunk_buf[0] = static_cast<uint8_t>(req.session_id & 0xFF);
         chunk_buf[1] = static_cast<uint8_t>((req.session_id >> 8) & 0xFF);
         chunk_buf[2] = static_cast<uint8_t>(req.seq & 0xFF);

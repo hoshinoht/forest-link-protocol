@@ -8,6 +8,7 @@
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "flp_config.h"
 #include "freertos/FreeRTOS.h"
@@ -30,6 +31,26 @@ namespace flp
 {
 
 _lock_t OledDisplay::lvgl_lock_;
+
+namespace
+{
+
+void format_hops(char *buf, size_t len, uint8_t hops)
+{
+    if (hops == 0xFF)
+    {
+        snprintf(buf, len, "--");
+        return;
+    }
+    if (hops > 99)
+    {
+        snprintf(buf, len, "99");
+        return;
+    }
+    snprintf(buf, len, "%u", hops);
+}
+
+} /* namespace */
 
 /* ── LVGL flush: convert I1 horizontal → SSD1306 vertical column-major ─ */
 
@@ -93,6 +114,51 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    /*
+     * I2C bus recovery — if a previous boot crashed mid-I2C-transaction
+     * (e.g. PSRAM corruption reboot), the SSD1306 slave may be holding SDA
+     * low waiting for clocks.  Toggle SCL 9+ times at GPIO level to clock
+     * out the stuck byte, then generate a STOP condition.  Without this the
+     * I2C master init succeeds but every subsequent transaction NAKs.
+     */
+    {
+        gpio_config_t scl_cfg = {};
+        scl_cfg.pin_bit_mask = 1ULL << scl_pin;
+        scl_cfg.mode = GPIO_MODE_OUTPUT_OD;
+        scl_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&scl_cfg);
+
+        gpio_config_t sda_cfg = {};
+        sda_cfg.pin_bit_mask = 1ULL << sda_pin;
+        sda_cfg.mode = GPIO_MODE_OUTPUT_OD;
+        sda_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&sda_cfg);
+
+        auto scl = static_cast<gpio_num_t>(scl_pin);
+        auto sda = static_cast<gpio_num_t>(sda_pin);
+
+        /* Clock out up to 9 bits to free a stuck slave */
+        gpio_set_level(sda, 1);
+        for (int i = 0; i < 9; i++) {
+            gpio_set_level(scl, 1);
+            esp_rom_delay_us(5);
+            gpio_set_level(scl, 0);
+            esp_rom_delay_us(5);
+        }
+
+        /* Generate STOP condition: SDA low→high while SCL is high */
+        gpio_set_level(sda, 0);
+        esp_rom_delay_us(5);
+        gpio_set_level(scl, 1);
+        esp_rom_delay_us(5);
+        gpio_set_level(sda, 1);
+        esp_rom_delay_us(5);
+
+        /* Release pins so I2C driver can reconfigure them */
+        gpio_reset_pin(scl);
+        gpio_reset_pin(sda);
+    }
+
     /* I2C */
     i2c_master_bus_handle_t i2c_bus = nullptr;
     i2c_master_bus_config_t bus_cfg = {};
@@ -123,6 +189,13 @@ void OledDisplay::init(int sda_pin, int scl_pin, int rst_pin)
     panel_cfg.vendor_config = &ssd_cfg;
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(io_handle_, &panel_cfg, &panel_handle_));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle_));
+    /*
+     * After a crash/reboot the SSD1306 may retain stale state (RST=-1 means
+     * no hardware reset pin).  Send a display-off command before init so the
+     * controller re-runs its internal power-on sequence cleanly.
+     */
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, false));
+    vTaskDelay(pdMS_TO_TICKS(20));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle_));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle_, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle_, true, true));
@@ -426,11 +499,13 @@ void OledDisplay::show_status(const NodeStatus &s)
              s.wifi_connected ? "W:OK" : "W:--", s.espnow_peers);
     lv_label_set_text(status_wifi_label_, line);
 
-    /* Mesh:  "N:3 GW:1h" = 9..12 chars */
-    if (s.hops_to_internet == 0xFF)
-        snprintf(line, sizeof(line), "N:%-2u GW:--", s.neighbor_count);
-    else
-        snprintf(line, sizeof(line), "N:%-2u GW:%uh", s.neighbor_count, s.hops_to_internet);
+    /* Mesh: "N16 C10 D10" = 11 chars max */
+    char ctrl_hops[3];
+    char data_hops[3];
+    format_hops(ctrl_hops, sizeof(ctrl_hops), s.control_hops_to_internet);
+    format_hops(data_hops, sizeof(data_hops), s.data_hops_to_internet);
+    snprintf(line, sizeof(line), "N%u C%s D%s",
+             s.neighbor_count, ctrl_hops, data_hops);
     lv_label_set_text(status_mesh_label_, line);
 
     /* Transfer:  "Xfer: idle" or "Xfer:name 47%" */
@@ -476,11 +551,13 @@ void OledDisplay::show_transfer(const NodeStatus &s)
         lv_bar_set_value(xfer_bar_, s.transfer_pct, LV_ANIM_ON);
     }
 
-    /* Mesh:  "N:3 GW:1h" */
-    if (s.hops_to_internet == 0xFF)
-        snprintf(line, sizeof(line), "N:%u GW:--", s.neighbor_count);
-    else
-        snprintf(line, sizeof(line), "N:%u GW:%uh", s.neighbor_count, s.hops_to_internet);
+    /* Mesh: "N16 C10 D10" = 11 chars max */
+    char ctrl_hops[3];
+    char data_hops[3];
+    format_hops(ctrl_hops, sizeof(ctrl_hops), s.control_hops_to_internet);
+    format_hops(data_hops, sizeof(data_hops), s.data_hops_to_internet);
+    snprintf(line, sizeof(line), "N%u C%s D%s",
+             s.neighbor_count, ctrl_hops, data_hops);
     lv_label_set_text(xfer_mesh_label_, line);
 
     snprintf(line, sizeof(line), "%lukB", (unsigned long)s.free_heap_kb);

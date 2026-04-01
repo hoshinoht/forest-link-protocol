@@ -22,12 +22,15 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
+#include "../../display/include/oled_display.hpp"
 #include "buffer_pool.hpp"
 #include "espnow_transport.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "heap_monitor.hpp"
 #include "lora_transport.hpp"
 #include "packet.hpp"
@@ -41,6 +44,15 @@ inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 
 namespace flp
 {
+
+static constexpr uint8_t kQueueDepth = 48;
+static constexpr int8_t kDefaultRssi = -90;
+static constexpr float kLinkQualityPct = 100.0f;
+
+inline bool requires_espnow_data_path(PacketType type)
+{
+    return type == PacketType::DATA || type == PacketType::PARITY;
+}
 
 class MqttClient; /* forward declaration */
 
@@ -70,7 +82,7 @@ class MeshManager
     void update_espnow_broadcast_peer();
 
     /* Task 5: File transfer API */
-    void start_file_transfer(const char *filename,
+    bool start_file_transfer(const char *filename,
                              size_t size,
                              ReadChunkFn read_chunk);
 
@@ -113,11 +125,21 @@ class MeshManager
     {
         return espnow_.get_peer_count();
     }
-    uint8_t get_hops_to_internet() const
+    uint8_t get_control_hops_to_internet() const
     {
         if (has_internet_) { return 0; }
-        const uint8_t min_h = route_table_.min_hops_to_internet();
+        const uint8_t min_h = route_table_.min_control_hops_to_internet();
         return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
+    }
+    uint8_t get_data_hops_to_internet() const
+    {
+        if (has_internet_) { return 0; }
+        const uint8_t min_h = route_table_.min_data_hops_to_internet();
+        return (min_h < 0xFE) ? static_cast<uint8_t>(min_h + 1) : 0xFF;
+    }
+    uint8_t get_hops_to_internet() const
+    {
+        return get_data_hops_to_internet();
     }
     bool has_recent_cloud_cmd() const
     {
@@ -136,6 +158,7 @@ class MeshManager
     {
         return transfer_engine_.get_progress_pct();
     }
+    void snapshot_display_state(NodeStatus &out) const;
 
     int send_packet(uint16_t dst,
                     PacketType type,
@@ -176,6 +199,7 @@ class MeshManager
     void publish_all_telemetry();
     void drain_cmd_queue();
     void handle_topic_msg(const uint8_t *data, size_t len);
+    uint8_t saturated_queue_load() const;
 
     RouteTable route_table_;
     EspNowTransport espnow_;
@@ -189,6 +213,7 @@ class MeshManager
     QueueHandle_t lo_pri_queue_ = nullptr;
     QueueHandle_t packet_queue_ = nullptr; /* kept for get_packet_queue() compat */
     EventGroupHandle_t events_ = nullptr;
+    mutable SemaphoreHandle_t display_mutex_ = nullptr;
     uint16_t my_addr_ = 0;
     uint32_t discovery_timer_ms_ = 0;
     uint32_t prune_timer_ms_ = 0;
@@ -233,8 +258,12 @@ class MeshManager
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
 
-    /* Lab peer blacklist — drop direct (hop_count==0) packets from this addr */
-    uint16_t blocked_peer_ = 0; /* 0 = disabled */
+    /* Display snapshot shared with display task */
+    NodeStatus display_snapshot_ = {};
+    char display_filename_buf_[33] = {};
+
+    /* Lab peer blacklist — drop direct (hop_count==0) packets from these addrs */
+    std::vector<uint16_t> blocked_peers_; /* empty = disabled */
 
     /*
      * Step 4: Enlarged dedup cache with timestamps.
@@ -251,6 +280,10 @@ class MeshManager
     static constexpr uint8_t SEEN_CACHE_SIZE = 64;
     SeenEntry seen_cache_[SEEN_CACHE_SIZE] = {};
     uint8_t seen_idx_ = 0;
+    /* Reusable packet-build scratch buffer — avoids 1470B stack allocs in
+     * send_packet / send_discovery / broadcast_exit_offline (mesh task only,
+     * not thread-safe — all callers run exclusively in the mesh task). */
+    uint8_t scratch_buf_[MAX_MTU] = {};
 
     bool already_seen(uint16_t src, uint16_t dst, uint8_t type, uint16_t seq,
                       uint32_t window_ms)

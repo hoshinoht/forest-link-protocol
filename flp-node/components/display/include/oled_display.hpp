@@ -15,7 +15,8 @@ struct NodeStatus
     bool wifi_connected;
     uint8_t espnow_peers;
     uint8_t neighbor_count;
-    uint8_t hops_to_internet; /* 0xFF = unknown */
+    uint8_t control_hops_to_internet; /* 0xFF = unknown */
+    uint8_t data_hops_to_internet;    /* 0xFF = unknown */
     bool transfer_active;
     const char *filename;
     uint8_t transfer_pct; /* 0-100 */
@@ -88,7 +89,6 @@ class OledDisplay
     State state_ = State::SPLASH;
     int64_t splash_start_us_ = 0;
     bool splash_anim_started_ = false;
-    bool dimmed_ = false;
     bool transfer_was_active_ = false;
     bool show_complete_ = false;
     int64_t transfer_done_us_ = 0;
