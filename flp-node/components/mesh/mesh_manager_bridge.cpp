@@ -4,6 +4,7 @@
 #include <cstring>
 #include <functional>
 
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -151,6 +152,20 @@ void MeshManager::handle_mesh_cmd(const PacketHeader &hdr,
         case MeshCmd::REBOOT:
             ESP_LOGW(TAG, "Remote reboot requested by 0x%04X", hdr.src_addr);
             esp_restart();
+            break;
+        case MeshCmd::LED_CONTROL:
+#if CONFIG_FLP_LED_GPIO >= 0
+            if (payload_len >= 2)
+            {
+                uint8_t state = payload[1]; /* 0=off, 1=on */
+                gpio_set_level(static_cast<gpio_num_t>(CONFIG_FLP_LED_GPIO),
+                               state ? 1 : 0);
+                ESP_LOGI(TAG, "LED %s (GPIO %d) by 0x%04X",
+                         state ? "ON" : "OFF", CONFIG_FLP_LED_GPIO, hdr.src_addr);
+            }
+#else
+            ESP_LOGD(TAG, "LED_CONTROL ignored (FLP_LED_GPIO disabled)");
+#endif
             break;
         case MeshCmd::TOPIC_MSG:
             handle_topic_msg(payload + 1, payload_len - 1);

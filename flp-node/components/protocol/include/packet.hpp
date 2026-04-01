@@ -60,6 +60,7 @@ namespace MeshCmd
     static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
     /* 0x02 reserved */
     static constexpr uint8_t REBOOT = 0x03;
+    static constexpr uint8_t LED_CONTROL = 0x04;
     static constexpr uint8_t TOPIC_MSG = 0x10;
 } /* namespace MeshCmd */
 

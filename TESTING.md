@@ -2,6 +2,8 @@
 
 Hardware: LilyGo T3-S3 V1.2 (ESP32-S3 + SX1280) nodes + cloud-admin backend (Mosquitto + Go dashboard/API) exposed via Cloudflare Tunnel
 
+> This file is the tester-facing source of truth for experiment setup, execution, expected observations, and debugging. Keep it aligned with `.claude/skills/experiment/SKILL.md` and `.claude/skills/flash/SKILL.md`.
+
 ## Prerequisites
 
 ### Cloud Backend (Go admin + Cloudflare Tunnel)
@@ -43,13 +45,44 @@ Useful backend monitoring:
 docker compose logs -f mosquitto
 ```
 
+## Tester Preflight Checklist
+
+Before starting an experiment, record:
+
+- repo branch / commit under test
+- backend mode:
+  - shared backend, or
+  - self-hosted `cloud-admin`
+- board-to-role map
+- USB port used for each board during flash
+- node address shown on each OLED (`FLP-XXXX`)
+- which boards were flashed as exit builds vs relay builds
+- whether the run uses auto-demo or manual trigger
+- physical placement notes (distance, walls, intended hops)
+
+If a failure is reported without this information, collect it first.
+
 ### Flashing Nodes
 
-All commands from `flp-node/`. Source ESP-IDF first:
+All commands below are run from `flp-node/`.
+
+### macOS / Linux
+
+Prefer the in-repo wrapper:
 
 ```bash
-source ~/esp/esp-idf-v5.5.3/export.sh
+./idf build
+./idf flash monitor
+
+./idf relay build
+./idf relay flash monitor
 ```
+
+The wrapper auto-sources ESP-IDF, clears `sdkconfig` on build/fresh, and prompts for a port if needed.
+
+### Windows
+
+Use raw `idf.py` commands inside **ESP-IDF PowerShell** / **ESP-IDF CMD**.
 
 **Exit node (WiFi enabled):**
 
@@ -62,25 +95,39 @@ CONFIG_FLP_MQTT_USERNAME="flp-node"
 CONFIG_FLP_MQTT_PASSWORD="<mqtt_node_password>"
 ```
 
-```bash
-rm -f sdkconfig && idf.py build && idf.py -p /dev/<port> flash monitor
+```powershell
+Remove-Item sdkconfig -ErrorAction SilentlyContinue
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults" set-target esp32s3
+idf.py build
+idf.py -p COM3 flash monitor
 ```
 
-Confirm: OLED shows `W:OK`, serial shows `Got IP: x.x.x.x` and `MQTT connected to broker`
+Confirm:
+- OLED title shows `GATEWAY`
+- OLED shows `W:OK`
+- serial shows `Got IP: x.x.x.x` and MQTT connection success
 
 **Relay / sensor node (WiFi disabled):**
 
-```bash
-rm -f sdkconfig && idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" set-target esp32s3 && idf.py build && idf.py -p /dev/<port> flash monitor
+```powershell
+Remove-Item sdkconfig -ErrorAction SilentlyContinue
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" set-target esp32s3
+idf.py build
+idf.py -p COM4 flash monitor
 ```
 
 The `-D SDKCONFIG_DEFAULTS=...` flag layers `sdkconfig.defaults.relay` on top of the base defaults, setting `CONFIG_FLP_WIFI_DISABLED=y`. No need to modify or restore `sdkconfig.defaults`.
 
-Confirm: OLED shows `W:--`, serial shows `WiFi STA started (no AP)`
+Confirm:
+- OLED title shows `RELAY`
+- OLED shows `W:--`
+- serial shows WiFi STA/ESP-NOW startup without AP connection
 
 > **Note:** After flashing relay nodes, switch back to gateway mode for the next exit node build:
-> ```bash
-> rm -f sdkconfig && idf.py set-target esp32s3 && idf.py build
+> ```powershell
+> Remove-Item sdkconfig -ErrorAction SilentlyContinue
+> idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults" set-target esp32s3
+> idf.py build
 > ```
 
 **Auto-demo mode** (no button press needed):
@@ -88,8 +135,10 @@ Confirm: OLED shows `W:--`, serial shows `WiFi STA started (no AP)`
 ```bash
 idf.py menuconfig
 # Forest Link Protocol -> Auto demo mode = y
-# Forest Link Protocol -> Auto demo interval = 30
+# Forest Link Protocol -> Auto demo interval = 60
 ```
+
+Current repo default in `sdkconfig.defaults`: auto-demo is enabled with a 60-second interval.
 
 ---
 
@@ -128,7 +177,7 @@ One exit node sends a file directly to the cloud. No mesh hops. Baseline measure
 - `./run.sh logs` shows `[transfer] started session ...` and `[transfer] completed session ...`
 - If self-hosting, the reassembled file is saved under `cloud-admin/received_files/`
 
-**Expected OLED:** `GW:0h` (is the gateway), transfer progress 0-100%
+**Expected OLED:** title shows `GATEWAY`, connectivity shows `W:OK`, and the transfer line progresses from idle to 0-100%
 
 **Record:**
 - Transfer time (start to last fragment received)
@@ -157,7 +206,7 @@ Use the node address from the OLED (`FLP-XXXX`) as `<exit_addr>` without the `0x
 
 ---
 
-## Experiment 2: One Relay (2:1)
+## Experiment 2: Single Mesh Hop (2:1)
 
 ### Uplink
 
@@ -172,8 +221,8 @@ Use the node address from the OLED (`FLP-XXXX`) as `<exit_addr>` without the `0x
 4. Wait ~15 s for mesh discovery
 
 **Verify discovery:**
-- Board 1 OLED: `Nbrs:1 GW:0h`
-- Board 2 OLED: `Nbrs:1 GW:1h`
+- Board 1 OLED title: `GATEWAY`, mesh line around `N1 C0 D0`
+- Board 2 OLED title: `RELAY`, mesh line around `N1 C1 D1`
 
 **Trigger:** Press BOOT on Board 2
 
@@ -208,7 +257,7 @@ curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<board2
 
 ---
 
-## Experiment 3: Two Relays (3:1)
+## Experiment 3: One Relay / Two-Hop Path (3:1)
 
 ### Uplink
 
@@ -223,11 +272,13 @@ curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<board2
 4. Ensure the cloud backend is running, then power on all nodes and wait ~15 s
 
 **Verify discovery:**
-- Board 1: `GW:0h`
-- Board 2: `GW:1h`
-- Board 3: `GW:2h`
+- Board 1 OLED title: `GATEWAY`, mesh line around `N1 C0 D0`
+- Board 2 OLED title: `RELAY`, mesh line around `N2 C1 D1`
+- Board 3 OLED title: `RELAY`, mesh line around `N1 C2 D2`
 
 **Trigger:** Press BOOT on Board 3
+
+> If Board 3 still reaches Board 1 directly, the path may collapse into a shorter topology. Use more distance / obstacles, or set `FLP_BLOCKED_PEER` for lab forcing when needed.
 
 **Observe:**
 - Board 3 serial: broadcasts `TRANSFER_AD`, election starts
@@ -280,9 +331,9 @@ curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<board3
 4. Ensure the cloud backend is running, then power on all nodes and wait ~15 s
 
 **Verify discovery:**
-- Boards 1, 2: `GW:0h`
-- Board 3: `GW:1h`, `Nbrs:2` or `Nbrs:3`
-- Board 4: `GW:2h`
+- Boards 1, 2 OLED titles: `GATEWAY`, mesh line around `C0 D0`
+- Board 3 OLED title: `RELAY`, mesh line around `N2 C1 D1` or better
+- Board 4 OLED title: `RELAY`, mesh line around `C2 D2`
 
 **Trigger:** Press BOOT on Board 4
 
@@ -354,25 +405,69 @@ Copy this table for each experiment run:
 | Symptom | Check |
 |---------|-------|
 | OLED blank | Verify SDA=18, SCL=17. Delete `sdkconfig` and rebuild |
+| Wrong role after flash | Delete `sdkconfig`, rebuild using the correct exit or relay workflow, then reflash |
 | `W:--` on exit node | WiFi SSID/password wrong, or upstream internet unavailable |
-| `GW:--` on relay | Discovery not complete. Wait longer, check range |
-| `Nbrs:0` | Boards not in range, or WiFi channel mismatch. Check `FLP_ESPNOW_CHANNEL` |
+| Relay shows `C--` / `D--` | Discovery not complete. Wait longer, check range, and verify the intended topology |
+| Mesh line shows `N0` | Boards not in range, or WiFi channel mismatch. Check `FLP_ESPNOW_CHANNEL` |
 | Dashboard/API unreachable | Check `cloud-admin` is running, tunnel hostnames resolve, and Basic Auth uses user `admin` with `MQTT_ADMIN_PASS` |
 | No transfer on backend | Check broker URI/credentials, backend is running, exit shows `W:OK`, and serial shows `MQTT connected to broker` |
 | Transfer stuck 0% | No exit node elected. Check exit node is powered and in range |
 | Only 1 exit in Exp 4 | Second exit node may be out of LoRa range for TRANSFER_AD. Move closer |
 | Downlink cmd not received | Target address wrong. Check node addr on OLED (`FLP-XXXX`, hex) |
+| Downlink telemetry works but LED does not | Ensure firmware includes `cmd=4` support and `FLP_LED_GPIO` is not disabled |
 | Fragments on wrong topic | Each exit node publishes to its own `flp/<addr>/file/data`. This is expected |
+
+### Evidence to Collect for Debugging
+
+For any failure, capture:
+
+1. experiment number and direction (uplink / downlink)
+2. branch / commit
+3. board-role map and node addresses
+4. physical placement notes
+5. exact flash/build commands used
+6. exact API / `curl` command used
+7. serial logs from all involved nodes
+8. backend logs (`./run.sh logs` or `docker compose logs -f mosquitto`)
+9. OLED photos or screenshots
+10. dashboard screenshots and HTTP responses
+
+### Generic Downlink Command Examples
+
+Use the node address from the OLED (`FLP-XXXX`) without `0x`.
+
+```bash
+# Telemetry request
+curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 1}'
+
+# LED on
+curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 4, "data": "01"}'
+
+# LED off
+curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 4, "data": "00"}'
+```
+
+For successful downlink, expect:
+
+- exit node serial log showing routed or locally handled `MESH_CMD`
+- target node serial log showing received command
+- OLED briefly showing `>> Cloud CMD`
+- telemetry appearing in dashboard for `cmd=1`, or visible LED state change for `cmd=4`
 
 ## OLED Display Reference
 
 ```
-Line 0: FLP-XXXX v0.1.0    (node ID + version)
-Line 1: ────────────────    (separator)
-Line 2: W:OK N:2 L:OK      (WiFi, ESP-NOW peers, LoRa status)
-Line 3: Nbrs:2 GW:1h       (neighbor count, hops to gateway)
-Line 4: ────────────────    (separator)
-Line 5: demo.txt 45%       (active transfer progress)
-Line 6: Heap:234kB          (free heap memory)
-Line 7: Up 0:05:32          (uptime)
+Line 0: FLP-XXXX GATEWAY   or FLP-XXXX  RELAY
+Line 1: W:OK Lo P:02       or W:-- Lo P:02
+Line 2: N2 C1 D1           (neighbors, control hops, data hops)
+Line 3: Xfer: idle         or demo.txt 45%
+Line 4: >> Cloud CMD       (briefly shown after downlink command)
+Line 5: 234kB              (free heap)
+Line 6: 00:05:32           (uptime)
 ```

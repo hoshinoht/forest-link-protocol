@@ -206,6 +206,10 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 				return
 			}
 		}
+		if len(dataBytes) > 64 {
+			errorResponse(w, "data exceeds 64-byte firmware limit", http.StatusBadRequest)
+			return
+		}
 
 		payload := make([]byte, 3+len(dataBytes))
 		binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
@@ -270,6 +274,10 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		}
 
 		topicBytes := []byte(body.Topic)
+		if len(topicBytes)+len(dataBytes) > 64 {
+			errorResponse(w, "topic+data exceeds 64-byte firmware limit", http.StatusBadRequest)
+			return
+		}
 		payload := make([]byte, 4+len(topicBytes)+len(dataBytes))
 		binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
 		payload[2] = 0x10

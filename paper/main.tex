@@ -175,7 +175,7 @@ FLP employs a three-layer communication architecture with adaptive protocol sele
 
 \subsection{Hardware Platform}
 
-All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 2\,MB quad-SPI PSRAM (disabled; the system operates from internal SRAM and SD card) and an integrated SX1280 LoRa transceiver. Table~\ref{tab:hardware} summarizes the key hardware specifications.
+All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with 2\,MB quad-SPI PSRAM and an integrated SX1280 LoRa transceiver. PSRAM is used extensively for ARQ windows, FEC parity state, the buffer pool (\(\sim\)117 slabs, \(\sim\)174\,KB), the SD file cache (up to 512\,KB), and MQTT publish queues, keeping internal SRAM free for FreeRTOS stacks and real-time control structures. Table~\ref{tab:hardware} summarizes the key hardware specifications.
 
 \begin{table}[htbp]
   \centering
@@ -186,7 +186,7 @@ All nodes use the LILYGO T3-S3 board, featuring an ESP32-S3 microcontroller with
     \textbf{Component} & \textbf{Specification} \\
     \midrule
     MCU & ESP32-S3, dual-core Xtensa LX7 \\
-    PSRAM & 2\,MB quad-SPI (disabled; internal SRAM used) \\
+    PSRAM & 2\,MB quad-SPI (active; ARQ, FEC, buffer pool, SD cache) \\
     LoRa & SX1280, 2.4\,GHz, BW 800\,kHz, SF7--SF10 adaptive \\
     WiFi & 802.11 b/g/n, 2.4\,GHz \\
     ESP-NOW & 250\,B MTU, broadcast + unicast \\
@@ -252,7 +252,7 @@ The file transfer process follows a three-phase approach:
 
 \textbf{Phase 1: Exit Node Election.} The source node broadcasts a compact \texttt{TRANSFER\_AD} (9 bytes: session ID, file size, fragment size, CRC-16) via LoRa. Nodes with internet access respond with \texttt{TRANSFER\_ACK} containing their RSSI to gateway and hop count. The source selects up to four exit nodes and assigns fragment ranges round-robin. The election window adapts from 3--8\,s based on the source's hop distance to the nearest known exit.
 
-\textbf{Phase 2: Pipelined Data Transfer.} Data is fragmented into 240-byte chunks and transmitted using Selective Repeat ARQ with a sliding window of 32 fragments per exit node. Fragment~0 carries a filename prefix (\texttt{[len:1][filename:N][data...]}) so the exit node can publish transfer metadata to MQTT after receiving it. Every 7th fragment slot carries a FEC parity fragment (XOR of the preceding group), enabling recovery from single fragment losses without retransmission.
+\textbf{Phase 2: Pipelined Data Transfer.} Data is fragmented into 240-byte chunks and transmitted using Selective Repeat ARQ with a sliding window of 64 fragments per exit node. Fragment~0 carries a filename prefix (\texttt{[len:1][filename:N][data...]}) so the exit node can publish transfer metadata to MQTT after receiving it. Every 7th fragment slot carries a FEC parity fragment (XOR of the preceding group), enabling recovery from single fragment losses without retransmission.
 
 \textbf{Phase 3: Cloud Reassembly.} Exit nodes forward fragments to the MQTT broker as \texttt{[2-byte seq][data]} payloads on the topic \texttt{flp/<exit\_addr>/file/data}. The cloud-side MQTT Admin reconstructs the file from fragments, using session ID correlation and CRC verification.
 
@@ -330,9 +330,10 @@ The firmware is organized into independent ESP-IDF components: \texttt{espnow/} 
 The FLP system is deployed in a multi-layered mesh configuration consisting of Sensor Nodes (origin nodes), Relay Nodes (extenders), and Cloud Gateways (data exit points). Deployment in a dense forest presents the ``Green Wall'' effect where moisture-heavy foliage attenuates 2.4\,GHz signals. FLP mitigates this through:
 
 \begin{enumerate}
-  \item \textbf{Adaptive Protocol Selection}: FLP uses LoRa as a control plane to discover other nodes. Once a neighbor is identified, FLP escalates to ESP-NOW for high-speed file transfers. If the ESP-NOW RSSI drops below a threshold, FLP falls back to LoRa.
+  \item \textbf{Adaptive Protocol Selection}: Bulk data (\texttt{DATA}/\texttt{PARITY} packets) is restricted to ESP-NOW paths; the route table tracks control-plane and data-plane reachability separately so that LoRa-only neighbors are used for control signaling but never for file transfer relay.
   \item \textbf{Network Resilience}: To prevent management collapse observed in TCP/IP meshes, FLP uses Opportunistic Exit Node Election, where nodes with internet access advertise their state and sensor nodes broadcast an ``intent'' packet via LoRa to locate these exit nodes dynamically.
   \item \textbf{Priority Scheduling}: A dual-priority FreeRTOS queue ensures that control packets (ACK, NACK, route updates) are processed before bulk data fragments, preventing ARQ timeouts under heavy transfer load.
+  \item \textbf{Discovery Suppression}: During active file transfers, the discovery broadcast interval is tripled to reduce radio contention between control and data traffic.
 \end{enumerate}
 
 \subsection{Testing Process}
@@ -408,7 +409,7 @@ Table~\ref{tab:throughput} presents the per-component throughput analysis before
 
 The primary bottleneck shifted from software limitations (MQTT drain delay, small ARQ window) to physics (radio air-time sharing at relay nodes), indicating the software stack is no longer the limiting factor.
 
-Key optimizations included: enlarging the ARQ window from 8 to 32 fragments, reducing the MQTT processing interval from 500\,ms to 10\,ms, expanding the fragment queue from 8 to 64 entries, and tuning the ESP-NOW transmission pipeline to reduce inter-packet gaps at relay nodes.
+Key optimizations included: enlarging the ARQ window from 8 to 64 fragments, reducing the MQTT processing interval from 500\,ms to 10\,ms, expanding the dual-priority fragment queues from 8 to 48 entries per level (96 total), and adding 15--20\,ms inter-fragment pacing and capping new fragments to 1--2 per ARQ tick to prevent relay queue overflow. These collectively improved the pipeline from 6.6\,KB/s to 79\,KB/s (12$\times$). A subsequent head-of-line blocking fix, tracking in-flight fragment count rather than contiguous window base advancement, eliminated stalls caused by single lost fragments. Together, these changes shifted the bottleneck from software to radio physics.
 
 \subsection{Transfer Time Performance}
 
@@ -466,7 +467,7 @@ The DSDV sequence-numbered routing with ETX weighting provides several measurabl
 \begin{itemize}
   \item \textbf{Route convergence}: Stale routes are invalidated within seconds via \texttt{ROUTE\_ERROR} propagation, compared to the 30\,s passive timeout in the baseline.
   \item \textbf{Lossy link avoidance}: ETX-weighted routing naturally avoids high-loss links, reducing the overall ARQ retransmission rate.
-  \item \textbf{Congestion-aware forwarding}: When the packet queue exceeds 75\% capacity, low-priority forwarded packets are dropped, protecting control traffic from being starved during heavy transfers.
+  \item \textbf{Congestion-aware forwarding}: When the packet queue exceeds 50\% capacity, low-priority forwarded packets are dropped and relays immediately NACK the dropped \texttt{DATA}/\texttt{PARITY} fragments with a congestion flag, enabling the sender to throttle within one RTT rather than waiting for full ARQ timeout. This protects control traffic from being starved during heavy transfers.
 \end{itemize}
 
 \subsection{Failure and Recovery}
@@ -474,7 +475,7 @@ The DSDV sequence-numbered routing with ETX weighting provides several measurabl
 FLP implements several failure recovery mechanisms, each validated at different levels:
 
 \begin{itemize}
-  \item \textbf{Exit node failure}: The \texttt{exit\_node\_health\_tick()} function detects unresponsive exit nodes via ACK timeout (10\,s). Pending fragments are redistributed round-robin to surviving exits by \texttt{redistribute\_dead\_exit()}. Validated in the 4-node multi-exit lab experiment by powering off one exit mid-transfer.
+  \item \textbf{Exit node failure}: The \texttt{exit\_node\_health\_tick()} function detects unresponsive exit nodes via adaptive ACK timeout (30--60\,s, scaled by hop distance). Pending fragments are redistributed round-robin to surviving exits by \texttt{redistribute\_dead\_exit()}. Validated in the 4-node multi-exit lab experiment by powering off one exit mid-transfer.
   \item \textbf{Route failure}: \texttt{detect\_early\_stale()} triggers a \texttt{ROUTE\_ERROR} broadcast after 15\,s of neighbor silence. \texttt{invalidate\_route\_via()} clears all routes through the failed node, and upstream nodes converge on alternate paths within seconds. Validated in the 3-hop experiment by removing the relay node.
   \item \textbf{WiFi disconnect}: The MQTT client implements automatic reconnection with exponential backoff. During disconnection, the node continues mesh operations and buffers outbound data locally (DTN-style). Validated by toggling the WiFi access point during transfer.
   \item \textbf{Transfer stall}: If no progress is made for 30\,s, the transfer engine re-broadcasts \texttt{TRANSFER\_AD} to re-elect exit nodes. This path is architecturally supported but has not been stress-tested under sustained adverse conditions.
@@ -538,7 +539,7 @@ The original hop-count-only routing suffered from count-to-infinity loops after 
 Under lossy conditions, the Selective Repeat ARQ generated $O(n^2)$ NACKs: every missing fragment in the receive window triggered a retransmission request on each ARQ cycle, flooding the reverse path and worsening congestion. This was mitigated by restricting NACKs to gaps at the receive window front only, with a per-sequence cooldown timer that prevents re-NACKing a fragment until its expected round-trip time has elapsed.
 
 \textbf{4) Software Pipeline Bottlenecks.}
-Initial 3\,MB transfers over three hops took over 20 minutes, failing the NFR-MESH1 target. Profiling revealed three serial bottlenecks: the ARQ window (8 fragments) underutilized the link, the MQTT processing loop (500\,ms interval) drained fragments slower than they arrived, and the fragment queue (8 entries) overflowed during bursts. Enlarging the ARQ window to 32 fragments, reducing MQTT processing to 10\,ms, and expanding the queue to 64 entries collectively improved the pipeline from 6.6\,KB/s to 79\,KB/s (12$\times$), shifting the bottleneck from software to radio physics.
+Initial 3\,MB transfers over three hops took over 20 minutes, failing the NFR-MESH1 target. Profiling revealed three serial bottlenecks: the ARQ window (8 fragments) underutilized the link, the MQTT processing loop (500\,ms interval) drained fragments slower than they arrived, and the fragment queue (8 entries) overflowed during bursts. Enlarging the ARQ window to 64 fragments, reducing MQTT processing to 10\,ms, expanding the dual-priority queues to 48 entries per level (96 total), and adding 15--20\,ms inter-fragment pacing collectively improved the pipeline from 6.6\,KB/s to 79\,KB/s (12$\times$). A subsequent head-of-line blocking fix, tracking in-flight fragment count rather than contiguous window base advancement, eliminated stalls caused by single lost fragments. Together, these changes shifted the bottleneck from software to radio physics.
 
 \textbf{5) Single Exit Node Bottleneck.}
 Early designs funneled all fragments through one exit node, creating a throughput ceiling at the exit's MQTT publish rate and a single point of failure. This was replaced with multi-exit offloading: the source selects up to four exit nodes and stripes fragments round-robin across them. Dead exit nodes are detected via ACK timeout, and their pending fragments are redistributed to surviving exits. Cloud-side deduplication by session ID ensures correctness despite fragments arriving on separate MQTT topics.
