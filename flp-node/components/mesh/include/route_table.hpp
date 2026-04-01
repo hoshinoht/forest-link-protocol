@@ -44,6 +44,10 @@ struct NeighborEntry
 class RouteTable
 {
   public:
+    static constexpr uint8_t kSerializedNeighborSize = 7;
+    static constexpr uint8_t kRouteHysteresisCycles = 3;
+    static constexpr uint16_t kMinRouteCostImprovement = 50;
+
     RouteTable()
     {
         memset(neighbors_, 0, sizeof(neighbors_));
@@ -407,6 +411,7 @@ class RouteTable
         return count_;
     }
 
+    /* Test-only: not used by production firmware. */
     bool has_internet_neighbor() const
     {
         for (uint8_t i = 0; i < count_; i++)
@@ -435,6 +440,7 @@ class RouteTable
         }
     }
 
+    /* Test-only: not used by production firmware. */
     void set_hops_to_internet(uint16_t addr, uint8_t hops)
     {
         for (uint8_t i = 0; i < count_; i++)
@@ -460,9 +466,6 @@ class RouteTable
     }
 
     /* --- Hysteresis: better route tracking --- */
-    static constexpr uint8_t SWITCH_THRESHOLD_CYCLES = 3;
-    static constexpr uint32_t MIN_COST_IMPROVEMENT = 50;
-
     struct BetterRouteResult
     {
         bool should_switch;
@@ -513,7 +516,7 @@ class RouteTable
 
         /* Check if alternative is meaningfully better */
         if (alt_addr != 0 && current_cost > alt_cost &&
-            (current_cost - alt_cost) >= MIN_COST_IMPROVEMENT)
+            (current_cost - alt_cost) >= kMinRouteCostImprovement)
         {
             if (better_route_.candidate_addr == alt_addr)
             {
@@ -526,7 +529,7 @@ class RouteTable
                 better_route_.consecutive_cycles = 1;
             }
 
-            if (better_route_.consecutive_cycles >= SWITCH_THRESHOLD_CYCLES)
+            if (better_route_.consecutive_cycles >= kRouteHysteresisCycles)
             {
                 uint16_t result = better_route_.candidate_addr;
                 better_route_ = {}; /* reset after switch */
@@ -548,7 +551,7 @@ class RouteTable
          * flags:1, queue_load:1}*N] flags: bit0=espnow_reachable,
          * bit1=lora_reachable, bit2=has_internet
          */
-        size_t needed = 1 + count_ * 7;
+        size_t needed = 1 + count_ * kSerializedNeighborSize;
         if (needed > max_len)
         {
             return 0;
@@ -556,7 +559,7 @@ class RouteTable
         buf[0] = count_;
         for (uint8_t i = 0; i < count_; i++)
         {
-            size_t off = 1 + i * 7;
+            size_t off = 1 + i * kSerializedNeighborSize;
             memcpy(buf + off, &neighbors_[i].addr, 2); /* little-endian on ESP32 */
             buf[off + 2] = static_cast<uint8_t>(neighbors_[i].rssi);
             buf[off + 3] = neighbors_[i].hop_count;

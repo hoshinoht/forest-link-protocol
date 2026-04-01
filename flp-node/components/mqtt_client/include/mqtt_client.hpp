@@ -184,8 +184,6 @@ class MqttClient
 
     /* Captured topic IDs from register_default_topics() */
     uint16_t status_topic_id_ = 0;
-    uint16_t file_data_topic_id_ = 0;
-    uint16_t file_meta_topic_id_ = 0;
 
     static void mqtt_event_handler(void *handler_args,
                                    esp_event_base_t base,

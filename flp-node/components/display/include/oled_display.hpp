@@ -89,7 +89,6 @@ class OledDisplay
     State state_ = State::SPLASH;
     int64_t splash_start_us_ = 0;
     bool splash_anim_started_ = false;
-    bool dimmed_ = false;
     bool transfer_was_active_ = false;
     bool show_complete_ = false;
     int64_t transfer_done_us_ = 0;

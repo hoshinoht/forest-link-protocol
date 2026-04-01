@@ -11,6 +11,14 @@ using namespace flp;
 static const char *TAG = "xfer_eng";
 constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
 
+namespace
+{
+constexpr uint32_t kPacingBaseMs = 10;
+constexpr uint32_t kPacingPerHopMs = 5;
+constexpr uint8_t kMaxNewFragsSingleHop = 2;
+constexpr uint8_t kMaxNewFragsMultiHop = 1;
+} /* namespace */
+
 void TransferEngine::transfer_tick()
 {
     if (!transfer_.active || election_active_)
@@ -431,7 +439,8 @@ void TransferEngine::tick_mesh_arq()
      * already rate-limited by their own budgets and backoff logic. */
     uint32_t now_pace = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     uint32_t pacing_interval_ms =
-        10 + 5 * static_cast<uint32_t>(source_hops_to_exit_est_);
+        kPacingBaseMs +
+        kPacingPerHopMs * static_cast<uint32_t>(source_hops_to_exit_est_);
     if ((now_pace - last_mesh_frag_send_ms_) < pacing_interval_ms)
     {
         return; /* wait for pacing interval before sending new fragments */
@@ -459,8 +468,8 @@ void TransferEngine::tick_mesh_arq()
      * queue drops and ARQ retransmit storms.  Scale the per-tick budget
      * down with estimated hop count so relay queues stay healthy. */
     uint8_t max_new = (source_hops_to_exit_est_ >= 2)
-                          ? 1
-                          : 2;
+                          ? kMaxNewFragsMultiHop
+                          : kMaxNewFragsSingleHop;
     const uint8_t MAX_NEW_FRAGS_PER_TICK = max_new;
     uint8_t new_sent = 0;
     while (transfer_.next_fragment < transfer_.fragment_count &&

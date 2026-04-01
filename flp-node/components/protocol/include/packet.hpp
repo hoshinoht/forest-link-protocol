@@ -30,7 +30,7 @@ enum class PacketType : uint8_t
     ACK = 0x02,
     NACK = 0x03,
     DISCOVERY = 0x10,
-    ROUTE_REQ = 0x11,
+    /* 0x11 reserved */
     ROUTE_REPLY = 0x12,
     PARITY = 0x06,
     TRANSFER_AD = 0x20, /* file transfer advertisement */
@@ -57,10 +57,10 @@ static constexpr uint8_t STATUS = 0x04;
 /* Command IDs for MESH_CMD payload[0]. */
 namespace MeshCmd
 {
-static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
-static constexpr uint8_t CONFIG_UPDATE = 0x02;
-static constexpr uint8_t REBOOT = 0x03;
-static constexpr uint8_t TOPIC_MSG = 0x10;
+    static constexpr uint8_t REQUEST_TELEMETRY = 0x01;
+    /* 0x02 reserved */
+    static constexpr uint8_t REBOOT = 0x03;
+    static constexpr uint8_t TOPIC_MSG = 0x10;
 } /* namespace MeshCmd */
 
 struct __attribute__((packed)) PacketHeader

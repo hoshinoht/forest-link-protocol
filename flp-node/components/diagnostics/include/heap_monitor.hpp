@@ -25,8 +25,6 @@ class HeapMonitor
      */
     size_t serialize(uint8_t *buf, size_t max_len) const;
 
-  private:
-    uint32_t check_count_ = 0;
 };
 
 } /* namespace flp */

@@ -14,8 +14,8 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr int8_t kDefaultRssi = -90;
-constexpr float kLinkQualityPct = 100.0f;
+constexpr uint32_t kArqDedupWindowMs = 200;
+constexpr uint32_t kControlDedupWindowMs = 10000;
 
 const char *rx_transport_name(RxTransport source)
 {
@@ -28,11 +28,6 @@ const char *rx_transport_name(RxTransport source)
         default:
             return "UNKNOWN";
     }
-}
-
-bool requires_espnow_data_path(PacketType type)
-{
-    return type == PacketType::DATA || type == PacketType::PARITY;
 }
 
 uint8_t compute_hops_to_internet(const RouteTable &route_table,
@@ -248,7 +243,8 @@ void MeshManager::process_slab(BufferSlab *slab)
                          ptype == PacketType::PARITY ||
                          ptype == PacketType::ACK ||
                          ptype == PacketType::NACK);
-        uint32_t dedup_window = arq_type ? 200 : 10000;
+        uint32_t dedup_window = arq_type ? kArqDedupWindowMs
+                                         : kControlDedupWindowMs;
 
         if (already_seen(hdr.src_addr,
                          hdr.dst_addr,
@@ -370,12 +366,7 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         }
 
         /* Populate queue load for load-aware routing (same as broadcast) */
-        {
-            UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
-            UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
-            uint32_t ql = hi_used + lo_used;
-            resp.queue_load = (ql > 255) ? 255 : static_cast<uint8_t>(ql);
-        }
+        resp.queue_load = saturated_queue_load();
 
         /* Step 7c: Encode current SF in flags bits 5-7 */
         uint8_t sf_enc =
@@ -546,6 +537,14 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
     send_raw(t, slab->data, slab->len, next);
 }
 
+uint8_t MeshManager::saturated_queue_load() const
+{
+    UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
+    UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
+    uint32_t total = hi_used + lo_used;
+    return (total > 255) ? 255 : static_cast<uint8_t>(total);
+}
+
 void MeshManager::send_discovery()
 {
     DiscoveryPayload disc = {};
@@ -574,12 +573,7 @@ void MeshManager::send_discovery()
     }
 
     /* Populate queue load for load-aware routing */
-    {
-        UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
-        UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
-        uint32_t total = hi_used + lo_used;
-        disc.queue_load = (total > 255) ? 255 : static_cast<uint8_t>(total);
-    }
+    disc.queue_load = saturated_queue_load();
 
     /* Step 7c: Encode current SF in flags bits 5-7 */
     uint8_t sf_enc =

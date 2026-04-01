@@ -157,11 +157,11 @@ void MqttClient::register_default_topics()
 
     /* Topic 2: flp/<node_id>/file/data (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/data", node_addr_);
-    file_data_topic_id_ = topic_table_.register_topic(topic_buf);
+    topic_table_.register_topic(topic_buf);
 
     /* Topic 3: flp/<node_id>/file/meta (Node->Cloud, QoS 1) */
     snprintf(topic_buf, sizeof(topic_buf), "flp/%04x/file/meta", node_addr_);
-    file_meta_topic_id_ = topic_table_.register_topic(topic_buf);
+    topic_table_.register_topic(topic_buf);
 
     /* Topic 4: flp/admin/cmd (Cloud->Node, QoS 1) */
     topic_table_.register_topic("flp/admin/cmd");

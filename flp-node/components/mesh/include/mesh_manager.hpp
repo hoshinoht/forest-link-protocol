@@ -44,6 +44,13 @@ namespace flp
 {
 
 static constexpr uint8_t kQueueDepth = 48;
+static constexpr int8_t kDefaultRssi = -90;
+static constexpr float kLinkQualityPct = 100.0f;
+
+inline bool requires_espnow_data_path(PacketType type)
+{
+    return type == PacketType::DATA || type == PacketType::PARITY;
+}
 
 class MqttClient; /* forward declaration */
 
@@ -189,6 +196,7 @@ class MeshManager
     void publish_all_telemetry();
     void drain_cmd_queue();
     void handle_topic_msg(const uint8_t *data, size_t len);
+    uint8_t saturated_queue_load() const;
 
     RouteTable route_table_;
     EspNowTransport espnow_;

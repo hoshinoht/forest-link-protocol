@@ -30,7 +30,6 @@ void HeapMonitor::log_snapshot(const char *tag)
 
 void HeapMonitor::periodic_check()
 {
-    check_count_++;
     /* Log every call (~10s cadence set by caller) */
     ESP_LOGI(TAG,
              "free_int=%zu free_ps=%zu min_int=%zu min_ps=%zu",

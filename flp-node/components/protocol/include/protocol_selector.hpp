@@ -19,8 +19,11 @@ struct TransportMetrics
     uint32_t tx_count = 0;
     uint32_t tx_fail_count = 0;
     uint32_t total_latency_ms = 0;
+    /* Currently unused — always zero. Reserved for future telemetry. */
     uint32_t retransmit_count = 0;
+    /* Currently unused — always zero. Reserved for future telemetry. */
     uint32_t rx_count = 0;
+    /* Currently unused — always zero. Reserved for future telemetry. */
     uint32_t duty_cycle_ms = 0;
 
     uint32_t avg_latency_ms() const

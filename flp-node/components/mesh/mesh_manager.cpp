@@ -37,6 +37,8 @@ constexpr uint32_t kNeighborStaleTimeoutMs = 30000;
 constexpr uint32_t kEarlyStaleTimeoutMs = 15000;
 constexpr uint32_t kBiasIntervalMs = 10000;
 constexpr uint32_t kTelemetryIntervalMs = 30000;
+constexpr uint32_t kChannelHopIntervalMs = 1500;
+constexpr uint8_t kMaxWifiChannels = 13;
 } /* namespace */
 
 void MeshManager::set_has_internet(bool v)
@@ -467,10 +469,9 @@ void MeshManager::run()
              * channel.  Once a neighbor with internet is found, hopping
              * stops and the relay stays on that channel.
              */
-            constexpr uint32_t kChannelHopIntervalMs = 1500;
             if (now - channel_hop_timer_ms_ > kChannelHopIntervalMs)
             {
-                channel_hop_idx_ = (channel_hop_idx_ % 13) + 1;
+                channel_hop_idx_ = (channel_hop_idx_ % kMaxWifiChannels) + 1;
                 esp_wifi_set_channel(channel_hop_idx_, WIFI_SECOND_CHAN_NONE);
                 current_channel_ = channel_hop_idx_;
                 ESP_LOGI(TAG, "Channel hop: trying ch=%u", channel_hop_idx_);

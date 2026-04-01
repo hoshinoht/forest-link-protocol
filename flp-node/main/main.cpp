@@ -46,6 +46,24 @@ static int rom_safe_log_vprintf(const char *fmt, va_list args)
     return ret;
 }
 
+static bool verify_psram_integrity()
+{
+    volatile uint32_t *canary =
+        (volatile uint32_t *)heap_caps_malloc(16, MALLOC_CAP_SPIRAM);
+    bool psram_ok = false;
+    if (canary)
+    {
+        canary[0] = 0xDEADBEEF;
+        canary[1] = 0xCAFEBABE;
+        canary[2] = 0x12345678;
+        canary[3] = 0x9ABCDEF0;
+        psram_ok = (canary[0] == 0xDEADBEEF && canary[1] == 0xCAFEBABE &&
+                    canary[2] == 0x12345678 && canary[3] == 0x9ABCDEF0);
+        heap_caps_free((void *)canary);
+    }
+    return psram_ok;
+}
+
 static flp::MeshManager mesh_manager;
 static flp::UartIngest uart_ingest;
 
@@ -375,19 +393,7 @@ extern "C" void app_main()
      */
 #if CONFIG_SPIRAM
     {
-        volatile uint32_t *canary =
-            (volatile uint32_t *)heap_caps_malloc(16, MALLOC_CAP_SPIRAM);
-        bool psram_ok = false;
-        if (canary) {
-            canary[0] = 0xDEADBEEF;
-            canary[1] = 0xCAFEBABE;
-            canary[2] = 0x12345678;
-            canary[3] = 0x9ABCDEF0;
-            psram_ok = (canary[0] == 0xDEADBEEF && canary[1] == 0xCAFEBABE &&
-                        canary[2] == 0x12345678 && canary[3] == 0x9ABCDEF0);
-            heap_caps_free((void *)canary);
-        }
-        if (!psram_ok) {
+        if (!verify_psram_integrity()) {
             ESP_LOGE(TAG,
                      "PSRAM corrupted after WiFi PHY calibration "
                      "(ESP32-S3 rev v0.2 MSPI bus issue). "
@@ -432,19 +438,7 @@ extern "C" void app_main()
     /* Same PSRAM canary check for the gateway path (see relay path above) */
 #if CONFIG_SPIRAM
     {
-        volatile uint32_t *canary =
-            (volatile uint32_t *)heap_caps_malloc(16, MALLOC_CAP_SPIRAM);
-        bool psram_ok = false;
-        if (canary) {
-            canary[0] = 0xDEADBEEF;
-            canary[1] = 0xCAFEBABE;
-            canary[2] = 0x12345678;
-            canary[3] = 0x9ABCDEF0;
-            psram_ok = (canary[0] == 0xDEADBEEF && canary[1] == 0xCAFEBABE &&
-                        canary[2] == 0x12345678 && canary[3] == 0x9ABCDEF0);
-            heap_caps_free((void *)canary);
-        }
-        if (!psram_ok) {
+        if (!verify_psram_integrity()) {
             ESP_LOGE(TAG,
                      "PSRAM corrupted after WiFi PHY calibration "
                      "(ESP32-S3 rev v0.2 MSPI bus issue). "

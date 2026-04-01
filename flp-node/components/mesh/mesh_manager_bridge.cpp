@@ -15,8 +15,6 @@ static const char *TAG = "mesh_mgr";
 
 namespace
 {
-constexpr int8_t kDefaultRssi = -90;
-constexpr float kLinkQualityPct = 100.0f;
 constexpr uint8_t kMeshCmdMaxDataLen = 64;
 constexpr size_t kMeshCmdBufLen = static_cast<size_t>(kMeshCmdMaxDataLen) + 1;
 constexpr size_t kTopicBufLen = 32;
@@ -38,10 +36,6 @@ const char *relay_topic_suffix(uint8_t topic_id)
     }
 }
 
-bool requires_espnow_data_path(PacketType type)
-{
-    return type == PacketType::DATA || type == PacketType::PARITY;
-}
 } /* namespace */
 
 void MeshManager::relay_publish(uint8_t relay_topic,

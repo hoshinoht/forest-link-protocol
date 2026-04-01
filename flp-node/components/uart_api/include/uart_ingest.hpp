@@ -25,7 +25,6 @@ constexpr uint8_t UART_RESP_STATUS_RESP = 0x82;
 constexpr uint8_t UART_ERR_ALLOC_FAIL = 0x01;
 constexpr uint8_t UART_ERR_OVERFLOW = 0x02;
 constexpr uint8_t UART_ERR_NO_TRANSFER = 0x03;
-constexpr uint8_t UART_ERR_TRANSFER_BUSY = 0x04;
 
 /* Sync bytes */
 constexpr uint8_t UART_SYNC1 = 0xAA;

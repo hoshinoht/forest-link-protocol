@@ -13,19 +13,6 @@
     15 /* Core routing, must not stall during transfer */
 #define FLP_MQTT_TASK_PRIORITY 10 /* Network I/O, tolerates latency */
 
-/* Mesh parameters */
-#define FLP_MAX_HOPS          8
-#define FLP_MAX_NEIGHBORS     16
-#define FLP_BROADCAST_RETRIES 3
-
-/* Fragment sizes */
-#define FLP_ESPNOW_MTU       250
-#define FLP_LORA_MAX_PAYLOAD 255
-
-/* ARQ sliding window */
-#define FLP_ARQ_WINDOW_SIZE 8
-#define FLP_ARQ_TIMEOUT_MS  2000
-
 /* UART ingest API */
 #define FLP_UART_TASK_STACK    6144
 #define FLP_UART_TASK_PRIORITY 8
