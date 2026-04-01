@@ -3,70 +3,162 @@ name: experiment
 description: Guide setup and execution of an FLP experiment topology (1-4)
 ---
 
-# Experiment Skill
+# Experiment Skill / Tester Guide
 
-Guide the user through setting up and running one of the 4 FLP experiment topologies.
+This file is written to serve two purposes:
 
-## Important Context
+1. as the `/experiment` skill used by Claude
+2. as a tester-facing guide for setting up, running, recording, and debugging FLP experiments
 
-- The user may be a **new developer** unfamiliar with the FLP protocol, ESP-IDF, or ESP32 hardware.
-- Their environment is **Windows x86** (not macOS). Adjust all paths, port names, and shell commands accordingly.
-- They use **ESP-IDF v5.5.3** installed via the Espressif Installation Manager (EIM) or the legacy ESP-IDF Tools Installer.
-- The `./idf` wrapper script is **bash-only (macOS/Linux)**. On Windows, use raw `idf.py` commands in the **ESP-IDF PowerShell** or **ESP-IDF CMD** terminal that EIM creates.
-- The cloud backend is **already deployed and shared**. No self-hosting setup required.
+Use this as a practical handoff document. It should be readable by a tester without needing to inspect the code.
 
-## Activation
+## Scope
 
-This skill activates when the user runs `/experiment` or asks about running FLP experiments.
+This guide covers:
 
-## Arguments
+- experiment topologies 1-4
+- uplink and downlink testing
+- what hardware/software to prepare
+- what to expect on OLED, serial, and backend
+- what to record for results
+- how to debug failures stage-by-stage
 
-- `/experiment` -- ask which experiment (1-4) and direction
-- `/experiment 1` -- Experiment 1 (1:1 exit node direct)
-- `/experiment 2` -- Experiment 2 (2:1 one relay)
-- `/experiment 3` -- Experiment 3 (3:1 two relays)
-- `/experiment 4` -- Experiment 4 (4:2 two exit nodes)
-- `/experiment 3 downlink` -- only downlink for Experiment 3
+## Operating rules for the assistant
 
-## Steps
+When this skill is used interactively:
 
-### Step 0: Read the source of truth
+1. do **not** assume the tester is on Windows only
+2. do **not** assume the tester uses the shared backend
+3. ask which backend mode they are using:
+   - shared backend
+   - self-hosted `cloud-admin`
+4. ask which host OS they are using:
+   - macOS / Linux
+   - Windows
+5. ask which experiment they are running and whether they want:
+   - uplink
+   - downlink
+   - both
+6. use `TESTING.md` as the companion repo document, but keep this skill detailed enough that it can be handed directly to a tester
+7. if something fails, move through the failure-isolation checklist in this document instead of guessing
 
-1. Read `TESTING.md` at the repo root for experiment topology diagrams, expected OLED output, serial log patterns, and the results template.
-2. Read `flp-node/sdkconfig.defaults` for current WiFi/MQTT credentials.
-3. Read `flp-node/sdkconfig.defaults.relay` for the relay overlay.
+## Quick orientation
 
-### Step 1: Confirm the environment
+### Node roles
 
-Ask the user to confirm:
+- **S** = source / sensor node (WiFi disabled, starts file transfer)
+- **R** = relay node (WiFi disabled, forwards packets)
+- **X** = exit node / gateway (WiFi enabled, bridges mesh to cloud)
+- **C** = cloud backend (`cloud-admin` + Mosquitto)
 
-1. **ESP-IDF installed?** They should have ESP-IDF v5.5.3. If using the EIM GUI, it creates an "ESP-IDF v5.5.3 PowerShell" shortcut. All `idf.py` commands must run inside this terminal.
-2. **Board connected?** LilyGo T3-S3 V1.2 plugged in via USB-C. On Windows, the board appears as a COM port (e.g., `COM3`). Check in **Device Manager > Ports (COM & LPT)** -- look for "USB-SERIAL CH340" or "USB Serial Device".
-3. **Working directory?** They must `cd` into the `flp-node` directory before running any `idf.py` commands.
+### Current key runtime behavior
 
-If the user doesn't have ESP-IDF installed, walk them through:
+- exit builds use `sdkconfig.defaults`
+- relay builds use `sdkconfig.defaults` layered with `sdkconfig.defaults.relay`
+- current repo default has **auto-demo enabled** at **60 seconds**
+- manual demo button default is **GPIO 1** when auto-demo is disabled
+- current OLED layout uses:
+  - title: `FLP-XXXX GATEWAY` or `FLP-XXXX  RELAY`
+  - connectivity: `W:OK Lo P:02` or `W:-- Lo P:02`
+  - mesh line: `N2 C1 D1`
+  - transfer line: `Xfer: idle` or `demo.txt 45%`
+  - cloud command banner: `>> Cloud CMD`
+
+### Useful downlink commands
+
+- **Telemetry request**: `cmd = 1`
+- **LED control**: `cmd = 4`, payload `01` = on, `00` = off
+
+---
+
+## Preflight checklist
+
+Before running any experiment, collect this information:
+
+- repo branch / commit under test
+- backend mode:
+  - shared backend, or
+  - self-hosted backend
+- board-to-role mapping
+  - Board A = X
+  - Board B = R
+  - Board C = S
+- USB port for each board
+- node address shown on OLED (`FLP-XXXX`)
+- whether each board was flashed as:
+  - exit build
+  - relay build
+- trigger mode:
+  - auto-demo
+  - manual button
+- physical layout notes:
+  - which boards are near each other
+  - which boards should be out of direct range
+  - walls / obstacles / distance
+
+If a tester reports a failure without this information, ask for it first.
+
+---
+
+## Backend modes
+
+### Mode A: shared backend
+
+Use this when the team already provides a deployed MQTT/admin backend.
+
+Tester should know:
+
+- admin URL
+- MQTT broker URL
+- dashboard/API credentials
+- whether the firmware defaults already point at the shared backend
+
+Do **not** hardcode these values in verbal instructions unless you have confirmed they are still current.
+
+### Mode B: self-hosted backend
+
+Use this when the tester runs `cloud-admin/` locally or on a lab host.
+
+Minimum checks:
+
+- `cloud-admin/.env` populated
+- `./gen-passwd.sh` run
+- `./run.sh up` succeeds
+- dashboard reachable
+- broker reachable by exit nodes
+
+When self-hosted, collect backend logs as part of every failure report.
+
+---
+
+## Flashing summary
+
+For deep flashing instructions, see the `flash` skill. The short version is below.
+
+### macOS / Linux
+
+Use the in-repo wrapper from `flp-node/`:
+
+```bash
+./idf build
+./idf flash monitor
+
+./idf relay build
+./idf relay flash monitor
 ```
-# In PowerShell (admin)
-winget install Espressif.EIM
-# Then open EIM, select ESP-IDF v5.5.3, install with defaults
-# After install, use the "ESP-IDF v5.5.3 PowerShell" shortcut
-```
 
-### Step 2: Flash the boards
+Useful notes:
 
-**Critical: the user must flash boards one at a time, switching USB cables between boards.**
+- the wrapper auto-sources ESP-IDF from `~/esp/esp-idf-v5.5.3/export.sh`
+- it auto-picks a USB port if one is not specified
+- it clears `sdkconfig` on `build` / `fresh` so role switches are clean
 
-#### Exit node (WiFi + MQTT enabled)
+### Windows
 
-The default `sdkconfig.defaults` already has the correct WiFi and MQTT credentials for the shared backend. No edits needed unless they're on a different WiFi network.
+Use raw `idf.py` commands in **ESP-IDF PowerShell** or **ESP-IDF CMD**.
 
-If they need to change WiFi credentials, tell them to edit `sdkconfig.defaults` lines:
-```
-CONFIG_FLP_WIFI_SSID="<their_ssid>"
-CONFIG_FLP_WIFI_PASSWORD="<their_password>"
-```
+Exit build:
 
-Flash commands (Windows, in ESP-IDF PowerShell):
 ```powershell
 cd flp-node
 Remove-Item sdkconfig -ErrorAction SilentlyContinue
@@ -75,115 +167,456 @@ idf.py build
 idf.py -p COM3 flash monitor
 ```
 
-Replace `COM3` with the actual COM port from Device Manager.
-
-**Verify before proceeding:**
-- Serial output shows: `Got IP: x.x.x.x` and `MQTT connected to broker`
-- OLED shows: `W:OK` (WiFi connected)
-- If OLED shows `W:--`, WiFi credentials are wrong or the network is unreachable
-
-Press `Ctrl+]` to exit the monitor.
-
-#### Relay / sensor node (WiFi disabled)
+Relay build:
 
 ```powershell
+cd flp-node
 Remove-Item sdkconfig -ErrorAction SilentlyContinue
 idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay" set-target esp32s3
 idf.py build
 idf.py -p COM4 flash monitor
 ```
 
-The `-D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay"` flag layers the relay overlay which sets `CONFIG_FLP_WIFI_DISABLED=y`. The semicolon separates the base config from the overlay.
+### Role-switch rule
 
-**Verify before proceeding:**
-- Serial output shows: `WiFi STA started (no AP)` (this is correct -- relay nodes don't connect to WiFi)
-- OLED shows: `W:--` (WiFi intentionally disabled)
+When switching a board between **exit** and **relay** firmware, always delete `sdkconfig` first and rebuild.
 
-**Important:** After flashing all relay nodes, if the next board needs to be an exit node, delete `sdkconfig` again and rebuild without the relay overlay:
-```powershell
-Remove-Item sdkconfig -ErrorAction SilentlyContinue
-idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults" set-target esp32s3
-idf.py build
+---
+
+## Post-flash acceptance checks
+
+### Exit node
+
+Expected signs of success:
+
+- serial shows WiFi association and IP acquisition
+- serial shows MQTT connected
+- OLED title shows `GATEWAY`
+- OLED shows `W:OK`
+- mesh line should eventually show `C0 D0`
+
+### Relay / sensor node
+
+Expected signs of success:
+
+- serial shows WiFi STA started for ESP-NOW but **no AP connection**
+- OLED title shows `RELAY`
+- OLED shows `W:--`
+- after discovery, mesh line should show non-`--` control/data hop counts
+
+### Command-path indicator
+
+When a cloud command is received, the OLED may briefly show:
+
+```text
+>> Cloud CMD
 ```
 
-### Step 3: Ask which experiment
+This is useful when validating downlink delivery.
 
-If not specified in the command arguments, ask the user:
+---
 
-1. Which experiment number (1-4)?
-2. Which direction: uplink (sensor to cloud), downlink (cloud to sensor), or both?
+## Experiment matrix
 
-Use the `mcp_question` tool to present the choices.
+| Experiment | Nodes | Purpose |
+|---|---:|---|
+| 1 | 1:1 | direct exit-to-cloud baseline |
+| 2 | 2:1 | single mesh hop: source -> exit |
+| 3 | 3:1 | two-hop path: source -> relay -> exit |
+| 4 | 4:2 | multi-exit striping: source -> relay -> two exits |
 
-### Step 4: Walk through the experiment
+---
 
-Reference `TESTING.md` for the specific experiment. Guide the user through:
+## Experiment 1 — direct exit node (1:1)
 
-1. **Board roles** -- Clearly state which board is S (sensor), R (relay), X (exit), and how many of each.
-2. **Physical arrangement** -- For Experiments 3 and 4, boards must be physically separated so multi-hop routing occurs. Explain that Board 3 (or 4) should be far enough from the exit node that it cannot directly reach it.
-3. **Power-on order** -- Exit nodes first, then relays, then sensors. Wait ~15 seconds between each for mesh discovery.
-4. **OLED verification** -- Before triggering a transfer, verify each board shows the expected OLED state:
-   - Exit node: `GW:0h` (is the gateway, 0 hops to internet)
-   - Relay 1 hop away: `GW:1h`
-   - Sensor 2 hops away: `GW:2h`
-   - If a board shows `GW:--`, discovery hasn't completed. Wait longer or move boards closer.
-5. **Trigger** -- Auto-demo triggers every 60 seconds by default, or the user can press the BOOT button (GPIO 0) on the sensor board.
-6. **What to observe** -- Walk through what they should see in:
-   - Serial monitor (transfer start, fragment counts, ARQ retransmissions)
-   - OLED (transfer progress percentage)
-   - Cloud dashboard at `https://admin.hoshinoht.dev` (login: `admin` / the MQTT_ADMIN_PASS from sdkconfig.defaults)
-7. **Downlink testing** -- For downlink, provide the exact `curl` command with the correct admin hostname and the node address from the OLED display. On Windows, `curl` is available in PowerShell natively. The node address on the OLED is `FLP-XXXX` where XXXX is hex; use it without the `0x` prefix in the API URL.
+### Topology
 
-### Step 5: Record results
+```text
+[X] --WiFi--> [C]
+```
 
-After the experiment completes, help the user fill in the results template from TESTING.md:
+### Setup
 
-| Metric | Value |
-|--------|-------|
-| File size (bytes) | from serial log: "Demo payload: N bytes" |
-| Total fragments | from serial log or dashboard |
-| Transfer time (s) | from dashboard: started -> completed timestamps |
-| Throughput (KB/s) | file_size / transfer_time / 1024 |
-| Exit nodes used | 1 for Exp 1-3, 2 for Exp 4 |
-| Hop count | 0/1/2/2 for Exp 1/2/3/4 |
-| ARQ retransmissions | from serial log: count of "retransmit" lines |
-| Fragments lost | from serial log: total_sent - total_received |
-| Downlink RTT (ms) | time between curl send and telemetry appearing in dashboard |
+1. flash one board as an exit node
+2. confirm backend is reachable
+3. power on the exit node
+4. wait until OLED shows `W:OK`
 
-### Step 6: Troubleshooting
+### Uplink test
 
-If the user encounters issues, check the troubleshooting table in TESTING.md. Common Windows-specific issues:
+Trigger:
 
-| Symptom | Fix |
-|---------|-----|
-| `idf.py` not found | Not running in ESP-IDF terminal. Open "ESP-IDF v5.5.3 PowerShell" from Start Menu |
-| COM port not found | Check Device Manager. Install CH340 driver if needed. Try a different USB cable |
-| `Permission denied` on COM port | Close any other serial monitor (PuTTY, Arduino IDE) holding the port |
-| Build fails with `sdkconfig` errors | Delete `sdkconfig` and rebuild: `Remove-Item sdkconfig` |
-| Flash fails: "could not open port" | Another process has the port. Close serial monitors. Try unplugging and replugging |
-| Monitor shows garbage characters | Baud rate mismatch. The default 115200 should work with `idf.py monitor` |
-| `SDKCONFIG_DEFAULTS` with semicolon fails | On CMD (not PowerShell), use quotes: `idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.relay"` |
+- wait for auto-demo, or
+- if auto-demo is disabled, press the demo button on GPIO 1
 
-## Shared Backend Info
+Expected:
 
-Pre-deployed and shared. The user does **not** need to run `cloud-admin/` themselves.
+- transfer progress appears on OLED
+- backend logs show transfer start and completion
+- dashboard shows active transfer and completed transfer entry
 
-- **Admin dashboard**: `https://admin.hoshinoht.dev`
-- **MQTT broker** (for nodes): `wss://mqtt.hoshinoht.dev`
-- **MQTT credentials** (already in sdkconfig.defaults):
-  - Username: `flp-node`
-  - Password: `U82mWIrDmQCzbCPMDxcB4q3fBPiO2bZH`
-- **Dashboard login**: `admin` / same password as `MQTT_ADMIN_PASS` in `cloud-admin/.env`
-- **API base URL for downlink commands**: `https://admin.hoshinoht.dev/api/cmd/<node_addr>`
+Record:
 
-## Key Protocol Concepts (for new developers)
+- file size
+- total fragments
+- transfer duration
+- retransmission count
 
-Briefly explain these if the user seems confused:
+### Downlink test
 
-- **ESP-NOW**: Short-range (~200m) peer-to-peer WiFi protocol used for mesh data transfer between nodes. No access point needed.
-- **LoRa (SX1280)**: Long-range radio at 2.4 GHz used for mesh discovery beacons and fallback data. Lower throughput but much longer range.
-- **Exit node**: A node with WiFi connectivity that bridges the mesh to the cloud via MQTT over WebSocket (WSS).
-- **Relay node**: Forwards packets between nodes without WiFi. Acts as a mesh hop.
-- **ARQ (Automatic Repeat reQuest)**: The protocol's reliability layer. Fragments are acknowledged; lost ones are retransmitted. "Retransmit" lines in the serial log are normal and expected.
-- **Transfer flow**: Sensor advertises a file -> exit node(s) respond -> sensor sends fragments hop-by-hop -> exit node publishes each fragment to MQTT -> cloud backend reassembles the file.
-- **OLED shorthand**: `W:OK` = WiFi connected, `W:--` = WiFi disabled, `GW:Nh` = N hops to nearest gateway, `Nbrs:N` = N mesh neighbors discovered.
+Use the node address from `FLP-XXXX` without `0x`.
+
+Telemetry example:
+
+```bash
+curl -u admin:<ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 1}'
+```
+
+LED example:
+
+```bash
+# LED on
+curl -u admin:<ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 4, "data": "01"}'
+
+# LED off
+curl -u admin:<ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<node_addr> \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd": 4, "data": "00"}'
+```
+
+Expected:
+
+- serial shows `MESH_CMD from 0x0000: cmd=1` for telemetry, or `cmd=4` for LED control
+- OLED may briefly show `>> Cloud CMD`
+- telemetry appears on the dashboard for `cmd=1`
+- LED visibly changes state for `cmd=4`
+
+---
+
+## Experiment 2 — single mesh hop (2:1)
+
+### Topology
+
+```text
+[S] --ESP-NOW/LoRa--> [X] --WiFi--> [C]
+```
+
+### Setup
+
+1. flash Board 1 as exit node
+2. flash Board 2 as relay/sensor node
+3. power on Board 1 first, then Board 2
+4. wait for discovery to stabilize
+
+Expected readiness:
+
+- exit node title shows `GATEWAY`
+- source node title shows `RELAY`
+- source node mesh line should usually settle around `C1 D1`
+
+### Uplink test
+
+Trigger on Board 2.
+
+Expected:
+
+- Board 2 logs transfer start
+- Board 1 logs exit-node forwarding / MQTT publish activity
+- dashboard shows the transfer
+
+Record:
+
+- transfer duration
+- observed hop count
+- retransmissions
+
+### Downlink test
+
+Run either telemetry or LED command against Board 2.
+
+Expected:
+
+- Board 1 logs routed command
+- Board 2 logs received command
+- Board 2 OLED may show `>> Cloud CMD`
+- telemetry or LED state change confirms end-to-end downlink path
+
+---
+
+## Experiment 3 — one relay / two-hop path (3:1)
+
+### Topology
+
+```text
+[S] --ESP-NOW/LoRa--> [R] --ESP-NOW/LoRa--> [X] --WiFi--> [C]
+```
+
+### Setup
+
+1. flash Board 1 as exit node
+2. flash Board 2 as relay
+3. flash Board 3 as source
+4. physically place Board 3 far enough from Board 1 that Board 2 is needed as the intermediate hop
+
+Expected readiness:
+
+- Board 1: `GATEWAY`, likely `C0 D0`
+- Board 2: `RELAY`, likely `C1 D1`
+- Board 3: `RELAY`, likely `C2 D2`
+
+If Board 3 can still directly reach Board 1, the topology may collapse into a shorter path and the experiment is invalid.
+
+### Uplink test
+
+Trigger on Board 3.
+
+Expected:
+
+- Board 3 advertises the transfer
+- Board 2 relays traffic
+- Board 1 acts as exit and forwards to MQTT
+- dashboard shows the transfer completing
+
+Record:
+
+- transfer duration
+- whether Board 2 clearly relayed packets
+- retransmissions / stalls
+
+### Downlink test
+
+Send telemetry or LED command to Board 3.
+
+Expected:
+
+- exit routes command into mesh
+- relay forwards it
+- Board 3 processes it
+- response or LED state change confirms two-hop downlink
+
+---
+
+## Experiment 4 — two exit nodes (4:2)
+
+### Topology
+
+```text
+                    /--> [X1] --WiFi--> [C]
+[S] ---> [R] -----|
+                    \--> [X2] --WiFi--> [C]
+```
+
+### Setup
+
+1. flash Boards 1 and 2 as exit nodes
+2. flash Board 3 as relay
+3. flash Board 4 as source
+4. place Board 4 behind Board 3, with both exits reachable from Board 3
+
+Expected readiness:
+
+- Boards 1 and 2 show `GATEWAY`
+- Board 3 shows `RELAY` with at least two useful neighbors
+- Board 4 shows `RELAY` and two-hop control/data path to cloud
+
+### Uplink test
+
+Trigger on Board 4.
+
+Expected:
+
+- transfer advertisement reaches both exits
+- both exits participate in forwarding to cloud
+- backend receives fragments from both exit topics
+- transfer time should improve versus a comparable single-exit path
+
+Record:
+
+- total transfer duration
+- whether both exits participated
+- fragment distribution across both exits
+
+### Downlink test
+
+Send telemetry or LED command to Board 4.
+
+Expected:
+
+- multiple exits may route the same command into the mesh
+- target node should still process it once due to deduplication
+- OLED / serial / backend confirms delivery
+
+---
+
+## What to record for every run
+
+Minimum dataset:
+
+- experiment number
+- timestamp
+- branch / commit
+- backend mode
+- board-role map
+- node addresses
+- trigger type (auto-demo or manual)
+- file size
+- chunk / fragment count
+- transfer duration
+- retransmission count
+- whether downlink telemetry worked
+- whether LED on/off worked
+- notes on packet loss / stalls / duplicate commands / unexpected OLED state
+
+---
+
+## Failure isolation checklist
+
+Work through failures in this order.
+
+### 1. Build / flash failure
+
+Check:
+
+- correct terminal / ESP-IDF environment
+- correct port
+- no other program holding the port
+- `sdkconfig` deleted before switching roles
+
+Capture:
+
+- exact flash command
+- full terminal output
+- port name
+
+### 2. Node boots but wrong OLED state
+
+Check:
+
+- flashed the correct build type (exit vs relay)
+- OLED title says expected role
+- exit node reaches `W:OK`
+- relay node intentionally stays `W:--`
+
+Capture:
+
+- OLED photo
+- first boot log
+
+### 3. Exit node never reaches cloud
+
+Check:
+
+- WiFi credentials
+- broker URI / credentials
+- backend is reachable
+- serial contains IP acquisition and MQTT connection logs
+
+Capture:
+
+- serial log from boot to failure
+- backend logs
+
+### 4. Nodes do not discover each other
+
+Check:
+
+- power-on order
+- wait longer for discovery
+- boards are in range
+- boards are on compatible channel / defaults
+- topology is not too close or too far
+
+Capture:
+
+- OLED photo of every board
+- serial logs from all boards
+- physical layout notes
+
+### 5. Transfer starts but does not complete
+
+Check:
+
+- active transfer progress on OLED and dashboard
+- retransmissions / NACK behavior in serial logs
+- exit node MQTT connectivity remained healthy
+- backend logs for fragment receive / completion
+
+Capture:
+
+- source, relay, and exit serial logs
+- backend logs
+- dashboard screenshot
+
+### 6. Downlink reaches exit but not target
+
+Check:
+
+- correct `<node_addr>` used in API URL
+- command payload valid hex
+- `cmd=4` uses `00` or `01`
+- exit logs routed command
+- target OLED briefly shows `>> Cloud CMD`
+
+Capture:
+
+- exact curl command
+- HTTP response
+- exit and target serial logs
+- OLED photo after command
+
+### 7. Experiment 4 only uses one exit
+
+Check:
+
+- both exits are powered and cloud-connected
+- both exits are in range of the relay
+- topology is not biased too strongly toward one exit
+
+Capture:
+
+- logs from both exits
+- backend evidence showing which `flp/<addr>/file/data` topics were active
+
+---
+
+## Evidence package for bug reports
+
+Ask testers to attach all of the following:
+
+1. experiment number and direction
+2. branch / commit
+3. board-role map and node addresses
+4. physical arrangement notes
+5. exact flash commands used
+6. exact API / curl command used
+7. serial logs from all involved nodes
+8. backend logs
+9. OLED photos or screenshots
+10. dashboard screenshots
+11. clear statement of where the failure occurred:
+    - flash
+    - boot
+    - discovery
+    - uplink transfer
+    - downlink command
+    - multi-exit
+
+---
+
+## Assistant interaction pattern
+
+If this skill is used interactively, guide the tester with this sequence:
+
+1. identify OS
+2. identify backend mode
+3. identify experiment number
+4. identify direction (uplink / downlink / both)
+5. confirm board-role map
+6. confirm which stage is failing, if any
+7. provide only the commands and checks relevant to that stage
+
+Do not dump all instructions at once unless the user explicitly wants the full guide.
