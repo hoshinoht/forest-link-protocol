@@ -167,4 +167,11 @@ menu "Forest Link Protocol"
             depends on FLP_OLED_ENABLED
     endmenu
 
+    config FLP_LED_GPIO
+        int "LED output GPIO (-1 = disabled)"
+        default 38
+        help
+            GPIO pin for the controllable LED. Set to -1 to disable.
+            Default 38 is the onboard user LED on LilyGo T3-S3 V1.2.
+
 endmenu

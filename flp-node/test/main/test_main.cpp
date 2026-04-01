@@ -35,6 +35,7 @@ void run_buffer_pool_tests(void);
 void run_selective_repeat_tests(void);
 void run_mesh_improvement_tests(void);
 void run_arq_resilience_tests(void);
+void run_mesh_cmd_tests(void);
 
 extern "C" void app_main(void)
 {
@@ -48,6 +49,7 @@ extern "C" void app_main(void)
     run_selective_repeat_tests();
     run_mesh_improvement_tests();
     run_arq_resilience_tests();
+    run_mesh_cmd_tests();
 
     UNITY_END();
 }

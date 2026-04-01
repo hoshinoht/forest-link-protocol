@@ -301,7 +301,12 @@ func (r *FileReassembler) Save(outputDir string) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
-	path := filepath.Join(outputDir, r.Filename)
+	// Sanitize: strip directory components to prevent path traversal.
+	safe := filepath.Base(r.Filename)
+	if safe == "." || safe == "/" {
+		safe = fmt.Sprintf("session_%s.bin", r.SessionID)
+	}
+	path := filepath.Join(outputDir, safe)
 	if err := os.WriteFile(path, r.Buffer[:r.TotalSize], 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
