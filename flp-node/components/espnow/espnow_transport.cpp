@@ -138,6 +138,10 @@ void EspNowTransport::init()
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(ret));
+        vSemaphoreDelete(tx_slots_);
+        tx_slots_ = nullptr;
+        vQueueDelete(pending_peer_queue_);
+        pending_peer_queue_ = nullptr;
         return;
     }
 
@@ -215,6 +219,11 @@ void EspNowTransport::deinit()
     {
         vQueueDelete(pending_peer_queue_);
         pending_peer_queue_ = nullptr;
+    }
+    if (tx_slots_)
+    {
+        vSemaphoreDelete(tx_slots_);
+        tx_slots_ = nullptr;
     }
     s_instance = nullptr;
     initialized_ = false;

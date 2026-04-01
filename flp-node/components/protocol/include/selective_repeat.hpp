@@ -42,7 +42,7 @@ class SelectiveRepeat
     SelectiveRepeat(const SelectiveRepeat &) = delete;
     SelectiveRepeat &operator=(const SelectiveRepeat &) = delete;
 
-    void init(uint8_t window_size, uint32_t timeout_ms);
+    bool init(uint8_t window_size, uint32_t timeout_ms);
 
     /* Sender API */
     int send_fragment(uint16_t seq, const uint8_t *data, size_t len);

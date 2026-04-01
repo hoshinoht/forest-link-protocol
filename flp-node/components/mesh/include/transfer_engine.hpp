@@ -139,7 +139,7 @@ class TransferEngine
      * Default hops_to_internet=1 (single hop); callers should pass the
      * actual hop count from RouteTable.
      */
-    void start_file_transfer(const char *filename,
+    bool start_file_transfer(const char *filename,
                              size_t size,
                              ReadChunkFn read_chunk,
                              bool has_internet = false,

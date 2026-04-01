@@ -24,11 +24,13 @@
 #include <cstdint>
 #include <vector>
 
+#include "../../display/include/oled_display.hpp"
 #include "buffer_pool.hpp"
 #include "espnow_transport.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "heap_monitor.hpp"
 #include "lora_transport.hpp"
 #include "packet.hpp"
@@ -80,7 +82,7 @@ class MeshManager
     void update_espnow_broadcast_peer();
 
     /* Task 5: File transfer API */
-    void start_file_transfer(const char *filename,
+    bool start_file_transfer(const char *filename,
                              size_t size,
                              ReadChunkFn read_chunk);
 
@@ -156,6 +158,7 @@ class MeshManager
     {
         return transfer_engine_.get_progress_pct();
     }
+    void snapshot_display_state(NodeStatus &out) const;
 
     int send_packet(uint16_t dst,
                     PacketType type,
@@ -210,6 +213,7 @@ class MeshManager
     QueueHandle_t lo_pri_queue_ = nullptr;
     QueueHandle_t packet_queue_ = nullptr; /* kept for get_packet_queue() compat */
     EventGroupHandle_t events_ = nullptr;
+    mutable SemaphoreHandle_t display_mutex_ = nullptr;
     uint16_t my_addr_ = 0;
     uint32_t discovery_timer_ms_ = 0;
     uint32_t prune_timer_ms_ = 0;
@@ -253,6 +257,10 @@ class MeshManager
 
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
+
+    /* Display snapshot shared with display task */
+    NodeStatus display_snapshot_ = {};
+    char display_filename_buf_[33] = {};
 
     /* Lab peer blacklist — drop direct (hop_count==0) packets from these addrs */
     std::vector<uint16_t> blocked_peers_; /* empty = disabled */

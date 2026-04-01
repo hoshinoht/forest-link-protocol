@@ -302,12 +302,12 @@ void MeshManager::drain_cmd_queue()
     }
 }
 
-void MeshManager::start_file_transfer(const char *filename,
+bool MeshManager::start_file_transfer(const char *filename,
                                       size_t size,
                                       ReadChunkFn read_chunk)
 {
     bool mqtt_ready = mqtt_client_ && mqtt_client_->is_connected();
-    transfer_engine_.start_file_transfer(
+    return transfer_engine_.start_file_transfer(
         filename, size, read_chunk, has_internet_, mqtt_ready, get_hops_to_internet());
 }
 

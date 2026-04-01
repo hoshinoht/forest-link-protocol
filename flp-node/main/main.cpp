@@ -299,18 +299,7 @@ static void display_task(void *arg)
     while (true)
     {
         flp::NodeStatus status = {};
-        status.node_addr = mgr->get_addr();
-        status.wifi_connected = mgr->has_internet();
-        status.espnow_peers = mgr->get_espnow_peer_count();
-        status.neighbor_count = mgr->get_neighbor_count();
-        status.control_hops_to_internet = mgr->get_control_hops_to_internet();
-        status.data_hops_to_internet = mgr->get_data_hops_to_internet();
-        status.transfer_active = mgr->is_transfer_active();
-        status.filename = mgr->get_transfer_filename();
-        status.transfer_pct = mgr->get_transfer_progress();
-        status.free_heap_kb = esp_get_free_heap_size() / 1024;
-        status.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
-        status.cloud_cmd_received = mgr->has_recent_cloud_cmd();
+        mgr->snapshot_display_state(status);
 
         oled_display.update(status);
 

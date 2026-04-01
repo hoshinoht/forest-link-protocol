@@ -121,6 +121,11 @@ void MeshManager::init()
     events_ = xEventGroupCreate();
     assert(events_);
 
+    display_mutex_ = xSemaphoreCreateMutex();
+    assert(display_mutex_);
+    display_snapshot_.filename = display_filename_buf_;
+    display_filename_buf_[0] = '\0';
+
     /* Pass dual queues and buffer pool to transports */
     espnow_.set_packet_queue(hi_pri_queue_); /* fallback */
     espnow_.set_hi_pri_queue(hi_pri_queue_);
@@ -289,6 +294,16 @@ void MeshManager::init()
     heap_monitor_.init();
 
     ESP_LOGI(TAG, "MeshManager initialized");
+}
+
+void MeshManager::snapshot_display_state(NodeStatus &out) const
+{
+    if (display_mutex_ &&
+        xSemaphoreTake(display_mutex_, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        out = display_snapshot_;
+        xSemaphoreGive(display_mutex_);
+    }
 }
 
 void MeshManager::run()
@@ -489,5 +504,39 @@ void MeshManager::run()
 
         /* Transfer engine tick (ARQ, election, broadcast retry, fragment feed) */
         transfer_engine_.tick(now);
+
+        /* Update display snapshot for the display task */
+        if (display_mutex_ && xSemaphoreTake(display_mutex_, 0) == pdTRUE)
+        {
+            display_snapshot_.node_addr = my_addr_;
+            display_snapshot_.wifi_connected = has_internet_;
+            display_snapshot_.espnow_peers = espnow_.get_peer_count();
+            display_snapshot_.neighbor_count = route_table_.get_count();
+            display_snapshot_.control_hops_to_internet =
+                get_control_hops_to_internet();
+            display_snapshot_.data_hops_to_internet =
+                get_data_hops_to_internet();
+            display_snapshot_.transfer_active =
+                transfer_engine_.is_transfer_active();
+            display_snapshot_.transfer_pct = transfer_engine_.get_progress_pct();
+            display_snapshot_.free_heap_kb = esp_get_free_heap_size() / 1024;
+            display_snapshot_.uptime_s =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+            display_snapshot_.cloud_cmd_received = has_recent_cloud_cmd();
+
+            const char *fn = transfer_engine_.current_filename();
+            if (fn)
+            {
+                strncpy(display_filename_buf_, fn, sizeof(display_filename_buf_) - 1);
+                display_filename_buf_[sizeof(display_filename_buf_) - 1] = '\0';
+            }
+            else
+            {
+                display_filename_buf_[0] = '\0';
+            }
+            display_snapshot_.filename = display_filename_buf_;
+
+            xSemaphoreGive(display_mutex_);
+        }
     }
 }

@@ -140,6 +140,7 @@ class LoraTransport : public ITransport
     void set_rf_switch_rx();
     void set_rf_switch_tx();
     void enter_rx_continuous();
+    void cleanup_partial_init();
 
     static void IRAM_ATTR dio1_isr_handler(void *arg);
     static void rx_task_func(void *arg);

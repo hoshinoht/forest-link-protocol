@@ -20,7 +20,7 @@ SelectiveRepeat::~SelectiveRepeat()
     cleanup_receiver();
 }
 
-void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
+bool SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
 {
     window_size_ = (window_size > ARQ_WINDOW) ? ARQ_WINDOW : window_size;
     timeout_ms_ = timeout_ms;
@@ -36,7 +36,7 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
         {
             ESP_LOGE(TAG, "Failed to allocate ARQ window (%zu bytes)",
                      ARQ_WINDOW * sizeof(FragmentSlot));
-            return;
+            return false;
         }
         ESP_LOGI(TAG, "ARQ window allocated: %zu bytes",
                  ARQ_WINDOW * sizeof(FragmentSlot));
@@ -45,6 +45,7 @@ void SelectiveRepeat::init(uint8_t window_size, uint32_t timeout_ms)
     reset_sender();
     ESP_LOGI(
         TAG, "ARQ init: window=%u timeout=%lums", window_size_, timeout_ms_);
+    return true;
 }
 
 /* --- Sender --- */
@@ -82,6 +83,8 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
                                    const uint8_t *data,
                                    size_t len)
 {
+    if (!window_) return -1;
+
     /* send_cb_ hands this payload to MeshManager::send_packet(), which adds
      * an 8-byte PacketHeader. Guard against storing/sending fragments larger
      * than the actual mesh payload budget. */
@@ -133,6 +136,8 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
 
 void SelectiveRepeat::handle_ack(uint16_t seq)
 {
+    if (!window_) return;
+
     if (seq < base_seq_ || seq >= next_seq_)
     {
         ESP_LOGW(
@@ -213,6 +218,8 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 
 void SelectiveRepeat::handle_nack(uint16_t seq)
 {
+    if (!window_) return;
+
     if (seq < base_seq_ || seq >= next_seq_)
     {
         ESP_LOGW(TAG,
@@ -246,6 +253,8 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
 
 uint8_t SelectiveRepeat::tick(uint8_t max_sends)
 {
+    if (!window_) return 0;
+
     uint32_t now = now_ms();
     uint8_t retx_count = 0;
 

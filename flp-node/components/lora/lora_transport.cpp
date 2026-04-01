@@ -476,6 +476,37 @@ void LoraTransport::rx_task_func(void *arg)
 
 /* ── Init / Deinit ─────────────────────────────────────────────────────── */
 
+void LoraTransport::cleanup_partial_init()
+{
+    if (rx_task_)
+    {
+        vTaskDelete(rx_task_);
+        rx_task_ = nullptr;
+    }
+    if (spi_)
+    {
+        spi_bus_remove_device(spi_);
+        spi_ = nullptr;
+    }
+    /* SPI bus was initialized — free it. Safe to call even if not fully set up. */
+    spi_bus_free(SPI3_HOST);
+    if (tx_done_sem_)
+    {
+        vSemaphoreDelete(tx_done_sem_);
+        tx_done_sem_ = nullptr;
+    }
+    if (spi_mutex_)
+    {
+        vSemaphoreDelete(spi_mutex_);
+        spi_mutex_ = nullptr;
+    }
+    if (radio_op_mutex_)
+    {
+        vSemaphoreDelete(radio_op_mutex_);
+        radio_op_mutex_ = nullptr;
+    }
+}
+
 void LoraTransport::init(uint8_t rx_task_priority)
 {
     if (initialized_)
@@ -486,6 +517,12 @@ void LoraTransport::init(uint8_t rx_task_priority)
     spi_mutex_ = xSemaphoreCreateMutex();
     radio_op_mutex_ = xSemaphoreCreateMutex();
     tx_done_sem_ = xSemaphoreCreateBinary();
+    if (!spi_mutex_ || !radio_op_mutex_ || !tx_done_sem_)
+    {
+        ESP_LOGE(TAG, "Failed to create LoRa semaphores");
+        cleanup_partial_init();
+        return;
+    }
 
     cs_pin_ = (gpio_num_t) CONFIG_FLP_LORA_CS;
     rst_pin_ = (gpio_num_t) CONFIG_FLP_LORA_RST;
@@ -547,6 +584,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        cleanup_partial_init();
         return;
     }
 
@@ -561,6 +599,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "SPI add device failed: %s", esp_err_to_name(ret));
+        cleanup_partial_init();
         return;
     }
 
@@ -578,6 +617,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     {
         ESP_LOGE(TAG, "SX1280 not detected (reg 0x0153 = 0x%02X%02X)",
                  fw[0], fw[1]);
+        cleanup_partial_init();
         return;
     }
     ESP_LOGI(TAG, "SX1280 detected (FW: 0x%02X%02X)", fw[0], fw[1]);
@@ -618,6 +658,7 @@ void LoraTransport::init(uint8_t rx_task_priority)
     {
         ESP_LOGE(TAG, "gpio_install_isr_service failed: %s",
                  esp_err_to_name(isr_ret));
+        cleanup_partial_init();
         return;
     }
     gpio_isr_handler_add(dio1_pin_, dio1_isr_handler, this);
@@ -650,28 +691,7 @@ void LoraTransport::deinit()
     }
 
     /* Free SPI */
-    if (spi_)
-    {
-        spi_bus_remove_device(spi_);
-        spi_ = nullptr;
-    }
-    spi_bus_free(SPI3_HOST);
-
-    if (tx_done_sem_)
-    {
-        vSemaphoreDelete(tx_done_sem_);
-        tx_done_sem_ = nullptr;
-    }
-    if (spi_mutex_)
-    {
-        vSemaphoreDelete(spi_mutex_);
-        spi_mutex_ = nullptr;
-    }
-    if (radio_op_mutex_)
-    {
-        vSemaphoreDelete(radio_op_mutex_);
-        radio_op_mutex_ = nullptr;
-    }
+    cleanup_partial_init();
 
     initialized_ = false;
     ESP_LOGI(TAG, "LoRa transport deinitialized");
