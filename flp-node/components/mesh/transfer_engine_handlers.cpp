@@ -5,10 +5,24 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
+
+/* Query the RSSI of the Wi-Fi AP this STA is associated with.
+ * Returns a clamped int8_t (typ. -30..-90) or 0 on failure. */
+static int8_t get_wifi_sta_rssi()
+{
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+    {
+        int r = ap.rssi;
+        return static_cast<int8_t>(r < -128 ? -128 : (r > 0 ? 0 : r));
+    }
+    return 0;
+}
 
 void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                                         const uint8_t *payload,
@@ -72,7 +86,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
             ack.session_id = ad.session_id;
             ack.exit_node_addr = my_addr_;
             ack.hops_to_gw = 0;
-            ack.rssi_to_gw = 0;
+            ack.rssi_to_gw = get_wifi_sta_rssi();
             ack.active_transfers = 1;
             send_fn_(hdr.src_addr,
                      PacketType::TRANSFER_ACK,
@@ -85,7 +99,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         ack.session_id = ad.session_id;
         ack.exit_node_addr = my_addr_;
         ack.hops_to_gw = 0;
-        ack.rssi_to_gw = 0;
+        ack.rssi_to_gw = get_wifi_sta_rssi();
         ack.active_transfers = 0;
 
         send_fn_(hdr.src_addr,

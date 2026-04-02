@@ -642,7 +642,13 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
          * configured maximum.  Each elected exit gets its own ARQ
          * instance with independent RTT tracking, so multi-exit over
          * multi-hop is safe. */
-        int16_t threshold = best_score / 2;
+        /* Threshold = best_score minus half its magnitude.  Using abs()
+         * ensures the margin always moves the threshold BELOW the best
+         * score, even when scores are negative (where dividing by 2 would
+         * incorrectly move toward zero, i.e. stricter). */
+        int16_t margin = static_cast<int16_t>(abs(best_score) / 2);
+        if (margin < 6) margin = 6;            /* minimum useful spread */
+        int16_t threshold = best_score - margin;
         uint8_t accepted = 0;
 #ifdef CONFIG_FLP_MAX_ELECTED_EXITS
         uint8_t accept_limit = static_cast<uint8_t>(CONFIG_FLP_MAX_ELECTED_EXITS);
