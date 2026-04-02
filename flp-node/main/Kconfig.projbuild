@@ -112,6 +112,15 @@ menu "Forest Link Protocol"
         default 30
         depends on FLP_DEMO_AUTO
 
+    config FLP_MAX_ELECTED_EXITS
+        int "Maximum exit nodes to elect per transfer"
+        default 2
+        range 1 4
+        help
+            Maximum number of exit nodes the sensor will elect for a single
+            file transfer. Fragments are striped across elected exits for
+            parallel upload. Set to 1 to force single-exit mode.
+
     menu "SD Card (TF Slot — SPI on HSPI)"
         config FLP_SD_ENABLED
             bool "Enable SD card"

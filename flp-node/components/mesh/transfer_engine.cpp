@@ -638,19 +638,19 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
             scores[j + 1] = ts;
         }
 
-        /* 3. Accept candidates within quality threshold. For multi-hop source
-         * paths, keep the first rollout conservative and cap the session to a
-         * single exit to avoid striping across delayed relay paths. */
+        /* 3. Accept candidates within quality threshold, up to the
+         * configured maximum.  Each elected exit gets its own ARQ
+         * instance with independent RTT tracking, so multi-exit over
+         * multi-hop is safe. */
         int16_t threshold = best_score / 2;
         uint8_t accepted = 0;
-        uint8_t accept_limit =
-            (source_hops_to_exit_est_ >= 2) ? 1 : MAX_EXIT_NODES;
-        if (source_hops_to_exit_est_ >= 2 && candidate_count_ > 1)
-        {
-            ESP_LOGI(TAG,
-                     "Multi-hop source path (%u hops): capping exit election to 1 candidate",
-                     source_hops_to_exit_est_);
-        }
+#ifdef CONFIG_FLP_MAX_ELECTED_EXITS
+        uint8_t accept_limit = static_cast<uint8_t>(CONFIG_FLP_MAX_ELECTED_EXITS);
+#else
+        uint8_t accept_limit = MAX_EXIT_NODES;
+#endif
+        if (accept_limit > MAX_EXIT_NODES)
+            accept_limit = MAX_EXIT_NODES;
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         for (uint8_t i = 0; i < candidate_count_ && accepted < accept_limit; i++)
         {
