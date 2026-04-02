@@ -331,6 +331,21 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
         return;
     }
 
+    /* Multi-exit NACK dedup: with stride-based ownership, both exit nodes
+     * subscribe to the same cloud NACK topic and forward all NACKs.
+     * Only process the NACK if this seq belongs to the exit that sent it
+     * (seq % stride == offset).  Otherwise the same cloud NACK gets
+     * counted twice, burning through MAX_RETRIES at 2x the real rate. */
+    if (transfer_.exit_node_count > 1)
+    {
+        uint8_t stride = transfer_.exit_node_count;
+        uint8_t uidx = static_cast<uint8_t>(idx);
+        if ((seq % stride) != uidx)
+        {
+            return; /* NACK from wrong exit for this seq — ignore */
+        }
+    }
+
     path_stats_[idx].nacked++; /* Phase 3 */
 
     /* If seq is still within the ARQ window, normal retransmit */
