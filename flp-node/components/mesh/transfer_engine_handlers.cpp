@@ -237,10 +237,19 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
         }
         else
         {
-            /* MQTT queue full — send explicit NACK for faster retransmit */
-            send_fn_(source_addr_, PacketType::NACK, nullptr, 0, hdr.seq_num);
+            /* MQTT queue full — stay silent (no NACK).
+             *
+             * Sending an explicit NACK here causes a positive feedback loop:
+             * NACK → immediate retransmit → queue still full → NACK → ...
+             * which saturates both the mesh and MQTT channels, preventing
+             * any forward progress.
+             *
+             * Instead, let the sender's ARQ timeout handle recovery with
+             * exponential backoff, giving the MQTT queue time to drain.
+             * signal_congestion() throttles the sender's new-fragment
+             * feed rate via congestion_backoff_ticks_. */
             signal_congestion();
-            ESP_LOGW(TAG, "MQTT queue full, NACK seq=%u (backpressure)",
+            ESP_LOGD(TAG, "MQTT queue full, suppressed NACK seq=%u (silent backpressure)",
                      hdr.seq_num);
         }
         return;
