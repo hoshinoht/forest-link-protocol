@@ -18,10 +18,18 @@ CMD_FILE_BEGIN = 0x01
 CMD_FILE_DATA = 0x02
 CMD_FILE_END = 0x03
 CMD_STATUS = 0x04
+CMD_ABORT = 0x05
 
+# Responses
 RESP_ACK = 0x80
 RESP_NACK = 0x81
 RESP_STATUS_RESP = 0x82
+
+# Async events (ESP32 -> external device, unsolicited)
+EVT_TRANSFER_PROGRESS = 0xC0
+EVT_TRANSFER_COMPLETE = 0xC1
+EVT_DOWNLINK_DATA = 0xC2
+EVT_MESH_STATE = 0xC3
 
 SYNC1 = 0xAA
 SYNC2 = 0x55
@@ -31,8 +39,7 @@ CHUNK_SIZE = 1024
 
 class FLPClient:
     def __init__(self, uart_id=0, tx_pin=0, rx_pin=1, baud=115200):
-        self.uart = UART(uart_id, baudrate=baud,
-                         tx=Pin(tx_pin), rx=Pin(rx_pin))
+        self.uart = UART(uart_id, baudrate=baud, tx=Pin(tx_pin), rx=Pin(rx_pin))
 
     def _send_frame(self, cmd, payload=b""):
         header = struct.pack("<BBBh", SYNC1, SYNC2, cmd, len(payload))
@@ -106,7 +113,7 @@ class FLPClient:
         # FILE_DATA: send in chunks
         offset = 0
         while offset < len(data):
-            chunk = data[offset:offset + CHUNK_SIZE]
+            chunk = data[offset : offset + CHUNK_SIZE]
             self._send_frame(CMD_FILE_DATA, chunk)
             self._expect_ack(CMD_FILE_DATA)
             offset += len(chunk)
@@ -118,20 +125,33 @@ class FLPClient:
         print("FILE_END acknowledged — mesh transfer initiated")
 
     def get_status(self):
-        """Query node status. Returns dict with node info."""
+        """Query node status. Returns dict with node info (13-byte response)."""
         self._send_frame(CMD_STATUS)
         resp = self._read_frame(timeout_ms=2000)
         if resp is None:
             raise RuntimeError("Timeout waiting for STATUS_RESP")
         cmd, payload = resp
-        if cmd != RESP_STATUS_RESP or len(payload) < 5:
-            raise RuntimeError(f"Unexpected response: 0x{cmd:02X}")
+        if cmd != RESP_STATUS_RESP or len(payload) < 13:
+            raise RuntimeError(f"Unexpected response: 0x{cmd:02X} len={len(payload)}")
         return {
-            "has_internet":    bool(payload[0]),
-            "neighbors":       payload[1],
-            "transfer_active": bool(payload[2]),
-            "node_addr":       payload[3] | (payload[4] << 8),
+            "has_internet": bool(payload[0]),
+            "neighbors": payload[1],
+            "hops_to_gateway": payload[2],
+            "transfer_active": bool(payload[3]),
+            "transfer_progress": payload[4],
+            "is_exit_node": bool(payload[5]),
+            "node_addr": payload[6] | (payload[7] << 8),
+            "free_heap": payload[8]
+            | (payload[9] << 8)
+            | (payload[10] << 16)
+            | (payload[11] << 24),
+            "mqtt_connected": bool(payload[12]),
         }
+
+    def abort(self):
+        """Cancel active ingest or transfer."""
+        self._send_frame(CMD_ABORT)
+        self._expect_ack(CMD_ABORT)
 
 
 # --- Demo usage ---

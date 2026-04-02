@@ -54,7 +54,8 @@ inline bool requires_espnow_data_path(PacketType type)
     return type == PacketType::DATA || type == PacketType::PARITY;
 }
 
-class MqttClient; /* forward declaration */
+class MqttClient;   /* forward declaration */
+class UartIngest;   /* forward declaration */
 
 class MeshManager
 {
@@ -90,6 +91,12 @@ class MeshManager
     void set_mqtt_client(MqttClient *client)
     {
         mqtt_client_ = client;
+    }
+
+    /* UART ingest wiring (for downlink forwarding) */
+    void set_uart_ingest(UartIngest *ingest)
+    {
+        uart_ingest_ = ingest;
     }
 
     void subscribe_topic(const char *topic);
@@ -149,6 +156,10 @@ class MeshManager
     bool is_transfer_active() const
     {
         return transfer_engine_.is_transfer_active();
+    }
+    bool is_exit_node() const
+    {
+        return transfer_engine_.is_exit_node();
     }
     const char *get_transfer_filename() const
     {
@@ -246,6 +257,9 @@ class MeshManager
 
     /* MQTT bridge */
     MqttClient *mqtt_client_ = nullptr;
+
+    /* UART ingest (downlink forwarding) */
+    UartIngest *uart_ingest_ = nullptr;
 
     /* Topic subscriptions for cloud-to-deep-node messaging */
     char subscribed_topics_[4][32] = {};

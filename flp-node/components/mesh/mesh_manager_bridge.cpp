@@ -9,6 +9,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "mqtt_client.hpp"
+#include "uart_ingest.hpp"
 
 using namespace flp;
 
@@ -229,6 +230,32 @@ void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
                      "TOPIC_MSG matched '%s' payload_len=%zu",
                      topic,
                      payload_len);
+
+            /* Forward to UART as downlink event */
+            if (uart_ingest_)
+            {
+                const uint8_t *msg_payload = data + 1 + topic_len;
+                UartEvent evt = {};
+                evt.type = UART_EVT_DOWNLINK_DATA;
+                /* Pack: [topic_len][topic...][payload...] */
+                size_t total = 1 + topic_len + payload_len;
+                if (total > sizeof(evt.payload))
+                    total = sizeof(evt.payload);
+                evt.payload[0] = topic_len;
+                size_t copy_topic = (topic_len < sizeof(evt.payload) - 1)
+                                        ? topic_len
+                                        : sizeof(evt.payload) - 1;
+                memcpy(&evt.payload[1], topic, copy_topic);
+                size_t remaining = sizeof(evt.payload) - 1 - copy_topic;
+                size_t copy_payload =
+                    (payload_len < remaining) ? payload_len : remaining;
+                if (copy_payload > 0)
+                    memcpy(&evt.payload[1 + copy_topic],
+                           msg_payload, copy_payload);
+                evt.len = static_cast<uint16_t>(
+                    1 + copy_topic + copy_payload);
+                uart_ingest_->push_event(evt);
+            }
             return;
         }
     }

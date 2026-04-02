@@ -17,10 +17,9 @@
 #define FLP_UART_TASK_STACK    6144
 #define FLP_UART_TASK_PRIORITY 8
 
-/* Demo button */
-#define FLP_BUTTON_TASK_STACK    4096
-#define FLP_BUTTON_TASK_PRIORITY 5
-#define FLP_BUTTON_DEBOUNCE_MS   2000
+/* Demo client (FlpClient) */
+#define FLP_CLIENT_TASK_STACK    4096
+#define FLP_CLIENT_TASK_PRIORITY 5
 
 /* OLED display — LVGL needs ~6KB+ for lv_timer_handler */
 #define FLP_DISPLAY_TASK_STACK    8192
