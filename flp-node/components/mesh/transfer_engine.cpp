@@ -509,12 +509,14 @@ void TransferEngine::tick(uint32_t now_ms)
             reset_sender_transfer_state(false);
             return;
         }
-        if (is_exit_node_)
+        if (is_exit_node_ || exit_pending_)
         {
             ESP_LOGW(TAG,
-                     "Exit node cloud stall: no activity for %" PRIu32
-                     "ms, clearing exit-node role",
-                     now_ms - last_cloud_activity_ms_);
+                     "%s cloud stall: no activity for %" PRIu32
+                     "ms, clearing exit-node role (session=%u)",
+                     is_exit_node_ ? "Exit node" : "Exit pending",
+                     now_ms - last_cloud_activity_ms_,
+                     active_session_id_);
             clear_exit_node_state();
         }
     }
