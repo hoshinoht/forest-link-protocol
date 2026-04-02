@@ -356,14 +356,23 @@ void TransferEngine::tick_mesh_arq()
                 got = transfer_.read_chunk(frag_buf_, offset, frag_len);
             }
 
-            /* Pick the first alive exit node for re-send */
-            uint16_t dst = transfer_.exit_nodes[0];
-            for (uint8_t e = 0; e < transfer_.exit_node_count; e++)
+            /* Route to the correct exit based on stride ownership.
+             * With multi-exit, seq % exit_count gives the owning ARQ index.
+             * Fall back to first alive exit only if the owner is dead. */
+            uint8_t owner = (transfer_.exit_node_count > 1)
+                                ? static_cast<uint8_t>(seq % transfer_.exit_node_count)
+                                : 0;
+            uint16_t dst = transfer_.exit_nodes[owner];
+            if (!transfer_.exit_node_alive[owner])
             {
-                if (transfer_.exit_node_alive[e])
+                dst = transfer_.exit_nodes[0];
+                for (uint8_t e = 0; e < transfer_.exit_node_count; e++)
                 {
-                    dst = transfer_.exit_nodes[e];
-                    break;
+                    if (transfer_.exit_node_alive[e])
+                    {
+                        dst = transfer_.exit_nodes[e];
+                        break;
+                    }
                 }
             }
 
