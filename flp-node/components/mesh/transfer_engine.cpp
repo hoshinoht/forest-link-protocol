@@ -530,6 +530,10 @@ void TransferEngine::tick(uint32_t now_ms)
         {
             send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
             ESP_LOGI(TAG, "Exit->source NACK for seq=%u", nack_seq);
+            /* Cloud NACKs prove the cloud link is alive — refresh the
+             * activity timestamp so the stall detector doesn't fire
+             * while the cloud is actively requesting retransmissions. */
+            last_cloud_activity_ms_ = now_ms;
         }
     }
 
@@ -644,11 +648,11 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
          * configured maximum.  Each elected exit gets its own ARQ
          * instance with independent RTT tracking, so multi-exit over
          * multi-hop is safe. */
-        /* Threshold = best_score minus half its magnitude.  Using abs()
+        /* Threshold = best_score minus 2/3 its magnitude.  Using abs()
          * ensures the margin always moves the threshold BELOW the best
          * score, even when scores are negative (where dividing by 2 would
          * incorrectly move toward zero, i.e. stricter). */
-        int16_t margin = static_cast<int16_t>(abs(best_score) / 2);
+        int16_t margin = static_cast<int16_t>(abs(best_score) * 2 / 3);
         if (margin < 6) margin = 6;            /* minimum useful spread */
         int16_t threshold = best_score - margin;
         uint8_t accepted = 0;
