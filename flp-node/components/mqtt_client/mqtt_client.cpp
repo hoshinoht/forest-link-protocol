@@ -781,7 +781,7 @@ bool MqttClient::publish_fragment(uint16_t session_id,
 
     if (xQueueSend(fragment_publish_queue_, &req, 0) != pdTRUE)
     {
-        ESP_LOGW(TAG, "Fragment publish queue full, NACK seq=%u", seq);
+        ESP_LOGW(TAG, "Fragment publish queue full, dropped seq=%u", seq);
         return false;
     }
 
