@@ -58,6 +58,7 @@ void SelectiveRepeat::reset_sender()
     exit_offset_ = 0;
     sender_failed_ = false;
     in_flight_ = 0;
+    min_rto_floor_ms_ = RTO_MIN_MS;
     /* Reset adaptive RTT state for the next transfer */
     srtt_ms_ = 0;
     rttvar_ms_ = 0;
@@ -85,6 +86,12 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
 {
     if (!window_) return -1;
 
+    if (!data || len == 0)
+    {
+        ESP_LOGW(TAG, "Dropping zero-length fragment seq=%u", seq);
+        return -1;
+    }
+
     /* send_cb_ hands this payload to MeshManager::send_packet(), which adds
      * an 8-byte PacketHeader. Guard against storing/sending fragments larger
      * than the actual mesh payload budget. */
@@ -98,9 +105,23 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
     FragmentSlot &slot = window_[idx];
     uint16_t prev_next_seq = next_seq_;
 
+    if (slot.sent && !slot.acked && slot.seq_tag != seq)
+    {
+        ESP_LOGW(TAG,
+                 "Slot alias on send: seq=%u tag=%u idx=%u base=%u next=%u in_flight=%u len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 in_flight_,
+                 slot.len);
+    }
+
     memcpy(slot.data, data, len);
     slot.len = len;
     slot.send_time_ms = now_ms();
+    slot.seq_tag = seq;
     slot.acked = false;
     slot.sent = true;
     in_flight_++;
@@ -120,6 +141,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
             slot.sent = false;
             slot.acked = false;
             slot.len = 0;
+            slot.seq_tag = UINT16_MAX;
             next_seq_ = prev_next_seq;
             if (in_flight_ > 0) { in_flight_--; }
             return -1;
@@ -149,6 +171,20 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
     uint8_t idx = seq % window_size_;
     FragmentSlot &slot = window_[idx];
 
+    if (slot.seq_tag != seq)
+    {
+        ESP_LOGW(TAG,
+                 "ACK slot/tag mismatch: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
+    }
+
     /* Adaptive RTO: measure RTT on first-attempt ACKs only.
      * Retransmitted fragments have ambiguous RTT (Karn's algorithm). */
     if (slot.sent && !slot.acked && slot.retries == 0)
@@ -174,6 +210,7 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
         }
         rto_ms_ = srtt_ms_ + 4 * rttvar_ms_;
         if (rto_ms_ < RTO_MIN_MS) { rto_ms_ = RTO_MIN_MS; }
+        if (rto_ms_ < min_rto_floor_ms_) { rto_ms_ = min_rto_floor_ms_; }
         if (rto_ms_ > RTO_MAX_MS) { rto_ms_ = RTO_MAX_MS; }
 
         /* Log every 32nd RTT sample to track adaptation without flooding */
@@ -234,6 +271,32 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
     uint8_t idx = seq % window_size_;
     FragmentSlot &slot = window_[idx];
 
+    if (slot.seq_tag != seq)
+    {
+        ESP_LOGW(TAG,
+                 "NACK slot/tag mismatch: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
+    }
+
+    if (!slot.sent || slot.acked || slot.len == 0)
+    {
+        ESP_LOGW(TAG,
+                 "Ignoring NACK for invalid slot seq=%u tag=%u sent=%d acked=%d len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
+        return;
+    }
+
     slot.retries++;
     if (slot.retries >= MAX_RETRIES)
     {
@@ -271,6 +334,21 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
         uint8_t idx = seq % window_size_;
         FragmentSlot &slot = window_[idx];
 
+        if (slot.seq_tag != seq)
+        {
+            ESP_LOGW(TAG,
+                     "Timeout slot/tag mismatch: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu retries=%u",
+                     seq,
+                     slot.seq_tag,
+                     idx,
+                     base_seq_,
+                     next_seq_,
+                     slot.sent ? 1 : 0,
+                     slot.acked ? 1 : 0,
+                     slot.len,
+                     slot.retries);
+        }
+
         if (!slot.sent || slot.acked)
         {
             continue;
@@ -288,6 +366,10 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
          * values that reflect observed network delay conditions."
          */
         uint32_t base_rto = rtt_initialized_ ? rto_ms_ : timeout_ms_;
+        if (base_rto < min_rto_floor_ms_)
+        {
+            base_rto = min_rto_floor_ms_;
+        }
         uint32_t backoff = base_rto << slot.retries; /* 2^retries */
         if (backoff > RTO_MAX_MS)
         {
@@ -299,6 +381,13 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
             if (slot.retries >= MAX_RETRIES)
             {
                 ESP_LOGD(TAG, "Timeout seq=%u max retries exceeded, awaiting NACK", seq);
+                continue;
+            }
+
+            if (slot.len == 0)
+            {
+                ESP_LOGW(TAG, "Skipping zero-length timeout retransmit seq=%u", seq);
+                slot.send_time_ms = now;
                 continue;
             }
 

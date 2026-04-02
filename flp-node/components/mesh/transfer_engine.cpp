@@ -53,6 +53,18 @@ uint32_t TransferEngine::compute_arq_timeout_ms(uint8_t hops_to_exit)
                : timeout;
 }
 
+uint32_t TransferEngine::compute_min_rto_floor_ms(uint8_t hops_to_exit)
+{
+    if (hops_to_exit <= 1)
+    {
+        return 200;
+    }
+
+    uint32_t floor = MULTIHOP_MIN_RTO_FLOOR_MS +
+                     static_cast<uint32_t>(hops_to_exit - 2) * 300;
+    return (floor > MAX_MIN_RTO_FLOOR_MS) ? MAX_MIN_RTO_FLOOR_MS : floor;
+}
+
 uint32_t TransferEngine::compute_exit_timeout_ms(uint8_t hops_to_exit)
 {
     uint32_t timeout = BASE_EXIT_NODE_TIMEOUT_MS +
@@ -86,6 +98,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     last_mesh_frag_send_ms_ = 0;
     redist_count_ = 0;
     oow_retx_count_ = 0;
+    last_oow_retx_ms_ = 0;
     weight_recompute_counter_ = 0;
     memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
     cloud_base_seq_ = 0;
@@ -94,6 +107,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     last_cloud_activity_ms_ = 0;
     mesh_upload_done_ = false;
     last_meta_publish_ms_ = 0;
+    last_diag_log_ms_ = 0;
     exit_pending_ = false;
 
     for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
@@ -402,15 +416,18 @@ bool TransferEngine::start_file_transfer(const char *filename,
     /* P8: Adaptive ARQ timeout — increase for multi-hop to avoid
      * spurious retransmissions when round-trip exceeds 700ms. */
     uint32_t arq_timeout = compute_arq_timeout_ms(effective_hops_to_exit);
+    uint32_t min_rto_floor = compute_min_rto_floor_ms(effective_hops_to_exit);
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
         arq_[i].set_timeout(arq_timeout);
+        arq_[i].set_min_rto_floor(min_rto_floor);
     }
 
     ESP_LOGI(TAG,
-             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms",
+             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms rto_floor=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms",
              election_timeout_ms_,
              arq_timeout,
+             min_rto_floor,
              exit_node_timeout_ms_);
 
     /*
@@ -429,14 +446,38 @@ bool TransferEngine::start_file_transfer(const char *filename,
 
 void TransferEngine::tick(uint32_t now_ms)
 {
+    uint8_t mesh_retx_used = 0;
+
     /* ARQ timeout retransmits — tick ALL instances.
      * Flow control is handled by the ESP-NOW TX semaphore: send()
-     * returns -1 when no TX slots are available, and tick() stops
-     * on the first failure.  Per-instance cap (8) prevents one ARQ
-     * from starving others. */
-    for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+     * returns -1 when no TX slots are available.  Use a shared mesh
+     * retransmit budget so multiple ARQ instances cannot consume the
+     * entire 16-slot ESP-NOW pipeline in one scheduler tick. */
+    if (transfer_.active && !local_exit_)
     {
-        arq_[i].tick(8);
+        static constexpr uint8_t MAX_TOTAL_MESH_RETX_PER_TICK = 4;
+        uint8_t retx_budget = MAX_TOTAL_MESH_RETX_PER_TICK;
+        for (uint8_t i = 0;
+             i < transfer_.exit_node_count && retx_budget > 0;
+             i++)
+        {
+            if (!transfer_.exit_node_alive[i])
+            {
+                continue;
+            }
+            uint8_t sent = arq_[i].tick(retx_budget);
+            mesh_retx_used = static_cast<uint8_t>(mesh_retx_used + sent);
+            retx_budget = (sent >= retx_budget)
+                              ? 0
+                              : static_cast<uint8_t>(retx_budget - sent);
+        }
+    }
+    else
+    {
+        for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+        {
+            arq_[i].tick(8);
+        }
     }
 
     /* Abort transfer if any ARQ instance has fatally failed */
@@ -588,6 +629,56 @@ void TransferEngine::tick(uint32_t now_ms)
 
     /* Feed fragments into ARQ window */
     transfer_tick();
+
+    log_transfer_diag(now_ms, mesh_retx_used);
+}
+
+void TransferEngine::log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used)
+{
+    if (!transfer_.active)
+    {
+        return;
+    }
+    if (last_diag_log_ms_ != 0 && (now_ms - last_diag_log_ms_) < 1000)
+    {
+        return;
+    }
+    last_diag_log_ms_ = now_ms;
+
+    ESP_LOGI(TAG,
+             "diag: sid=%u next=%u/%u oow=%u redist=%u cong=%u retx_used=%u mesh_done=%u exits=%u hops=%u",
+             transfer_.session_id,
+             transfer_.next_fragment,
+             transfer_.fragment_count,
+             oow_retx_count_,
+             redist_count_,
+             congestion_backoff_ticks_,
+             mesh_retx_used,
+             mesh_upload_done_ ? 1 : 0,
+             transfer_.exit_node_count,
+             source_hops_to_exit_est_);
+
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        uint32_t ack_age = 0;
+        if (transfer_.last_ack_ms[i] != 0 && now_ms >= transfer_.last_ack_ms[i])
+        {
+            ack_age = now_ms - transfer_.last_ack_ms[i];
+        }
+        ESP_LOGI(TAG,
+                 "diag exit[%u]: addr=0x%04X alive=%u base=%u next=%u used=%u ack_age=%" PRIu32 "ms sent=%lu acked=%lu nacked=%lu weight=%.2f",
+                 i,
+                 transfer_.exit_nodes[i],
+                 transfer_.exit_node_alive[i] ? 1 : 0,
+                 arq_[i].get_base_seq(),
+                 arq_[i].get_next_seq(),
+                 arq_[i].sender_window_used(),
+                 ack_age,
+                 static_cast<unsigned long>(path_stats_[i].sent),
+                 static_cast<unsigned long>(path_stats_[i].acked),
+                 static_cast<unsigned long>(path_stats_[i].nacked),
+                 path_stats_[i].weight);
+    }
 }
 
 void TransferEngine::election_timeout_tick(uint32_t now_ms)

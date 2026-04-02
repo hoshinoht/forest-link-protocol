@@ -19,6 +19,7 @@ struct FragmentSlot
     uint8_t data[MAX_MTU];
     size_t len = 0;
     uint32_t send_time_ms = 0;
+    uint16_t seq_tag = UINT16_MAX;
     bool acked = false;
     bool sent = false;
     uint8_t retries = 0;
@@ -107,6 +108,11 @@ class SelectiveRepeat
         timeout_ms_ = timeout_ms;
     }
 
+    void set_min_rto_floor(uint32_t min_rto_floor_ms)
+    {
+        min_rto_floor_ms_ = min_rto_floor_ms;
+    }
+
     /* True if any fragment has exceeded MAX_RETRIES without ACK */
     bool is_sender_failed() const
     {
@@ -158,6 +164,7 @@ class SelectiveRepeat
     bool rtt_initialized_ = false;  /* first sample bootstraps SRTT */
     static constexpr uint32_t RTO_MIN_MS = 200;
     static constexpr uint32_t RTO_MAX_MS = 5000;
+    uint32_t min_rto_floor_ms_ = RTO_MIN_MS;
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

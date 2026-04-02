@@ -228,6 +228,7 @@ class TransferEngine
     static uint8_t sanitize_hops_to_exit(uint8_t hops);
     static uint32_t compute_election_timeout_ms(uint8_t hops_to_exit);
     static uint32_t compute_arq_timeout_ms(uint8_t hops_to_exit);
+    static uint32_t compute_min_rto_floor_ms(uint8_t hops_to_exit);
     static uint32_t compute_exit_timeout_ms(uint8_t hops_to_exit);
 
     void transfer_tick();
@@ -241,6 +242,7 @@ class TransferEngine
     void exit_node_health_tick(uint32_t now_ms);
     void redistribute_dead_exit(uint8_t dead_idx);
     void recompute_weights();
+    void log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used);
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
                                    size_t payload_len,
@@ -251,6 +253,8 @@ class TransferEngine
     static constexpr uint32_t BASE_ARQ_TIMEOUT_MS = 3000;
     static constexpr uint32_t PER_HOP_ARQ_TIMEOUT_MS = 1000;
     static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 8000;
+    static constexpr uint32_t MULTIHOP_MIN_RTO_FLOOR_MS = 1200;
+    static constexpr uint32_t MAX_MIN_RTO_FLOOR_MS = 2000;
     static constexpr uint32_t BASE_ELECTION_MS = 3000;
     static constexpr uint32_t PER_HOP_ELECTION_MS = 1250;
     static constexpr uint32_t MAX_ELECTION_MS = 9000;
@@ -315,6 +319,7 @@ class TransferEngine
     static constexpr uint16_t OOW_RETX_QUEUE_SIZE = 1024;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
     uint16_t oow_retx_count_ = 0;
+    uint32_t last_oow_retx_ms_ = 0;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;
@@ -331,6 +336,7 @@ class TransferEngine
      * no session state. Re-publishing meta lets it pick up the session. */
     static constexpr uint32_t META_REPUBLISH_INTERVAL_MS = 10000;
     uint32_t last_meta_publish_ms_ = 0;
+    uint32_t last_diag_log_ms_ = 0;
 
     /* Phase 3: per-exit-path quality stats for weighted scheduling */
     ExitPathStats path_stats_[MAX_EXIT_NODES] = {};

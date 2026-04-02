@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -113,10 +114,18 @@ class EspNowTransport : public ITransport
     QueueHandle_t hi_pri_queue_ = nullptr;
     QueueHandle_t lo_pri_queue_ = nullptr;
     QueueHandle_t pending_peer_queue_ = nullptr;
+    std::atomic<uint32_t> tx_send_submit_count_ = 0;
+    std::atomic<uint32_t> tx_send_complete_count_ = 0;
+    std::atomic<uint32_t> tx_send_fail_status_count_ = 0;
+    std::atomic<uint32_t> tx_semaphore_full_count_ = 0;
+    std::atomic<uint32_t> tx_send_error_count_ = 0;
+    std::atomic<uint16_t> tx_last_full_peer_ = 0;
+    uint32_t last_tx_diag_ms_ = 0;
 
     void add_peer_if_new(const uint8_t *mac, int8_t rssi);
     uint16_t addr_from_mac(const uint8_t *mac) const;
     bool find_mac(uint16_t addr, uint8_t *mac_out) const;
+    void maybe_log_tx_diag(const char *reason, uint16_t peer_addr);
 
     static void
     on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len);

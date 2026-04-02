@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "packet.hpp"
 
@@ -15,6 +16,43 @@ static flp::EspNowTransport *s_instance = nullptr;
 
 namespace flp
 {
+
+void EspNowTransport::maybe_log_tx_diag(const char *reason, uint16_t peer_addr)
+{
+    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (last_tx_diag_ms_ != 0 && (now - last_tx_diag_ms_) < 1000)
+    {
+        return;
+    }
+    last_tx_diag_ms_ = now;
+
+    uint32_t submit = tx_send_submit_count_.exchange(0, std::memory_order_relaxed);
+    uint32_t done = tx_send_complete_count_.exchange(0, std::memory_order_relaxed);
+    uint32_t fail_status =
+        tx_send_fail_status_count_.exchange(0, std::memory_order_relaxed);
+    uint32_t sem_full =
+        tx_semaphore_full_count_.exchange(0, std::memory_order_relaxed);
+    uint32_t send_err = tx_send_error_count_.exchange(0, std::memory_order_relaxed);
+    uint16_t last_full_peer = tx_last_full_peer_.load(std::memory_order_relaxed);
+
+    if (submit == 0 && done == 0 && fail_status == 0 && sem_full == 0 &&
+        send_err == 0)
+    {
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "TX diag(%s): slots=%u submit=%lu done=%lu done_fail=%lu sem_full=%lu send_err=%lu last_full=0x%04X peer=0x%04X",
+             reason,
+             get_tx_slots_available(),
+             static_cast<unsigned long>(submit),
+             static_cast<unsigned long>(done),
+             static_cast<unsigned long>(fail_status),
+             static_cast<unsigned long>(sem_full),
+             static_cast<unsigned long>(send_err),
+             last_full_peer,
+             peer_addr);
+}
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -313,6 +351,17 @@ void EspNowTransport::on_send(const esp_now_send_info_t *info,
         xSemaphoreGive(s_instance->tx_slots_);
     }
 
+    if (s_instance)
+    {
+        s_instance->tx_send_complete_count_.fetch_add(
+            1, std::memory_order_relaxed);
+        if (status != ESP_NOW_SEND_SUCCESS)
+        {
+            s_instance->tx_send_fail_status_count_.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+
     if (status != ESP_NOW_SEND_SUCCESS)
     {
         const uint8_t *mac = info->des_addr;
@@ -346,8 +395,11 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
      * failing instantly.  5ms is ~2 frame TX times at 1Mbps. */
     if (tx_slots_ && xSemaphoreTake(tx_slots_, pdMS_TO_TICKS(5)) != pdTRUE)
     {
+        tx_semaphore_full_count_.fetch_add(1, std::memory_order_relaxed);
+        tx_last_full_peer_.store(peer_addr, std::memory_order_relaxed);
         ESP_LOGW(TAG, "TX semaphore full (%u slots), deferring send to 0x%04X",
                  TX_SLOT_DEPTH, peer_addr);
+        maybe_log_tx_diag("sem_full", peer_addr);
         return -1;
     }
 
@@ -362,12 +414,16 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         esp_err_t err = esp_now_send(ESPNOW_BCAST_MAC, data, len);
         if (err != ESP_OK)
         {
+            tx_send_error_count_.fetch_add(1, std::memory_order_relaxed);
             ESP_LOGE(
                 TAG, "ESP-NOW broadcast send failed: %s", esp_err_to_name(err));
             /* Give back the slot — esp_now_send failed, on_send won't fire */
             if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+            maybe_log_tx_diag("bcast_err", peer_addr);
             return -1;
         }
+        tx_send_submit_count_.fetch_add(1, std::memory_order_relaxed);
+        maybe_log_tx_diag("bcast_ok", peer_addr);
         ESP_LOGD(TAG, "Broadcast %zu bytes", len);
         return 0;
     }
@@ -376,23 +432,29 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
     uint8_t mac[6];
     if (!find_mac(peer_addr, mac))
     {
+        tx_send_error_count_.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGW(TAG, "Peer 0x%04X not found in table", peer_addr);
         if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+        maybe_log_tx_diag("peer_miss", peer_addr);
         return -1;
     }
 
     esp_err_t err = esp_now_send(mac, data, len);
     if (err != ESP_OK)
     {
+        tx_send_error_count_.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGE(TAG,
                  "ESP-NOW send to 0x%04X failed: %s",
                  peer_addr,
                  esp_err_to_name(err));
         /* Give back — esp_now_send failed, on_send won't fire */
         if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+        maybe_log_tx_diag("send_err", peer_addr);
         return -1;
     }
 
+    tx_send_submit_count_.fetch_add(1, std::memory_order_relaxed);
+    maybe_log_tx_diag("send_ok", peer_addr);
     ESP_LOGD(TAG, "Sent %zu bytes to peer 0x%04X", len, peer_addr);
     return 0;
 }
