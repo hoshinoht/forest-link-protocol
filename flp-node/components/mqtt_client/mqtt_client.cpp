@@ -934,6 +934,16 @@ void MqttClient::run()
         /* Process fragment publish requests (exit node mode) */
         process_fragment_publish();
 
+        /* Self-wake: if items remain in the fragment queue after a partial
+         * drain (e.g. outbox was full), ensure the next ulTaskNotifyTake()
+         * returns immediately instead of sleeping up to 30s for heartbeat.
+         * Without this, a full outbox causes multi-second drain stalls. */
+        if (fragment_publish_queue_ &&
+            uxQueueMessagesWaiting(fragment_publish_queue_) > 0)
+        {
+            notify();
+        }
+
         /* Periodic status heartbeat */
         now = xTaskGetTickCount();
         if ((now - last_status_tick) >= status_interval)
