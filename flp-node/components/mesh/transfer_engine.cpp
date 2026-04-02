@@ -352,10 +352,18 @@ bool TransferEngine::start_file_transfer(const char *filename,
         return true; /* transfer_tick() will publish fragments */
     }
 
-    /* Normal mesh path — include FEC parity fragments */
-    uint16_t parity_frags = static_cast<uint16_t>(
-        (data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
-    transfer_.fragment_count = static_cast<uint16_t>(data_frags + parity_frags);
+    /* Normal mesh path — include FEC parity fragments.
+     *
+     * FEC layout: groups of (FEC_GROUP_SIZE data + 1 parity).
+     * Full groups contribute (FEC_GROUP_SIZE+1) seqs each.
+     * A trailing incomplete group contributes only its data seqs
+     * (no parity slot — the parity position would fall beyond the
+     * advertised fragment_count, creating a phantom seq that the
+     * sender skips but the cloud NACKs forever). */
+    uint16_t full_groups = static_cast<uint16_t>(data_frags / FEC_GROUP_SIZE);
+    uint16_t remaining   = static_cast<uint16_t>(data_frags % FEC_GROUP_SIZE);
+    transfer_.fragment_count = static_cast<uint16_t>(
+        full_groups * (FEC_GROUP_SIZE + 1) + remaining);
     if (transfer_.fragment_count > 60000)
     {
         ESP_LOGE(TAG,

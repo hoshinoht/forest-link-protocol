@@ -121,6 +121,7 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
             slot.acked = false;
             slot.len = 0;
             next_seq_ = prev_next_seq;
+            if (in_flight_ > 0) { in_flight_--; }
             return -1;
         }
     }
