@@ -1,6 +1,6 @@
 #pragma once
 
-#define FLP_VERSION "1.0.1"
+#define FLP_VERSION "1.0.2"
 
 /* Task stack sizes (bytes) */
 #define FLP_MESH_TASK_STACK 8192

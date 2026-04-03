@@ -17,7 +17,7 @@ static constexpr uint8_t DEFAULT_TTL = 8;
  * transport selector must avoid routing oversized packets onto LoRa.
  */
 static constexpr size_t MAX_MTU = 1470;
-static constexpr uint8_t ARQ_WINDOW = 64;
+static constexpr uint8_t ARQ_WINDOW = 128;
 static constexpr uint32_t ARQ_TIMEOUT = 2000;
 static constexpr uint8_t MAX_RETRIES = 12;
 static constexpr uint8_t MAX_NEIGHBORS = 16;

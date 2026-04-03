@@ -45,7 +45,7 @@ inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 namespace flp
 {
 
-static constexpr uint8_t kQueueDepth = 48;
+static constexpr uint16_t kQueueDepth = 256;
 static constexpr int8_t kDefaultRssi = -90;
 static constexpr float kLinkQualityPct = 100.0f;
 
