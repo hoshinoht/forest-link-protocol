@@ -96,8 +96,8 @@ class EspNowTransport : public ITransport
      * separate so fragment bursts can't starve ACK delivery.
      * tx_slot_class_ ring (internal SRAM) tells on_send() which pool to
      * return each slot to.  SPSC ring: write in send(), read in on_send(). */
-    static constexpr uint8_t TX_CTRL_DEPTH = 4;
-    static constexpr uint8_t TX_DATA_DEPTH = 12;
+    static constexpr uint8_t TX_CTRL_DEPTH = 8;
+    static constexpr uint8_t TX_DATA_DEPTH = 20;
     static constexpr uint8_t TX_SLOT_DEPTH = TX_CTRL_DEPTH + TX_DATA_DEPTH;
 
     SemaphoreHandle_t tx_ctrl_slots_ = nullptr;
