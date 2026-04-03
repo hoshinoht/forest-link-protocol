@@ -155,16 +155,22 @@ void EspNowTransport::init()
         return;
     }
 
-    /* TX flow control semaphore: sized to ESP-NOW's internal TX queue depth.
-     * send() takes a slot, on_send() callback returns it.  This makes
-     * NO_MEM structurally impossible and self-adjusts to actual radio
-     * throughput — no budget constants needed in upper layers. */
-    tx_slots_ = xSemaphoreCreateCounting(TX_SLOT_DEPTH, TX_SLOT_DEPTH);
-    if (!tx_slots_)
+    /* Dual-pool TX flow control: ctrl (ACK/NACK) and data (DATA fragments)
+     * have separate semaphores so fragment bursts never starve ACK delivery.
+     * Both semaphores are allocated from the internal heap (FreeRTOS default)
+     * so they are accessible from the WiFi on_send() ISR callback without
+     * PSRAM coherency concerns. */
+    tx_ctrl_slots_ = xSemaphoreCreateCounting(TX_CTRL_DEPTH, TX_CTRL_DEPTH);
+    tx_data_slots_ = xSemaphoreCreateCounting(TX_DATA_DEPTH, TX_DATA_DEPTH);
+    if (!tx_ctrl_slots_ || !tx_data_slots_)
     {
-        ESP_LOGE(TAG, "Failed to create TX semaphore");
+        ESP_LOGE(TAG, "Failed to create TX semaphores");
+        if (tx_ctrl_slots_) { vSemaphoreDelete(tx_ctrl_slots_); tx_ctrl_slots_ = nullptr; }
+        if (tx_data_slots_) { vSemaphoreDelete(tx_data_slots_); tx_data_slots_ = nullptr; }
         return;
     }
+    tx_ring_write_ = 0;
+    tx_ring_read_  = 0;
 
     /* Derive node address from base MAC */
     uint8_t mac[6];
@@ -176,10 +182,9 @@ void EspNowTransport::init()
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(ret));
-        vSemaphoreDelete(tx_slots_);
-        tx_slots_ = nullptr;
-        vQueueDelete(pending_peer_queue_);
-        pending_peer_queue_ = nullptr;
+        vSemaphoreDelete(tx_ctrl_slots_); tx_ctrl_slots_ = nullptr;
+        vSemaphoreDelete(tx_data_slots_); tx_data_slots_ = nullptr;
+        vQueueDelete(pending_peer_queue_); pending_peer_queue_ = nullptr;
         return;
     }
 
@@ -258,10 +263,15 @@ void EspNowTransport::deinit()
         vQueueDelete(pending_peer_queue_);
         pending_peer_queue_ = nullptr;
     }
-    if (tx_slots_)
+    if (tx_ctrl_slots_)
     {
-        vSemaphoreDelete(tx_slots_);
-        tx_slots_ = nullptr;
+        vSemaphoreDelete(tx_ctrl_slots_);
+        tx_ctrl_slots_ = nullptr;
+    }
+    if (tx_data_slots_)
+    {
+        vSemaphoreDelete(tx_data_slots_);
+        tx_data_slots_ = nullptr;
     }
     s_instance = nullptr;
     initialized_ = false;
@@ -344,11 +354,22 @@ void EspNowTransport::on_recv(const esp_now_recv_info_t *info,
 void EspNowTransport::on_send(const esp_now_send_info_t *info,
                               esp_now_send_status_t status)
 {
-    /* Return the TX slot to the semaphore — fires from the WiFi task
-     * after the frame has been transmitted (success or failure). */
-    if (s_instance && s_instance->tx_slots_)
+    /* Return the TX slot to the correct pool by reading the class ring.
+     * Fires from the WiFi task after the frame has been transmitted.
+     * Ring read is safe here because read_idx is only advanced here
+     * (single consumer) and write_idx is only advanced in send() on
+     * mesh_task (single producer). */
+    if (s_instance)
     {
-        xSemaphoreGive(s_instance->tx_slots_);
+        uint8_t ridx = s_instance->tx_ring_read_;
+        bool is_ctrl = s_instance->tx_slot_class_[ridx];
+        s_instance->tx_ring_read_ =
+            static_cast<uint8_t>((ridx + 1) % TX_SLOT_DEPTH);
+
+        SemaphoreHandle_t sem = is_ctrl
+                                    ? s_instance->tx_ctrl_slots_
+                                    : s_instance->tx_data_slots_;
+        if (sem) { xSemaphoreGiveFromISR(sem, nullptr); }
     }
 
     if (s_instance)
@@ -389,19 +410,42 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
         return -1;
     }
 
-    /* Acquire a TX slot from the counting semaphore.
-     * Brief blocking wait (5ms): gives on_send() callback time to
-     * return a slot when the pipeline is saturated, instead of
-     * failing instantly.  5ms is ~2 frame TX times at 1Mbps. */
-    if (tx_slots_ && xSemaphoreTake(tx_slots_, pdMS_TO_TICKS(5)) != pdTRUE)
+    /* Classify packet: control (ACK/NACK/discovery/error) vs data.
+     * PacketType is always the low 6 bits of the first byte. */
+    bool is_ctrl = false;
+    if (len >= 1)
+    {
+        PacketType pt = static_cast<PacketType>(data[0] & 0x3F);
+        is_ctrl = (pt == PacketType::ACK        ||
+                   pt == PacketType::NACK       ||
+                   pt == PacketType::TRANSFER_ACK ||
+                   pt == PacketType::DISCOVERY  ||
+                   pt == PacketType::ROUTE_ERROR ||
+                   pt == PacketType::ROUTE_REPLY ||
+                   pt == PacketType::TRANSFER_DONE);
+    }
+
+    /* Acquire a slot from the appropriate pool.
+     * Control frames wait up to 20ms — they are few but critical.
+     * Data frames wait only 5ms (~2 frame TX times) then back off;
+     * the ARQ/OOW retry budget will re-send on the next tick. */
+    SemaphoreHandle_t sem = is_ctrl ? tx_ctrl_slots_ : tx_data_slots_;
+    TickType_t        wait = is_ctrl ? pdMS_TO_TICKS(20) : pdMS_TO_TICKS(5);
+
+    if (sem && xSemaphoreTake(sem, wait) != pdTRUE)
     {
         tx_semaphore_full_count_.fetch_add(1, std::memory_order_relaxed);
         tx_last_full_peer_.store(peer_addr, std::memory_order_relaxed);
-        ESP_LOGW(TAG, "TX semaphore full (%u slots), deferring send to 0x%04X",
-                 TX_SLOT_DEPTH, peer_addr);
-        maybe_log_tx_diag("sem_full", peer_addr);
+        ESP_LOGW(TAG,
+                 "TX %s pool full, deferring send to 0x%04X",
+                 is_ctrl ? "ctrl" : "data", peer_addr);
+        maybe_log_tx_diag(is_ctrl ? "ctrl_full" : "data_full", peer_addr);
         return -1;
     }
+
+    /* Record slot class so on_send() returns it to the right pool */
+    tx_slot_class_[tx_ring_write_] = is_ctrl;
+    tx_ring_write_ = static_cast<uint8_t>((tx_ring_write_ + 1) % TX_SLOT_DEPTH);
 
     /* Broadcast */
     if (peer_addr == 0xFFFF)
@@ -417,8 +461,11 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
             tx_send_error_count_.fetch_add(1, std::memory_order_relaxed);
             ESP_LOGE(
                 TAG, "ESP-NOW broadcast send failed: %s", esp_err_to_name(err));
-            /* Give back the slot — esp_now_send failed, on_send won't fire */
-            if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+            /* Give back the slot — esp_now_send failed, on_send won't fire.
+             * Rewind the ring write pointer so the slot record is consistent. */
+            tx_ring_write_ = static_cast<uint8_t>(
+                (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
+            if (sem) { xSemaphoreGive(sem); }
             maybe_log_tx_diag("bcast_err", peer_addr);
             return -1;
         }
@@ -434,7 +481,9 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
     {
         tx_send_error_count_.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGW(TAG, "Peer 0x%04X not found in table", peer_addr);
-        if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+        tx_ring_write_ = static_cast<uint8_t>(
+            (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
+        if (sem) { xSemaphoreGive(sem); }
         maybe_log_tx_diag("peer_miss", peer_addr);
         return -1;
     }
@@ -448,7 +497,9 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
                  peer_addr,
                  esp_err_to_name(err));
         /* Give back — esp_now_send failed, on_send won't fire */
-        if (tx_slots_) { xSemaphoreGive(tx_slots_); }
+        tx_ring_write_ = static_cast<uint8_t>(
+            (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
+        if (sem) { xSemaphoreGive(sem); }
         maybe_log_tx_diag("send_err", peer_addr);
         return -1;
     }

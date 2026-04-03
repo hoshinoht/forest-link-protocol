@@ -320,15 +320,16 @@ extern "C" void app_main()
                             nullptr,
                             1);
 #if !CONFIG_FLP_WIFI_DISABLED
-    /* Pin mqtt_task to CPU1 as well — TLS crypto is CPU-intensive and
-     * should not block WiFi radio servicing on CPU0. */
+    /* Pin mqtt_task to CPU0 — lwIP/TCP stack already runs on CPU0, so
+     * keeping MQTT I/O on the same core avoids cross-core IPC on every
+     * TCP call.  mesh_task gets uncontested CPU1 for ARQ ticks. */
     xTaskCreatePinnedToCore(mqtt_task,
                             "mqtt_task",
                             FLP_MQTT_TASK_STACK,
                             &mqtt_client,
                             FLP_MQTT_TASK_PRIORITY,
                             nullptr,
-                            1);
+                            0);
 #endif
     xTaskCreate(uart_ingest_task,
                 "uart_ingest",

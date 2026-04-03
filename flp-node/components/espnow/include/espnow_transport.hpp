@@ -63,11 +63,17 @@ class EspNowTransport : public ITransport
 
     int8_t get_peer_rssi(uint16_t peer_addr) const;
 
-    /* TX semaphore diagnostics: slots currently available (0 = all busy) */
+    /* TX semaphore diagnostics: total slots currently available across both
+     * pools (ctrl + data).  0 = pipeline fully saturated. */
     uint8_t get_tx_slots_available() const
     {
-        if (!tx_slots_) { return TX_SLOT_DEPTH; }
-        return static_cast<uint8_t>(uxSemaphoreGetCount(tx_slots_));
+        uint8_t ctrl = tx_ctrl_slots_
+                           ? static_cast<uint8_t>(uxSemaphoreGetCount(tx_ctrl_slots_))
+                           : TX_CTRL_DEPTH;
+        uint8_t data = tx_data_slots_
+                           ? static_cast<uint8_t>(uxSemaphoreGetCount(tx_data_slots_))
+                           : TX_DATA_DEPTH;
+        return static_cast<uint8_t>(ctrl + data);
     }
 
   private:
@@ -86,24 +92,20 @@ class EspNowTransport : public ITransport
         int8_t rssi;
     };
 
-    /*
-     * Counting semaphore for ESP-NOW TX flow control.
-     *
-     * ESP-NOW has a small internal TX queue (~5 frames).  When full,
-     * esp_now_send() returns ESP_ERR_ESPNOW_NO_MEM.  Instead of guessing
-     * per-tick send budgets, we use a counting semaphore sized to the
-     * radio's actual TX depth.
-     *
-     * send():    xSemaphoreTake(tx_slots_, 0)  — acquire a slot
-     *            esp_now_send(...)
-     * on_send(): xSemaphoreGive(tx_slots_)     — frame TX'd, slot freed
-     *
-     * This provides distributed mutual exclusion (Coulouris §15.2) on the
-     * shared radio TX buffer: all code paths that call send() are naturally
-     * throttled without any budget constants or coordination.
-     */
-    static constexpr uint8_t TX_SLOT_DEPTH = 16;
-    SemaphoreHandle_t tx_slots_ = nullptr;
+    /* Dual-pool TX flow control: ctrl (ACK/NACK) and data (DATA) are
+     * separate so fragment bursts can't starve ACK delivery.
+     * tx_slot_class_ ring (internal SRAM) tells on_send() which pool to
+     * return each slot to.  SPSC ring: write in send(), read in on_send(). */
+    static constexpr uint8_t TX_CTRL_DEPTH = 4;
+    static constexpr uint8_t TX_DATA_DEPTH = 12;
+    static constexpr uint8_t TX_SLOT_DEPTH = TX_CTRL_DEPTH + TX_DATA_DEPTH;
+
+    SemaphoreHandle_t tx_ctrl_slots_ = nullptr;
+    SemaphoreHandle_t tx_data_slots_ = nullptr;
+
+    bool    tx_slot_class_[TX_SLOT_DEPTH] = {}; /* true=ctrl, false=data */
+    uint8_t tx_ring_write_ = 0;
+    uint8_t tx_ring_read_  = 0;
 
     PeerInfo peers_[ESPNOW_MAX_PEERS] = {};
     uint8_t peer_count_ = 0;
