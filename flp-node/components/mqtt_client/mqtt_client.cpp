@@ -761,6 +761,8 @@ bool MqttClient::publish_fragment(uint16_t session_id,
     if (!data || !filename || (len == 0U))
     {
         ESP_LOGW(TAG, "publish_fragment: invalid args for seq=%u", seq);
+        // print out the seq to see whats wrong
+        ESP_LOGW(TAG, "data: {seq=%u, data=%p, len=%zu, filename=%s, session_id=%u, src_node=%u}", seq, (void *)data, len, filename, session_id, src_node);
         return false;
     }
 

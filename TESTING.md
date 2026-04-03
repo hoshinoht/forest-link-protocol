@@ -379,17 +379,17 @@ curl -u admin:<MQTT_ADMIN_PASS> -X POST https://<admin_hostname>/api/cmd/<board4
 
 Copy this table for each experiment run:
 
-| Metric | Exp 1 (1:1) | Exp 2 (2:1) | Exp 3 (3:1) | Exp 4 (4:2) |
-|--------|-------------|-------------|-------------|-------------|
-| File size (bytes) | | | | |
-| Total fragments | | | | |
-| Transfer time (s) | | | | |
-| Throughput (KB/s) | | | | |
-| Exit nodes used | 1 | 1 | 1 | 2 |
-| Hop count | 0 | 1 | 2 | 2 |
-| ARQ retransmissions | | | | |
-| Fragments lost | | | | |
-| Downlink RTT (ms) | | | | |
+| Metric              | Exp 1 (1:1) | Exp 2 (2:1) | Exp 3 (3:1) | Exp 4 (4:2) |
+| ------------------- | ----------- | ----------- | ----------- | ----------- |
+| File size (bytes)   |             |             |             |             |
+| Total fragments     |             |             |             |             |
+| Transfer time (s)   |             |             |             |             |
+| Throughput (KB/s)   |             |             |             |             |
+| Exit nodes used     | 1           | 1           | 1           | 2           |
+| Hop count           | 0           | 1           | 2           | 2           |
+| ARQ retransmissions |             |             |             |             |
+| Fragments lost      |             |             |             |             |
+| Downlink RTT (ms)   |             |             |             |             |
 
 ### Expected Trends
 
@@ -402,20 +402,20 @@ Copy this table for each experiment run:
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---------|-------|
-| OLED blank | Verify SDA=18, SCL=17. Delete `sdkconfig` and rebuild |
-| Wrong role after flash | Delete `sdkconfig`, rebuild using the correct exit or relay workflow, then reflash |
-| `W:--` on exit node | WiFi SSID/password wrong, or upstream internet unavailable |
-| Relay shows `C--` / `D--` | Discovery not complete. Wait longer, check range, and verify the intended topology |
-| Mesh line shows `N0` | Boards not in range, or WiFi channel mismatch. Check `FLP_ESPNOW_CHANNEL` |
-| Dashboard/API unreachable | Check `cloud-admin` is running, tunnel hostnames resolve, and Basic Auth uses user `admin` with `MQTT_ADMIN_PASS` |
-| No transfer on backend | Check broker URI/credentials, backend is running, exit shows `W:OK`, and serial shows `MQTT connected to broker` |
-| Transfer stuck 0% | No exit node elected. Check exit node is powered and in range |
-| Only 1 exit in Exp 4 | Second exit node may be out of LoRa range for TRANSFER_AD. Move closer |
-| Downlink cmd not received | Target address wrong. Check node addr on OLED (`FLP-XXXX`, hex) |
-| Downlink telemetry works but LED does not | Ensure firmware includes `cmd=4` support and `FLP_LED_GPIO` is not disabled |
-| Fragments on wrong topic | Each exit node publishes to its own `flp/<addr>/file/data`. This is expected |
+| Symptom                                   | Check                                                                                                             |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| OLED blank                                | Verify SDA=18, SCL=17. Delete `sdkconfig` and rebuild                                                             |
+| Wrong role after flash                    | Delete `sdkconfig`, rebuild using the correct exit or relay workflow, then reflash                                |
+| `W:--` on exit node                       | WiFi SSID/password wrong, or upstream internet unavailable                                                        |
+| Relay shows `C--` / `D--`                 | Discovery not complete. Wait longer, check range, and verify the intended topology                                |
+| Mesh line shows `N0`                      | Boards not in range, or WiFi channel mismatch. Check `FLP_ESPNOW_CHANNEL`                                         |
+| Dashboard/API unreachable                 | Check `cloud-admin` is running, tunnel hostnames resolve, and Basic Auth uses user `admin` with `MQTT_ADMIN_PASS` |
+| No transfer on backend                    | Check broker URI/credentials, backend is running, exit shows `W:OK`, and serial shows `MQTT connected to broker`  |
+| Transfer stuck 0%                         | No exit node elected. Check exit node is powered and in range                                                     |
+| Only 1 exit in Exp 4                      | Second exit node may be out of LoRa range for TRANSFER_AD. Move closer                                            |
+| Downlink cmd not received                 | Target address wrong. Check node addr on OLED (`FLP-XXXX`, hex)                                                   |
+| Downlink telemetry works but LED does not | Ensure firmware includes `cmd=4` support and `FLP_LED_GPIO` is not disabled                                       |
+| Fragments on wrong topic                  | Each exit node publishes to its own `flp/<addr>/file/data`. This is expected                                      |
 
 ### Evidence to Collect for Debugging
 
