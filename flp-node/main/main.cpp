@@ -310,19 +310,25 @@ extern "C" void app_main()
 
     /* ── Launch tasks ─────────────────────────────────────────────────── */
 
-    xTaskCreate(mesh_task,
-                "mesh_task",
-                FLP_MESH_TASK_STACK,
-                &mesh_manager,
-                FLP_MESH_TASK_PRIORITY,
-                nullptr);
+    /* Pin mesh_task to CPU1 so it never competes with WiFi/ESP-NOW
+     * callbacks on CPU0.  Faster TX slot turnover + faster ARQ ticks. */
+    xTaskCreatePinnedToCore(mesh_task,
+                            "mesh_task",
+                            FLP_MESH_TASK_STACK,
+                            &mesh_manager,
+                            FLP_MESH_TASK_PRIORITY,
+                            nullptr,
+                            1);
 #if !CONFIG_FLP_WIFI_DISABLED
-    xTaskCreate(mqtt_task,
-                "mqtt_task",
-                FLP_MQTT_TASK_STACK,
-                &mqtt_client,
-                FLP_MQTT_TASK_PRIORITY,
-                nullptr);
+    /* Pin mqtt_task to CPU1 as well — TLS crypto is CPU-intensive and
+     * should not block WiFi radio servicing on CPU0. */
+    xTaskCreatePinnedToCore(mqtt_task,
+                            "mqtt_task",
+                            FLP_MQTT_TASK_STACK,
+                            &mqtt_client,
+                            FLP_MQTT_TASK_PRIORITY,
+                            nullptr,
+                            1);
 #endif
     xTaskCreate(uart_ingest_task,
                 "uart_ingest",
