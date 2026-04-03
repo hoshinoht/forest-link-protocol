@@ -165,6 +165,7 @@ func RunEngine(
 
 	// Stall NACK cooldown: don't flood every second
 	var lastStallNACKTime float64
+	var stallNackRetries int
 	recentlyCompletedMeta := make(map[string]time.Time)
 	recentlyCompletedSession := make(map[string]time.Time)
 
@@ -220,6 +221,8 @@ func RunEngine(
 		sr.StartSession(s.ChunkCount)
 		reassembler = NewFileReassembler(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, s.CRC32, s.FragmentSize)
 		lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
+		lastStallNACKTime = 0
+		stallNackRetries = 0
 		progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, 0, 0, true, s.StartedAt)
 		log.Printf("[transfer] started session %s (%s, %d bytes, %d chunks)",
 			s.SessionID, s.Filename, s.TotalSize, s.ChunkCount)
@@ -388,16 +391,23 @@ func RunEngine(
 			// D1+B3 fix: stall-based end-to-end NACK bridge.
 			// If no chunks arrived for 5s but transfer is incomplete,
 			// publish missing seqs so exit nodes can re-request from source.
-			// Cooldown: only fire once per 10s to avoid flooding MQTT.
+			// Cooldown: exponential backoff (10s, 20s, 40s...) to avoid flooding.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
 				now := float64(time.Now().UnixMilli()) / 1000.0
-				if now-lastStallNACKTime >= 10.0 {
+
+				cooldown := 4.0 * float64(int(1)<<stallNackRetries)
+				if cooldown > 32.0 {
+					cooldown = 32.0
+				}
+
+				if now-lastStallNACKTime >= cooldown {
 					gaps := sr.CheckStall(lastChunkTime, 5.0)
 					if len(gaps) > 0 {
 						mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)
 						lastStallNACKTime = now
-						log.Printf("[transfer] stall detected, published %d NACKs for session %s",
-							len(gaps), tq.ActiveTransfer.SessionID)
+						stallNackRetries++
+						log.Printf("[transfer] stall detected, published %d NACKs for session %s (cooldown: %.1fs)",
+							len(gaps), tq.ActiveTransfer.SessionID, cooldown)
 					}
 				}
 			}
