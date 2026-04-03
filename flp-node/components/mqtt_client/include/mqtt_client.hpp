@@ -146,10 +146,12 @@ class MqttClient
 
     /* Drain one cloud NACK (returns true if item was available) */
     bool drain_cloud_nack(uint16_t session_id, uint16_t &seq_out);
+    bool requeue_cloud_nack(uint16_t session_id, uint16_t seq);
 
     /* Drain one deferred fragment ACK (exit node: accepted by local MQTT
      * client/outbox). */
     bool drain_fragment_ack(uint16_t session_id, uint16_t &seq_out);
+    bool requeue_fragment_ack(uint16_t session_id, uint16_t seq);
 
     /* Session consensus: cloud confirmed transfer complete.
      * Returns true (once) when the cloud has published TRANSFER_COMPLETE

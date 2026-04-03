@@ -799,17 +799,11 @@ void MqttClient::process_fragment_publish()
     }
 
     /*
-     * Limit publishes per run() iteration so bulk fragment traffic does not
-     * monopolize the MQTT task. Fragment data uses QoS 0, so it is sent once
-     * and does not rely on the ESP-MQTT retransmit outbox; recovery is handled
-     * by the cloud NACK path.
+     * Fragment data uses QoS 0, so it is sent once and does not rely on the 
+     * ESP-MQTT retransmit outbox; recovery is handled by the cloud NACK path.
      */
-    static constexpr uint8_t MAX_PUBLISHES_PER_TICK = 32;
-    uint8_t published = 0;
-
     FragmentPublishRequest req;
-    while (published < MAX_PUBLISHES_PER_TICK &&
-           xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
+    while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
     {
         uint16_t active_session =
             active_transfer_session_.load(std::memory_order_acquire);
@@ -875,7 +869,6 @@ void MqttClient::process_fragment_publish()
                  req.len,
                  msg_id,
                  MQTT_FRAGMENT_DATA_QOS);
-        published++;
     }
 }
 
@@ -1030,6 +1023,13 @@ bool MqttClient::drain_cloud_nack(uint16_t session_id, uint16_t &seq_out)
     return false;
 }
 
+bool MqttClient::requeue_cloud_nack(uint16_t session_id, uint16_t seq)
+{
+    if (!nack_queue_) return false;
+    CloudNackItem item = {session_id, seq};
+    return xQueueSendToFront(nack_queue_, &item, 0) == pdTRUE;
+}
+
 bool MqttClient::drain_fragment_ack(uint16_t session_id, uint16_t &seq_out)
 {
     if (!fragment_ack_queue_)
@@ -1052,6 +1052,13 @@ bool MqttClient::drain_fragment_ack(uint16_t session_id, uint16_t &seq_out)
         xQueueSend(fragment_ack_queue_, &item, 0);
     }
     return false;
+}
+
+bool MqttClient::requeue_fragment_ack(uint16_t session_id, uint16_t seq)
+{
+    if (!fragment_ack_queue_) return false;
+    FragmentAckItem item = {session_id, seq};
+    return xQueueSendToFront(fragment_ack_queue_, &item, 0) == pdTRUE;
 }
 
 bool MqttClient::consume_transfer_complete(uint16_t session_id)

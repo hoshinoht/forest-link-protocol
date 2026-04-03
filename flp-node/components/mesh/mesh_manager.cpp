@@ -198,6 +198,14 @@ void MeshManager::init()
             }
             return false;
         });
+    transfer_engine_.set_cloud_nack_requeue(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->requeue_cloud_nack(session_id, seq);
+            }
+        });
 
     /* Wire up deferred fragment ACK drain (exit node: ACK after MQTT publish) */
     transfer_engine_.set_fragment_ack_drain(
@@ -208,6 +216,14 @@ void MeshManager::init()
                 return mqtt_client_->drain_fragment_ack(session_id, seq_out);
             }
             return false;
+        });
+    transfer_engine_.set_fragment_ack_requeue(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->requeue_fragment_ack(session_id, seq);
+            }
         });
 
     /* Wire up session consensus: cloud TRANSFER_COMPLETE → exit → source.

@@ -569,7 +569,16 @@ void TransferEngine::tick(uint32_t now_ms)
         uint16_t nack_seq = 0;
         while (drain_cloud_nack_fn_(active_session_id_, nack_seq))
         {
-            send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
+            int rc = send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
+            if (rc < 0)
+            {
+                ESP_LOGD(TAG, "NACK paused: TX slots full (seq=%u)", nack_seq);
+                if (requeue_cloud_nack_fn_)
+                {
+                    requeue_cloud_nack_fn_(active_session_id_, nack_seq);
+                }
+                break; /* TX slots full — drain more next tick */
+            }
             ESP_LOGI(TAG, "Exit->source NACK for seq=%u", nack_seq);
             /* Cloud NACKs prove the cloud link is alive — refresh the
              * activity timestamp so the stall detector doesn't fire
@@ -593,6 +602,10 @@ void TransferEngine::tick(uint32_t now_ms)
             {
                 ESP_LOGD(TAG, "Deferred ACK paused: TX slots full (seq=%u)",
                          ack_seq);
+                if (requeue_fragment_ack_fn_)
+                {
+                    requeue_fragment_ack_fn_(active_session_id_, ack_seq);
+                }
                 break; /* TX slots full — drain more next tick */
             }
             ESP_LOGD(TAG, "Deferred ACK for seq=%u", ack_seq);
