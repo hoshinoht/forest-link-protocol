@@ -186,6 +186,42 @@ static void test_reset_sender_clears_stride(void)
     TEST_ASSERT_EQUAL_UINT16(1, arq.get_base_seq()); /* stride=1, no skip */
 }
 
+/* Active modulo-slot aliases must be rejected until the old seq is cleared. */
+static void test_active_slot_alias_is_rejected(void)
+{
+    SelectiveRepeat arq;
+    arq.init(8, 2000);
+
+    uint8_t data[16] = {0};
+    TEST_ASSERT_EQUAL(0, arq.send_fragment(0, data, 16));
+    TEST_ASSERT_TRUE(arq.can_send_sequence(0));
+    TEST_ASSERT_FALSE(arq.can_send_sequence(8));
+    TEST_ASSERT_EQUAL(-1, arq.send_fragment(8, data, 16));
+
+    arq.handle_ack(0);
+    TEST_ASSERT_TRUE(arq.can_send_sequence(8));
+    TEST_ASSERT_EQUAL(0, arq.send_fragment(8, data, 16));
+}
+
+/* Sparse sender ownership must advance to the next real active seq rather
+ * than walking unsent gaps in the numeric seq range. */
+static void test_sparse_sender_base_tracks_active_sequences(void)
+{
+    SelectiveRepeat arq;
+    arq.init(64, 2000);
+
+    uint8_t data[16] = {0};
+    TEST_ASSERT_EQUAL(0, arq.send_fragment(10, data, 16));
+    TEST_ASSERT_EQUAL(0, arq.send_fragment(74, data, 16));
+    TEST_ASSERT_EQUAL_UINT16(10, arq.get_base_seq());
+
+    arq.handle_ack(10);
+    TEST_ASSERT_EQUAL_UINT16(74, arq.get_base_seq());
+
+    arq.handle_ack(74);
+    TEST_ASSERT_EQUAL_UINT16(75, arq.get_base_seq());
+}
+
 /* =========================================================================
  * Test runner
  * ====================================================================== */
@@ -198,4 +234,6 @@ void run_selective_repeat_tests(void)
     RUN_TEST(test_stride_base_advancement);
     RUN_TEST(test_stride_1_unchanged_behavior);
     RUN_TEST(test_reset_sender_clears_stride);
+    RUN_TEST(test_active_slot_alias_is_rejected);
+    RUN_TEST(test_sparse_sender_base_tracks_active_sequences);
 }

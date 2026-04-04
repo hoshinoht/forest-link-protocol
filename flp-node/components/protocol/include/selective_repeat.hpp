@@ -19,6 +19,7 @@ struct FragmentSlot
     uint8_t data[MAX_MTU];
     size_t len = 0;
     uint32_t send_time_ms = 0;
+    uint16_t seq_tag = UINT16_MAX;
     bool acked = false;
     bool sent = false;
     uint8_t retries = 0;
@@ -61,8 +62,15 @@ class SelectiveRepeat
     {
         return next_seq_;
     }
+    bool can_send_sequence(uint16_t seq) const;
+    bool contains_sequence(uint16_t seq) const;
+    bool has_pending() const
+    {
+        return in_flight_ > 0;
+    }
     bool sender_window_full() const;
     uint16_t sender_window_used() const;
+    uint16_t snapshot_pending_sequences(uint16_t *out, uint16_t max) const;
     void reset_sender();
 
     /* Phase 3: get send timestamp for RTT computation */
@@ -70,6 +78,10 @@ class SelectiveRepeat
     {
         if (!window_) return 0;
         uint8_t idx = seq % window_size_;
+        if (!window_[idx].sent || window_[idx].seq_tag != seq)
+        {
+            return 0;
+        }
         return window_[idx].send_time_ms;
     }
 
@@ -107,6 +119,11 @@ class SelectiveRepeat
         timeout_ms_ = timeout_ms;
     }
 
+    void set_min_rto_floor(uint32_t min_rto_floor_ms)
+    {
+        min_rto_floor_ms_ = min_rto_floor_ms;
+    }
+
     /* True if any fragment has exceeded MAX_RETRIES without ACK */
     bool is_sender_failed() const
     {
@@ -122,6 +139,9 @@ class SelectiveRepeat
     }
 
   private:
+    void clear_slot(FragmentSlot &slot);
+    void recompute_sender_bounds();
+
     uint32_t now_ms() const
     {
         return static_cast<uint32_t>(esp_timer_get_time() / 1000);
@@ -158,6 +178,7 @@ class SelectiveRepeat
     bool rtt_initialized_ = false;  /* first sample bootstraps SRTT */
     static constexpr uint32_t RTO_MIN_MS = 200;
     static constexpr uint32_t RTO_MAX_MS = 5000;
+    uint32_t min_rto_floor_ms_ = RTO_MIN_MS;
 
     /* Receiver state */
     uint8_t *reassembly_buf_ = nullptr;

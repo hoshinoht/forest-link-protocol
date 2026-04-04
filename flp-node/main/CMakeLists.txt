@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "main.cpp" "flp_client.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         nvs_flash

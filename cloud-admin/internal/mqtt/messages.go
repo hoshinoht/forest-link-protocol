@@ -7,6 +7,7 @@ import "encoding/json"
 type FileMeta struct {
 	NodeID       string      `json:"-"`
 	SessionID    json.Number `json:"session_id"`
+	SourceNode   string      `json:"src_node,omitempty"`
 	Filename     string      `json:"filename"`
 	TotalSize    int         `json:"total_size"`
 	ChunkCount   int         `json:"chunk_count"`

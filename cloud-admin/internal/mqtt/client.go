@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
@@ -22,6 +24,9 @@ type Client struct {
 	chunkCh  chan<- FileChunk
 	topoCh   chan<- TopoMsg
 	metricCh chan<- MetricMsg
+
+	sourceMu            sync.RWMutex
+	sessionSourceByExit map[string]string
 }
 
 // NewClient creates a Client that fans out received messages to the provided channels.
@@ -38,7 +43,25 @@ func NewClient(broker string, port int, username, password string,
 		chunkCh:  chunkCh,
 		topoCh:   topoCh,
 		metricCh: metricCh,
+		sessionSourceByExit: make(map[string]string),
 	}
+}
+
+func normalizeNodeID(node string) string {
+	n := strings.TrimSpace(strings.ToLower(node))
+	n = strings.TrimPrefix(n, "0x")
+	if n == "" {
+		return ""
+	}
+	v, err := strconv.ParseUint(n, 16, 16)
+	if err != nil {
+		return n
+	}
+	return fmt.Sprintf("%04x", uint16(v))
+}
+
+func makeExitSessionKey(exitNode string, sessionID uint16) string {
+	return fmt.Sprintf("%s|%d", exitNode, sessionID)
 }
 
 // Connect establishes the MQTT connection and subscribes to all FLP topics.
@@ -118,7 +141,18 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 				log.Printf("[mqtt] failed to parse file meta from %s: %v", nodeID, err)
 				return
 			}
-			fm.NodeID = nodeID
+			sourceNode := normalizeNodeID(fm.SourceNode)
+			if sourceNode == "" {
+				sourceNode = nodeID
+			}
+			fm.NodeID = sourceNode
+			if sid64, err := fm.SessionID.Int64(); err == nil {
+				sid := uint16(sid64)
+				key := makeExitSessionKey(nodeID, sid)
+				c.sourceMu.Lock()
+				c.sessionSourceByExit[key] = sourceNode
+				c.sourceMu.Unlock()
+			}
 			select {
 			case c.metaCh <- fm:
 			default:
@@ -136,8 +170,15 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 			seq := binary.LittleEndian.Uint16(payload[2:4])
 			data := make([]byte, len(payload)-4)
 			copy(data, payload[4:])
+			canonicalNode := nodeID
+			key := makeExitSessionKey(nodeID, sessionID)
+			c.sourceMu.RLock()
+			if src, ok := c.sessionSourceByExit[key]; ok && src != "" {
+				canonicalNode = src
+			}
+			c.sourceMu.RUnlock()
 			select {
-			case c.chunkCh <- FileChunk{NodeID: nodeID, SessionID: sessionID, SeqNum: seq, Data: data}:
+			case c.chunkCh <- FileChunk{NodeID: canonicalNode, SessionID: sessionID, SeqNum: seq, Data: data}:
 			default:
 				log.Printf("[mqtt] chunkCh full, dropping chunk seq=%d from %s", seq, nodeID)
 			}

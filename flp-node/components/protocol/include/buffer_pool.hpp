@@ -42,14 +42,11 @@ class BufferPool
 {
   public:
     /*
-     * Size the slab pool to cover 48-deep dual-priority forwarding queues.
-     * Max in-flight = 2 × 48 = 96 slab pointers; 660 legacy slabs yields
-     * ~117 actual slabs (~174 KB PSRAM), leaving ~21 spare for RX bursts.
+     * Allocate 512 KB for buffering to reduce PSRAM pressure during startup.
      */
-    static constexpr size_t POOL_BUDGET_BYTES =
-        660 * sizeof(detail::LegacyBufferSlab);
-    static constexpr uint8_t POOL_SIZE =
-        static_cast<uint8_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
+    static constexpr size_t POOL_BUDGET_BYTES = 512 * 1024; // 512 KB
+    static constexpr uint16_t POOL_SIZE =
+        static_cast<uint16_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
                                  ? (POOL_BUDGET_BYTES / sizeof(BufferSlab))
                                  : 1);
 

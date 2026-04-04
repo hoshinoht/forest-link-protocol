@@ -1,10 +1,12 @@
 package transfer
 
 import (
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -228,13 +230,13 @@ func (r *FileReassembler) DiagnoseCRC() {
 	actual := crc32.ChecksumIEEE(r.Buffer[:r.TotalSize])
 	fmt.Printf("[diag] CRC expected=%d (0x%08X) actual=%d (0x%08X)\n",
 		r.ExpectedCRC, r.ExpectedCRC, actual, actual)
-	fmt.Printf("[diag] Buffer size=%d ChunkSize=%d ChunkCount=%d Received=%d\n",
-		r.TotalSize, r.ChunkSize, r.ChunkCount, r.ChunksReceived)
 
 	dataChunkCount := (r.TotalSize + r.ChunkSize - 1) / r.ChunkSize
-	fmt.Printf("[diag] DataChunkCount=%d FECActive=%v\n",
-		dataChunkCount, r.ChunkCount > dataChunkCount)
+	fecActive := r.ChunkCount > dataChunkCount
+	fmt.Printf("[diag] Buffer=%d bytes ChunkSize=%d ChunkCount=%d DataChunks=%d FEC=%v Received=%d DataReceived=%d\n",
+		r.TotalSize, r.ChunkSize, r.ChunkCount, dataChunkCount, fecActive, r.ChunksReceived, r.DataChunksReceived)
 
+	// Missing seqs
 	missing := []int{}
 	for seq := 0; seq < r.ChunkCount; seq++ {
 		if r.Bitmap[seq/8]&(1<<uint(seq%8)) == 0 {
@@ -247,6 +249,46 @@ func (r *FileReassembler) DiagnoseCRC() {
 		fmt.Printf("[diag] All %d seqs received\n", r.ChunkCount)
 	}
 
+	// For each missing data seq, show the buffer region it maps to
+	for _, seq := range missing {
+		isParity := fecActive && (seq%(FECGroupSize+1) == FECGroupSize)
+		if isParity {
+			continue // parity doesn't map to buffer
+		}
+		var dataIdx int
+		if fecActive {
+			group := seq / (FECGroupSize + 1)
+			idxInGroup := seq % (FECGroupSize + 1)
+			dataIdx = group*FECGroupSize + idxInGroup
+		} else {
+			dataIdx = seq
+		}
+		offset := dataIdx * r.ChunkSize
+		end := offset + r.ChunkSize
+		if end > r.TotalSize {
+			end = r.TotalSize
+		}
+		if offset >= r.TotalSize {
+			fmt.Printf("[diag] Missing seq=%d -> dataIdx=%d (beyond EOF)\n", seq, dataIdx)
+			continue
+		}
+		region := r.Buffer[offset:end]
+		allZero := true
+		for _, b := range region {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		snip := 32
+		if snip > len(region) {
+			snip = len(region)
+		}
+		fmt.Printf("[diag] Missing seq=%d -> dataIdx=%d offset=%d..%d zero=%v first32=%q\n",
+			seq, dataIdx, offset, end, allZero, region[:snip])
+	}
+
+	// Zero-filled chunk scan
 	zeroRuns := 0
 	for i := 0; i < r.TotalSize; i += r.ChunkSize {
 		end := i + r.ChunkSize
@@ -269,35 +311,27 @@ func (r *FileReassembler) DiagnoseCRC() {
 		fmt.Printf("[diag] No zero-filled gaps in buffer\n")
 	}
 
+	// Head and tail context
 	n := 64
 	if n > r.TotalSize {
 		n = r.TotalSize
 	}
 	fmt.Printf("[diag] First %d bytes: %q\n", n, r.Buffer[:n])
 
-	expected := make([]byte, n)
-	for i := 0; i < n; i++ {
-		expected[i] = byte('A' + (i % 26))
+	tailStart := r.TotalSize - r.ChunkSize
+	if tailStart < 0 {
+		tailStart = 0
 	}
-	fmt.Printf("[diag] Expected first %d: %q\n", n, expected)
-
-	for i := 0; i < r.TotalSize; i++ {
-		exp := byte('A' + (i % 26))
-		if r.Buffer[i] != exp {
-			end := i + 32
-			if end > r.TotalSize {
-				end = r.TotalSize
-			}
-			fmt.Printf("[diag] First mismatch at byte %d: got=0x%02X expected=0x%02X (seq~%d offset_in_chunk=%d)\n",
-				i, r.Buffer[i], exp, i/r.ChunkSize, i%r.ChunkSize)
-			fmt.Printf("[diag] Context [%d..%d]: %q\n", i, end, r.Buffer[i:end])
-			break
-		}
+	tailSnip := 64
+	if tailSnip > r.TotalSize-tailStart {
+		tailSnip = r.TotalSize - tailStart
 	}
+	fmt.Printf("[diag] Last %d bytes (offset %d): %q\n", tailSnip, tailStart, r.Buffer[tailStart:tailStart+tailSnip])
 }
 
-// Save writes the reassembled file to outputDir/<filename>.
-func (r *FileReassembler) Save(outputDir string) (string, error) {
+// Save writes the reassembled file to
+// outputDir/<senderID>_<filename> with duplicate-safe suffixing.
+func (r *FileReassembler) Save(outputDir, senderID string) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
@@ -306,7 +340,26 @@ func (r *FileReassembler) Save(outputDir string) (string, error) {
 	if safe == "." || safe == "/" {
 		safe = fmt.Sprintf("session_%s.bin", r.SessionID)
 	}
-	path := filepath.Join(outputDir, safe)
+
+	safeSender := filepath.Base(strings.TrimSpace(senderID))
+	if safeSender == "" || safeSender == "." || safeSender == "/" {
+		safeSender = "unknown"
+	}
+
+	baseName := fmt.Sprintf("%s_%s", safeSender, safe)
+	path := filepath.Join(outputDir, baseName)
+	if _, err := os.Stat(path); err == nil {
+		ext := filepath.Ext(baseName)
+		stem := strings.TrimSuffix(baseName, ext)
+		for i := 1; ; i++ {
+			candidate := filepath.Join(outputDir, fmt.Sprintf("%s_%d%s", stem, i, ext))
+			if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+				path = candidate
+				break
+			}
+		}
+	}
+
 	if err := os.WriteFile(path, r.Buffer[:r.TotalSize], 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}

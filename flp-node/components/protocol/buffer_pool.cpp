@@ -5,6 +5,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "buf_pool";
 
@@ -20,10 +22,13 @@ void BufferPool::init()
         slabs_ = nullptr;
     }
 
-    /* Allocate slab array in PSRAM */
-    slabs_ = static_cast<BufferSlab *>(heap_caps_calloc(
-        POOL_SIZE, sizeof(BufferSlab),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    /*
+     * Allocate raw slab storage in PSRAM.
+     * Avoid heap_caps_calloc() because zeroing the full pool in one long
+     * memset can starve IDLE0 during boot and trip task WDT.
+     */
+    slabs_ = static_cast<BufferSlab *>(heap_caps_malloc(
+        POOL_SIZE * sizeof(BufferSlab), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!slabs_)
     {
         ESP_LOGE(TAG, "PSRAM alloc failed for buffer pool (%u x %uB) — cannot continue",
@@ -36,12 +41,19 @@ void BufferPool::init()
      * and build the Treiber free-stack: slab[0] -> slab[1] -> ... -> slab[N-1].
      * top_ points to the last slab (stack grows toward index 0).
      */
-    for (uint8_t i = 0; i < POOL_SIZE; i++)
+    for (uint16_t i = 0; i < POOL_SIZE; i++)
     {
-        new (&slabs_[i]) BufferSlab{};
+        /* Default-initialize: keeps atomics/lifetime correct without zeroing payload bytes. */
+        new (&slabs_[i]) BufferSlab;
         slabs_[i].next_free.store(
             (i + 1 < POOL_SIZE) ? static_cast<int32_t>(i + 1) : -1,
             std::memory_order_relaxed);
+
+        /* Yield periodically so IDLE0 can run and feed the task watchdog. */
+        if ((i & 0x1F) == 0x1F)
+        {
+            vTaskDelay(1);
+        }
     }
     /* Head of free list is slab[0] */
     top_.store(0, std::memory_order_release);

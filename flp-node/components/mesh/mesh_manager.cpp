@@ -19,6 +19,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "itransport.hpp"
 #include "mqtt_client.hpp"
 
 using namespace flp;
@@ -125,6 +126,8 @@ void MeshManager::init()
     assert(display_mutex_);
     display_snapshot_.filename = display_filename_buf_;
     display_filename_buf_[0] = '\0';
+    display_snapshot_.topic_msg = display_topic_msg_buf_;
+    display_topic_msg_buf_[0] = '\0';
 
     /* Pass dual queues and buffer pool to transports */
     espnow_.set_packet_queue(hi_pri_queue_); /* fallback */
@@ -159,7 +162,12 @@ void MeshManager::init()
                                  (mqtt_client_ && mqtt_client_->is_fragment_queue_congested());
                 seq_num = seq_with_congestion(seq_num, congested);
             }
-            return send_packet(dst, type, payload, payload_len, seq_num);
+            int rc = send_packet(dst, type, payload, payload_len, seq_num);
+            if (rc == TRANSPORT_SEND_BACKPRESSURE)
+            {
+                transfer_engine_.note_local_backpressure();
+            }
+            return rc;
         });
 
     /* Wire up fragment forwarding to MQTT (returns false if queue full) */
@@ -198,6 +206,22 @@ void MeshManager::init()
             }
             return false;
         });
+    transfer_engine_.set_cloud_nack_requeue(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->requeue_cloud_nack(session_id, seq);
+            }
+        });
+    transfer_engine_.set_cloud_nack_observer(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->mark_fragment_for_republish(session_id, seq);
+            }
+        });
 
     /* Wire up deferred fragment ACK drain (exit node: ACK after MQTT publish) */
     transfer_engine_.set_fragment_ack_drain(
@@ -208,6 +232,14 @@ void MeshManager::init()
                 return mqtt_client_->drain_fragment_ack(session_id, seq_out);
             }
             return false;
+        });
+    transfer_engine_.set_fragment_ack_requeue(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->requeue_fragment_ack(session_id, seq);
+            }
         });
 
     /* Wire up session consensus: cloud TRANSFER_COMPLETE → exit → source.
@@ -523,6 +555,9 @@ void MeshManager::run()
             display_snapshot_.uptime_s =
                 static_cast<uint32_t>(esp_timer_get_time() / 1000000);
             display_snapshot_.cloud_cmd_received = has_recent_cloud_cmd();
+            display_snapshot_.config_cmd_received = has_recent_config_cmd();
+            display_snapshot_.topic_msg_received = has_recent_topic_msg();
+            display_snapshot_.topic_msg = display_topic_msg_buf_;
 
             const char *fn = transfer_engine_.current_filename();
             if (fn)

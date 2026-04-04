@@ -515,8 +515,15 @@ void OledDisplay::show_status(const NodeStatus &s)
         snprintf(line, sizeof(line), "Xfer: idle");
     lv_label_set_text(status_transfer_label_, line);
 
-    /* Cloud cmd:  ">> Cloud CMD" = 12 chars */
-    lv_label_set_text(status_cmd_label_, s.cloud_cmd_received ? ">> Cloud CMD" : "");
+    /* Command / message indicator priority: msg topic > config > cloud cmd. */
+    if (s.topic_msg_received && s.topic_msg && s.topic_msg[0] != '\0')
+        lv_label_set_text(status_cmd_label_, s.topic_msg);
+    else if (s.config_cmd_received)
+        lv_label_set_text(status_cmd_label_, ">> CFG CMD");
+    else if (s.cloud_cmd_received)
+        lv_label_set_text(status_cmd_label_, ">> Cloud CMD");
+    else
+        lv_label_set_text(status_cmd_label_, "");
 
     /* Heap */
     snprintf(line, sizeof(line), "%lukB", (unsigned long)s.free_heap_kb);

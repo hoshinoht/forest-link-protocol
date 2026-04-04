@@ -9,6 +9,8 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "mqtt_client.hpp"
+#include "itransport.hpp"
+#include "uart_ingest.hpp"
 
 using namespace flp;
 
@@ -229,6 +231,55 @@ void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
                      "TOPIC_MSG matched '%s' payload_len=%zu",
                      topic,
                      payload_len);
+
+            uint32_t now_ms =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            if (strcmp(topic, "config") == 0)
+            {
+                last_config_topic_ms_ = now_ms;
+            }
+            if (strcmp(topic, "msg") == 0)
+            {
+                const uint8_t *msg_payload = data + 1 + topic_len;
+                size_t copy_len = (payload_len < sizeof(display_topic_msg_buf_) - 1)
+                                      ? payload_len
+                                      : (sizeof(display_topic_msg_buf_) - 1);
+                for (size_t j = 0; j < copy_len; j++)
+                {
+                    uint8_t c = msg_payload[j];
+                    display_topic_msg_buf_[j] = (c >= 32 && c <= 126)
+                                                    ? static_cast<char>(c)
+                                                    : '.';
+                }
+                display_topic_msg_buf_[copy_len] = '\0';
+                last_topic_msg_ms_ = now_ms;
+            }
+
+            /* Forward to UART as downlink event */
+            if (uart_ingest_)
+            {
+                const uint8_t *msg_payload = data + 1 + topic_len;
+                UartEvent evt = {};
+                evt.type = UART_EVT_DOWNLINK_DATA;
+                /* Pack: [topic_len][topic...][payload...] */
+                size_t total = 1 + topic_len + payload_len;
+                if (total > sizeof(evt.payload))
+                    total = sizeof(evt.payload);
+                evt.payload[0] = topic_len;
+                size_t copy_topic = (topic_len < sizeof(evt.payload) - 1)
+                                        ? topic_len
+                                        : sizeof(evt.payload) - 1;
+                memcpy(&evt.payload[1], topic, copy_topic);
+                size_t remaining = sizeof(evt.payload) - 1 - copy_topic;
+                size_t copy_payload =
+                    (payload_len < remaining) ? payload_len : remaining;
+                if (copy_payload > 0)
+                    memcpy(&evt.payload[1 + copy_topic],
+                           msg_payload, copy_payload);
+                evt.len = static_cast<uint16_t>(
+                    1 + copy_topic + copy_payload);
+                uart_ingest_->push_event(evt);
+            }
             return;
         }
     }
@@ -430,12 +481,18 @@ int MeshManager::send_raw(Transport transport,
 
     uint32_t latency = static_cast<uint32_t>(
         (esp_timer_get_time() - t0_us) / 1000);
-    protocol_selector_.report_tx_result(transport, rc == 0, latency);
+    if (rc != TRANSPORT_SEND_BACKPRESSURE)
+    {
+        protocol_selector_.report_tx_result(transport, rc == TRANSPORT_SEND_OK, latency);
+    }
 
     /* Step 3d: Report link TX result for ETX calculation */
     if (peer_addr != BROADCAST_ADDR)
     {
-        route_table_.report_link_tx(peer_addr, rc == 0);
+        if (rc != TRANSPORT_SEND_BACKPRESSURE)
+        {
+            route_table_.report_link_tx(peer_addr, rc == TRANSPORT_SEND_OK);
+        }
     }
     return rc;
 }

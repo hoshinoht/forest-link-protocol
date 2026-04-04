@@ -54,5 +54,8 @@ cloud-admin/passwd
 !.claude/skills/
 !.claude/skills/**
 
+# Experiment log dumps (keep local, don't track)
+experiment*-logs*.txt
+
 # received_files
 cloud-admin/received_files/**

@@ -1,5 +1,7 @@
 #include "selective_repeat.hpp"
 
+#include "itransport.hpp"
+
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -66,7 +68,50 @@ void SelectiveRepeat::reset_sender()
     if (window_)
     {
         memset(window_, 0, ARQ_WINDOW * sizeof(FragmentSlot));
+        for (uint8_t i = 0; i < ARQ_WINDOW; i++)
+        {
+            window_[i].seq_tag = UINT16_MAX;
+        }
     }
+}
+
+void SelectiveRepeat::clear_slot(FragmentSlot &slot)
+{
+    slot.len = 0;
+    slot.send_time_ms = 0;
+    slot.seq_tag = UINT16_MAX;
+    slot.acked = false;
+    slot.sent = false;
+    slot.retries = 0;
+}
+
+void SelectiveRepeat::recompute_sender_bounds()
+{
+    if (!window_)
+    {
+        base_seq_ = next_seq_;
+        return;
+    }
+
+    bool any_pending = false;
+    uint16_t lowest = UINT16_MAX;
+
+    for (uint8_t i = 0; i < window_size_; i++)
+    {
+        const FragmentSlot &slot = window_[i];
+        if (!slot.sent || slot.len == 0 || slot.seq_tag == UINT16_MAX)
+        {
+            continue;
+        }
+
+        if (!any_pending || slot.seq_tag < lowest)
+        {
+            lowest = slot.seq_tag;
+            any_pending = true;
+        }
+    }
+
+    base_seq_ = any_pending ? lowest : next_seq_;
 }
 
 bool SelectiveRepeat::sender_window_full() const
@@ -79,11 +124,79 @@ uint16_t SelectiveRepeat::sender_window_used() const
     return in_flight_;
 }
 
+bool SelectiveRepeat::can_send_sequence(uint16_t seq) const
+{
+    if (!window_ || window_size_ == 0)
+    {
+        return false;
+    }
+
+    const FragmentSlot &slot = window_[seq % window_size_];
+    if (slot.sent)
+    {
+        return slot.seq_tag == seq;
+    }
+
+    return in_flight_ < window_size_;
+}
+
+bool SelectiveRepeat::contains_sequence(uint16_t seq) const
+{
+    if (!window_ || window_size_ == 0)
+    {
+        return false;
+    }
+
+    const FragmentSlot &slot = window_[seq % window_size_];
+    return slot.sent && slot.seq_tag == seq && slot.len > 0;
+}
+
+uint16_t SelectiveRepeat::snapshot_pending_sequences(uint16_t *out,
+                                                     uint16_t max) const
+{
+    if (!window_ || !out || max == 0)
+    {
+        return 0;
+    }
+
+    uint16_t count = 0;
+    for (uint8_t i = 0; i < window_size_ && count < max; i++)
+    {
+        const FragmentSlot &slot = window_[i];
+        if (!slot.sent || slot.len == 0 || slot.seq_tag == UINT16_MAX)
+        {
+            continue;
+        }
+
+        out[count++] = slot.seq_tag;
+    }
+
+    for (uint16_t i = 1; i < count; i++)
+    {
+        uint16_t key = out[i];
+        int16_t j = static_cast<int16_t>(i) - 1;
+        while (j >= 0 && out[j] > key)
+        {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+
+    return count;
+}
+
 int SelectiveRepeat::send_fragment(uint16_t seq,
                                    const uint8_t *data,
                                    size_t len)
 {
     if (!window_) return -1;
+
+    if (!data || len == 0)
+    {
+        ESP_LOGW(TAG, "Dropping zero-length fragment seq=%u", seq);
+        return -1;
+    }
 
     /* send_cb_ hands this payload to MeshManager::send_packet(), which adds
      * an 8-byte PacketHeader. Guard against storing/sending fragments larger
@@ -98,9 +211,48 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
     FragmentSlot &slot = window_[idx];
     uint16_t prev_next_seq = next_seq_;
 
+    if (slot.sent && slot.seq_tag == seq)
+    {
+        ESP_LOGW(TAG,
+                 "Duplicate send ignored: seq=%u idx=%u base=%u next=%u in_flight=%u",
+                 seq,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 in_flight_);
+        return 0;
+    }
+
+    if (slot.sent && slot.seq_tag != seq)
+    {
+        ESP_LOGW(TAG,
+                 "Slot alias on send: seq=%u tag=%u idx=%u base=%u next=%u in_flight=%u len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 in_flight_,
+                 slot.len);
+        return -1;
+    }
+
+    if (sender_window_full())
+    {
+        ESP_LOGW(TAG,
+                 "Sender window full: seq=%u idx=%u base=%u next=%u in_flight=%u",
+                 seq,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 in_flight_);
+        return -1;
+    }
+
     memcpy(slot.data, data, len);
     slot.len = len;
     slot.send_time_ms = now_ms();
+    slot.seq_tag = seq;
     slot.acked = false;
     slot.sent = true;
     in_flight_++;
@@ -117,13 +269,15 @@ int SelectiveRepeat::send_fragment(uint16_t seq,
         int rc = send_cb_(peer_addr_, PacketType::DATA, seq, data, len);
         if (rc < 0)
         {
-            slot.sent = false;
-            slot.acked = false;
-            slot.len = 0;
+            clear_slot(slot);
             next_seq_ = prev_next_seq;
+            if (in_flight_ > 0) { in_flight_--; }
+            recompute_sender_bounds();
             return -1;
         }
     }
+
+    recompute_sender_bounds();
 
     ESP_LOGD(TAG,
              "TX frag seq=%u len=%zu base=%u next=%u",
@@ -138,15 +292,23 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 {
     if (!window_) return;
 
-    if (seq < base_seq_ || seq >= next_seq_)
-    {
-        ESP_LOGW(
-            TAG, "ACK seq=%u out of window [%u,%u)", seq, base_seq_, next_seq_);
-        return;
-    }
-
     uint8_t idx = seq % window_size_;
     FragmentSlot &slot = window_[idx];
+
+    if (!slot.sent || slot.seq_tag != seq || slot.len == 0)
+    {
+        ESP_LOGD(TAG,
+                 "ACK inactive slot: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 idx,
+                 base_seq_,
+                 next_seq_,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
+        return;
+    }
 
     /* Adaptive RTO: measure RTT on first-attempt ACKs only.
      * Retransmitted fragments have ambiguous RTT (Karn's algorithm). */
@@ -173,6 +335,7 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
         }
         rto_ms_ = srtt_ms_ + 4 * rttvar_ms_;
         if (rto_ms_ < RTO_MIN_MS) { rto_ms_ = RTO_MIN_MS; }
+        if (rto_ms_ < min_rto_floor_ms_) { rto_ms_ = min_rto_floor_ms_; }
         if (rto_ms_ > RTO_MAX_MS) { rto_ms_ = RTO_MAX_MS; }
 
         /* Log every 32nd RTT sample to track adaptation without flooding */
@@ -192,46 +355,62 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
     {
         if (in_flight_ > 0) { in_flight_--; }
     }
-    slot.acked = true;
 
     ESP_LOGD(TAG, "ACK seq=%u", seq);
 
-    /* Advance base while consecutive owned slots are acked */
-    while (base_seq_ < next_seq_)
-    {
-        /* Skip sequences not assigned to this ARQ instance */
-        if (exit_stride_ > 1 &&
-            (base_seq_ % exit_stride_) != exit_offset_)
-        {
-            base_seq_++;
-            continue;
-        }
-        uint8_t base_idx = base_seq_ % window_size_;
-        if (!window_[base_idx].acked)
-        {
-            break;
-        }
-        window_[base_idx].sent = false;
-        base_seq_++;
-    }
+    clear_slot(slot);
+    recompute_sender_bounds();
 }
 
 void SelectiveRepeat::handle_nack(uint16_t seq)
 {
     if (!window_) return;
 
-    if (seq < base_seq_ || seq >= next_seq_)
+    uint8_t idx = seq % window_size_;
+    FragmentSlot &slot = window_[idx];
+
+    if (!slot.sent || slot.seq_tag != seq || slot.len == 0)
     {
         ESP_LOGW(TAG,
-                 "NACK seq=%u out of window [%u,%u)",
+                 "NACK inactive slot: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu",
                  seq,
+                 slot.seq_tag,
+                 idx,
                  base_seq_,
-                 next_seq_);
+                 next_seq_,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
         return;
     }
 
-    uint8_t idx = seq % window_size_;
-    FragmentSlot &slot = window_[idx];
+    if (!slot.sent || slot.acked || slot.len == 0)
+    {
+        ESP_LOGW(TAG,
+                 "Ignoring NACK for invalid slot seq=%u tag=%u sent=%d acked=%d len=%zu",
+                 seq,
+                 slot.seq_tag,
+                 slot.sent ? 1 : 0,
+                 slot.acked ? 1 : 0,
+                 slot.len);
+        return;
+    }
+
+    uint32_t now = now_ms();
+
+    if (send_cb_)
+    {
+        int rc = send_cb_(peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
+        if (rc == TRANSPORT_SEND_BACKPRESSURE)
+        {
+            slot.send_time_ms = now;
+            return;
+        }
+        if (rc < 0)
+        {
+            return;
+        }
+    }
 
     slot.retries++;
     if (slot.retries >= MAX_RETRIES)
@@ -241,14 +420,9 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
         return;
     }
 
-    slot.send_time_ms = now_ms();
+    slot.send_time_ms = now;
 
     ESP_LOGD(TAG, "NACK retransmit seq=%u retry=%u", seq, slot.retries);
-
-    if (send_cb_)
-    {
-        send_cb_(peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
-    }
 }
 
 uint8_t SelectiveRepeat::tick(uint8_t max_sends)
@@ -258,22 +432,16 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
     uint32_t now = now_ms();
     uint8_t retx_count = 0;
 
-    for (uint16_t seq = base_seq_; seq < next_seq_; seq++)
+    for (uint8_t idx = 0; idx < window_size_; idx++)
     {
-        /* Skip sequences not assigned to this ARQ */
-        if (exit_stride_ > 1 &&
-            (seq % exit_stride_) != exit_offset_)
-        {
-            continue;
-        }
-
-        uint8_t idx = seq % window_size_;
         FragmentSlot &slot = window_[idx];
-
-        if (!slot.sent || slot.acked)
+        if (!slot.sent || slot.acked || slot.len == 0 ||
+            slot.seq_tag == UINT16_MAX)
         {
             continue;
         }
+
+        uint16_t seq = slot.seq_tag;
 
         /*
          * Adaptive RTO with exponential backoff on retries.
@@ -287,6 +455,10 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
          * values that reflect observed network delay conditions."
          */
         uint32_t base_rto = rtt_initialized_ ? rto_ms_ : timeout_ms_;
+        if (base_rto < min_rto_floor_ms_)
+        {
+            base_rto = min_rto_floor_ms_;
+        }
         uint32_t backoff = base_rto << slot.retries; /* 2^retries */
         if (backoff > RTO_MAX_MS)
         {
@@ -301,6 +473,13 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
                 continue;
             }
 
+            if (slot.len == 0)
+            {
+                ESP_LOGW(TAG, "Skipping zero-length timeout retransmit seq=%u", seq);
+                slot.send_time_ms = now;
+                continue;
+            }
+
             if (retx_count >= max_sends)
             {
                 break; /* defer remaining retransmissions to next tick */
@@ -310,6 +489,15 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
             {
                 int rc = send_cb_(
                     peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
+                if (rc == TRANSPORT_SEND_BACKPRESSURE)
+                {
+                    /* Local transport is saturated.  Don't burn a retry, but
+                     * defer the next attempt by one full backoff interval so
+                     * we stop hammering the TX pool every scheduler tick. */
+                    slot.send_time_ms = now;
+                    break;
+                }
+
                 if (rc < 0)
                 {
                     /* Send failed (NO_MEM) — don't burn a retry, stop.

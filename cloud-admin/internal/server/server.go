@@ -242,8 +242,9 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		}
 
 		var body struct {
-			Topic string `json:"topic"`
-			Data  string `json:"data"`
+			Topic   string `json:"topic"`
+			Data    string `json:"data"`
+			Message string `json:"message"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			errorResponse(w, "invalid JSON body", http.StatusBadRequest)
@@ -259,7 +260,11 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		}
 
 		var dataBytes []byte
-		if body.Data != "" {
+		if body.Message != "" {
+			// Plain text message mode
+			dataBytes = []byte(body.Message)
+		} else if body.Data != "" {
+			// Hex data mode
 			hexStr := body.Data
 			hexStr = strings.TrimPrefix(hexStr, "0x")
 			hexStr = strings.TrimPrefix(hexStr, "0X")
@@ -286,7 +291,13 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		copy(payload[4+len(topicBytes):], dataBytes)
 
 		mqttClient.PublishCmd(payload)
-		jsonResponse(w, map[string]interface{}{"ok": true, "target": nodeID, "topic": body.Topic})
+		result := map[string]interface{}{"ok": true, "target": nodeID, "topic": body.Topic, "bytes": len(dataBytes)}
+		if body.Message != "" {
+			result["message"] = body.Message
+		} else if body.Data != "" {
+			result["data"] = body.Data
+		}
+		jsonResponse(w, result)
 	})
 
 	// GET /api/benchmarks

@@ -1,0 +1,8 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/Users/cantabile/.espressif/python_env/idf5.5_py3.12_env/bin/python -DESP_PLATFORM=1 -DIDF_TARGET=esp32s3 -DCCACHE_ENABLE=0 /Users/cantabile/projects/sit/csc2106/forest-link-protocol/flp-node/test
+CMake Error at /Users/cantabile/esp/esp-idf-v5.5.3/tools/cmake/targets.cmake:108 (message):
+   Target 'esp32' in sdkconfig '/Users/cantabile/projects/sit/csc2106/forest-link-protocol/flp-node/test/sdkconfig' does not match currently selected IDF_TARGET 'esp32s3'. To change the target, clear the build directory and sdkconfig file, and build the project again.
+Call Stack (most recent call first):
+  /Users/cantabile/esp/esp-idf-v5.5.3/tools/cmake/project.cmake:24 (__target_init)
+  CMakeLists.txt:9 (include)
+
+

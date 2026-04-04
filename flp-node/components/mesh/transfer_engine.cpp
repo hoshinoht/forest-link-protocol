@@ -7,8 +7,11 @@
 #include "transfer_engine.hpp"
 
 #include <cinttypes>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h"
@@ -53,6 +56,35 @@ uint32_t TransferEngine::compute_arq_timeout_ms(uint8_t hops_to_exit)
                : timeout;
 }
 
+uint32_t TransferEngine::compute_min_rto_floor_ms(uint8_t hops_to_exit)
+{
+    if (hops_to_exit <= 1)
+    {
+        return 200;
+    }
+
+    /* The first RTT sample on multi-hop paths tends to be optimistic because
+     * the sender is already running a full flight while the exit/MQTT side is
+     * still warming up. Keep the floor above the steady-state RTT so the
+     * bootstrap phase does not immediately self-trigger timeout retransmits. */
+    uint32_t floor = MULTIHOP_MIN_RTO_FLOOR_MS +
+                     static_cast<uint32_t>(hops_to_exit - 2) * 400;
+    return (floor > MAX_MIN_RTO_FLOOR_MS) ? MAX_MIN_RTO_FLOOR_MS : floor;
+}
+
+uint8_t TransferEngine::compute_mesh_window_cap(uint8_t hops_to_exit)
+{
+    if (hops_to_exit <= 1)
+    {
+        return ARQ_WINDOW;
+    }
+    if (hops_to_exit == 2)
+    {
+        return TWO_HOP_MESH_WINDOW_CAP;
+    }
+    return MULTIHOP_MESH_WINDOW_CAP;
+}
+
 uint32_t TransferEngine::compute_exit_timeout_ms(uint8_t hops_to_exit)
 {
     uint32_t timeout = BASE_EXIT_NODE_TIMEOUT_MS +
@@ -63,9 +95,299 @@ uint32_t TransferEngine::compute_exit_timeout_ms(uint8_t hops_to_exit)
                : timeout;
 }
 
+uint8_t TransferEngine::mesh_window_cap_per_exit() const
+{
+    uint8_t exits = (transfer_.exit_node_count > 0) ? transfer_.exit_node_count : 1;
+    uint8_t cap = static_cast<uint8_t>(mesh_window_cap_ / exits);
+    if (cap < MIN_PER_EXIT_WINDOW_CAP)
+    {
+        cap = MIN_PER_EXIT_WINDOW_CAP;
+    }
+    if (cap > ARQ_WINDOW)
+    {
+        cap = ARQ_WINDOW;
+    }
+    return cap;
+}
+
+uint16_t TransferEngine::total_mesh_inflight() const
+{
+    uint16_t total = 0;
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        total = static_cast<uint16_t>(total + arq_[i].sender_window_used());
+    }
+    return total;
+}
+
+uint32_t TransferEngine::total_acked_fragments() const
+{
+    if (local_exit_)
+    {
+        return cloud_base_seq_;
+    }
+
+    uint32_t total = 0;
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        total += path_stats_[i].acked;
+    }
+    return total;
+}
+
+uint32_t TransferEngine::data_fragments_before_seq(uint16_t seq) const
+{
+    if (local_exit_)
+    {
+        return seq;
+    }
+
+    uint16_t stride = static_cast<uint16_t>(FEC_GROUP_SIZE + 1);
+    uint32_t groups = seq / stride;
+    uint32_t rem = seq % stride;
+    if (rem > FEC_GROUP_SIZE)
+    {
+        rem = FEC_GROUP_SIZE;
+    }
+    return groups * FEC_GROUP_SIZE + rem;
+}
+
+size_t TransferEngine::bytes_from_seq_progress(uint16_t seq) const
+{
+    uint32_t data_frags = data_fragments_before_seq(seq);
+    size_t bytes = static_cast<size_t>(data_frags) * transfer_.fragment_size;
+    return (bytes > transfer_.size) ? transfer_.size : bytes;
+}
+
+void TransferEngine::reset_telemetry(uint32_t now_ms)
+{
+    transfer_start_ms_ = now_ms;
+    mesh_upload_done_ms_ = 0;
+    last_telemetry_log_ms_ = now_ms;
+    last_telemetry_sent_bytes_ = 0;
+    last_telemetry_acked_frags_ = 0;
+    total_mesh_retx_sent_ = 0;
+    total_oow_retx_queued_ = 0;
+    total_oow_retx_sent_ = 0;
+    total_congestion_events_ = 0;
+    total_local_backpressure_events_ = 0;
+    max_total_inflight_ = 0;
+    telemetry_csv_len_ = 0;
+    telemetry_csv_dropped_ = false;
+    telemetry_summary_written_ = false;
+    snprintf(telemetry_csv_path_,
+             sizeof(telemetry_csv_path_),
+             "/sdcard/flp_telemetry_%04X.csv",
+             my_addr_);
+}
+
+bool TransferEngine::ensure_telemetry_csv_buffer()
+{
+    if (telemetry_csv_buf_)
+    {
+        return true;
+    }
+
+    telemetry_csv_buf_ = static_cast<char *>(
+        heap_caps_malloc(TELEMETRY_CSV_BUFFER_BYTES,
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!telemetry_csv_buf_)
+    {
+        ESP_LOGW(TAG, "Telemetry CSV buffer alloc failed");
+        return false;
+    }
+    telemetry_csv_buf_[0] = '\0';
+    return true;
+}
+
+void TransferEngine::append_telemetry_csv_row(const char *result,
+                                              uint32_t now_ms,
+                                              size_t sent_bytes,
+                                              uint32_t tx_Bps,
+                                              uint32_t acked_frags,
+                                              uint32_t ack_fps,
+                                              uint16_t inflight,
+                                              uint32_t mesh_ms,
+                                              uint32_t cloud_wait_ms,
+                                              uint32_t e2e_Bps,
+                                              uint32_t mesh_Bps)
+{
+    if (!ensure_telemetry_csv_buffer())
+    {
+        return;
+    }
+
+    uint32_t elapsed_ms = (transfer_start_ms_ > 0 && now_ms >= transfer_start_ms_)
+                              ? (now_ms - transfer_start_ms_)
+                              : 0;
+    const char *role = local_exit_ ? "local_exit" : (is_exit_node_ ? "exit" : "source");
+    char line[320];
+    int len = snprintf(
+        line,
+        sizeof(line),
+        "%" PRIu32 ",0x%04X,%s,%u,%s,%zu,%u,%u,%" PRIu32 ",%u,%zu,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%u,%u,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%s\n",
+        now_ms,
+        static_cast<unsigned>(my_addr_),
+        role,
+        static_cast<unsigned>(transfer_.session_id),
+        transfer_.filename,
+        transfer_.size,
+        static_cast<unsigned>(source_hops_to_exit_est_),
+        static_cast<unsigned>(transfer_.exit_node_count),
+        elapsed_ms,
+        static_cast<unsigned>(get_progress_pct()),
+        sent_bytes,
+        tx_Bps,
+        acked_frags,
+        ack_fps,
+        static_cast<unsigned>(inflight),
+        static_cast<unsigned>(max_total_inflight_),
+        total_mesh_retx_sent_,
+        total_oow_retx_queued_,
+        total_oow_retx_sent_,
+        total_congestion_events_,
+        total_local_backpressure_events_,
+        mesh_ms,
+        cloud_wait_ms,
+        e2e_Bps,
+        mesh_Bps,
+        result);
+    if (len <= 0)
+    {
+        return;
+    }
+
+    size_t need = static_cast<size_t>(len);
+    if ((telemetry_csv_len_ + need + 1) > TELEMETRY_CSV_BUFFER_BYTES)
+    {
+        telemetry_csv_dropped_ = true;
+        return;
+    }
+
+    memcpy(telemetry_csv_buf_ + telemetry_csv_len_, line, need);
+    telemetry_csv_len_ += need;
+    telemetry_csv_buf_[telemetry_csv_len_] = '\0';
+}
+
+void TransferEngine::flush_telemetry_csv()
+{
+    if (!telemetry_csv_buf_ || telemetry_csv_len_ == 0 || telemetry_csv_path_[0] == '\0')
+    {
+        return;
+    }
+
+    bool needs_header = true;
+    if (FILE *probe = fopen(telemetry_csv_path_, "rb"))
+    {
+        needs_header = false;
+        fclose(probe);
+    }
+
+    errno = 0;
+    FILE *f = fopen(telemetry_csv_path_, "ab");
+    if (!f)
+    {
+        ESP_LOGW(TAG,
+                 "Failed to open telemetry CSV %s errno=%d",
+                 telemetry_csv_path_,
+                 errno);
+        return;
+    }
+
+    if (needs_header)
+    {
+        static constexpr const char *HEADER =
+            "timestamp_ms,node_addr,role,session_id,file,size_bytes,hops,exits,elapsed_ms,progress_pct,sent_bytes,tx_Bps,acked_frags,ack_fps,inflight,max_inflight,mesh_retx,oow_queued,oow_sent,cong,bp,mesh_ms,cloud_wait_ms,e2e_Bps,mesh_Bps,result\n";
+        fwrite(HEADER, 1, strlen(HEADER), f);
+    }
+
+    fwrite(telemetry_csv_buf_, 1, telemetry_csv_len_, f);
+    fflush(f);
+    fclose(f);
+
+    telemetry_csv_len_ = 0;
+    telemetry_csv_buf_[0] = '\0';
+    if (telemetry_csv_dropped_)
+    {
+        ESP_LOGW(TAG, "Telemetry CSV buffer overflowed during transfer");
+        telemetry_csv_dropped_ = false;
+    }
+}
+
+void TransferEngine::log_transfer_summary(const char *result, uint32_t now_ms)
+{
+    if (transfer_start_ms_ == 0 || transfer_.size == 0)
+    {
+        return;
+    }
+
+    uint32_t total_ms = now_ms - transfer_start_ms_;
+    if (total_ms == 0)
+    {
+        total_ms = 1;
+    }
+
+    uint32_t mesh_ms = (mesh_upload_done_ms_ > transfer_start_ms_)
+                           ? (mesh_upload_done_ms_ - transfer_start_ms_)
+                           : total_ms;
+    if (mesh_ms == 0)
+    {
+        mesh_ms = 1;
+    }
+
+    uint32_t cloud_wait_ms =
+        (mesh_upload_done_ms_ > 0 && now_ms > mesh_upload_done_ms_)
+            ? (now_ms - mesh_upload_done_ms_)
+            : 0;
+    uint32_t e2e_Bps =
+        static_cast<uint32_t>((transfer_.size * 1000ULL) / total_ms);
+    uint32_t mesh_Bps =
+        static_cast<uint32_t>((transfer_.size * 1000ULL) / mesh_ms);
+    uint32_t acked_frags = total_acked_fragments();
+    append_telemetry_csv_row(result,
+                             now_ms,
+                             transfer_.size,
+                             mesh_Bps,
+                             acked_frags,
+                             0,
+                             0,
+                             mesh_ms,
+                             cloud_wait_ms,
+                             e2e_Bps,
+                             mesh_Bps);
+    flush_telemetry_csv();
+    telemetry_summary_written_ = true;
+
+    ESP_LOGI(TAG,
+             "telemetry_final,result=%s,sid=%u,file=%s,size=%zu,total_ms=%" PRIu32 ",mesh_ms=%" PRIu32 ",cloud_wait_ms=%" PRIu32 ",e2e_Bps=%" PRIu32 ",mesh_Bps=%" PRIu32 ",acked=%" PRIu32 ",mesh_retx=%" PRIu32 ",oow_queued=%" PRIu32 ",oow_sent=%" PRIu32 ",cong=%" PRIu32 ",bp=%" PRIu32 ",max_inflight=%u,exits=%u,hops=%u",
+             result,
+             transfer_.session_id,
+             transfer_.filename,
+             transfer_.size,
+             total_ms,
+             mesh_ms,
+             cloud_wait_ms,
+             e2e_Bps,
+             mesh_Bps,
+             acked_frags,
+             total_mesh_retx_sent_,
+             total_oow_retx_queued_,
+             total_oow_retx_sent_,
+             total_congestion_events_,
+             total_local_backpressure_events_,
+             max_total_inflight_,
+             transfer_.exit_node_count,
+             source_hops_to_exit_est_);
+}
+
 void TransferEngine::reset_sender_transfer_state(bool signal_complete)
 {
     uint16_t finished_session = transfer_.session_id;
+
+    if (!telemetry_summary_written_)
+    {
+        flush_telemetry_csv();
+    }
 
     transfer_.active = false;
     transfer_.read_chunk = nullptr;
@@ -86,6 +408,11 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     last_mesh_frag_send_ms_ = 0;
     redist_count_ = 0;
     oow_retx_count_ = 0;
+    memset(oow_retx_dst_, 0, sizeof(oow_retx_dst_));
+    memset(oow_recent_seq_, 0, sizeof(oow_recent_seq_));
+    memset(oow_recent_ms_, 0, sizeof(oow_recent_ms_));
+    oow_recent_write_ = 0;
+    last_oow_retx_ms_ = 0;
     weight_recompute_counter_ = 0;
     memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
     cloud_base_seq_ = 0;
@@ -94,6 +421,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     last_cloud_activity_ms_ = 0;
     mesh_upload_done_ = false;
     last_meta_publish_ms_ = 0;
+    last_diag_log_ms_ = 0;
     exit_pending_ = false;
 
     for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
@@ -104,6 +432,19 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
         path_stats_[i] = ExitPathStats{};
         arq_[i].reset_sender();
     }
+
+    transfer_start_ms_ = 0;
+    mesh_upload_done_ms_ = 0;
+    last_telemetry_log_ms_ = 0;
+    last_telemetry_sent_bytes_ = 0;
+    last_telemetry_acked_frags_ = 0;
+    total_mesh_retx_sent_ = 0;
+    total_oow_retx_queued_ = 0;
+    total_oow_retx_sent_ = 0;
+    total_congestion_events_ = 0;
+    total_local_backpressure_events_ = 0;
+    max_total_inflight_ = 0;
+    telemetry_summary_written_ = false;
 
     if (finished_session != 0 && mqtt_session_end_fn_)
     {
@@ -133,6 +474,9 @@ void TransferEngine::clear_exit_node_state()
     last_meta_publish_ms_ = 0;
     congestion_backoff_ticks_ = 0;
     oow_retx_count_ = 0;
+    memset(oow_recent_seq_, 0, sizeof(oow_recent_seq_));
+    memset(oow_recent_ms_, 0, sizeof(oow_recent_ms_));
+    oow_recent_write_ = 0;
     if (finished_session != 0 && mqtt_session_end_fn_)
     {
         mqtt_session_end_fn_(finished_session);
@@ -147,9 +491,26 @@ void TransferEngine::init(EventGroupHandle_t events,
     my_addr_ = my_addr;
     send_fn_ = send_fn;
 
+    // Allocates memory for set exit nodes, and not max
+    // so that the allocation is only for how many exits this node expects
+    // to use
+    uint8_t prealloc_count = MAX_EXIT_NODES;
+#ifdef CONFIG_FLP_MAX_ELECTED_EXITS
+    prealloc_count = static_cast<uint8_t>(CONFIG_FLP_MAX_ELECTED_EXITS);
+    if (prealloc_count == 0)
+    {
+        prealloc_count = 1;
+    }
+    if (prealloc_count > MAX_EXIT_NODES)
+    {
+        prealloc_count = MAX_EXIT_NODES;
+    }
+#endif
+
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
-        if (!arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS))
+        if (i < prealloc_count &&
+            !arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS))
         {
             ESP_LOGE(TAG, "Failed to init ARQ window %d", i);
         }
@@ -163,6 +524,11 @@ void TransferEngine::init(EventGroupHandle_t events,
                 return send_fn_(dst, type, data, len, seq);
             });
     }
+
+    ESP_LOGI(TAG,
+             "ARQ prealloc: %u/%u windows",
+             static_cast<unsigned>(prealloc_count),
+             static_cast<unsigned>(MAX_EXIT_NODES));
 
     ESP_LOGI(TAG, "TransferEngine initialized");
 }
@@ -227,6 +593,9 @@ void TransferEngine::handle_transfer_done(uint16_t sender,
     ESP_LOGI(TAG, "TRANSFER_DONE from 0x%04X — cloud confirmed complete, "
              "stopping transfer",
              sender);
+
+    log_transfer_summary("complete",
+                         static_cast<uint32_t>(esp_timer_get_time() / 1000));
 
     reset_sender_transfer_state(true);
 }
@@ -294,6 +663,7 @@ bool TransferEngine::start_file_transfer(const char *filename,
     transfer_.crc32 = crc;
     last_meta_publish_ms_ =
         static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    reset_telemetry(last_meta_publish_ms_);
     source_hops_to_exit_est_ = effective_hops_to_exit;
     exit_node_timeout_ms_ = compute_exit_timeout_ms(effective_hops_to_exit);
 
@@ -352,10 +722,18 @@ bool TransferEngine::start_file_transfer(const char *filename,
         return true; /* transfer_tick() will publish fragments */
     }
 
-    /* Normal mesh path — include FEC parity fragments */
-    uint16_t parity_frags = static_cast<uint16_t>(
-        (data_frags + FEC_GROUP_SIZE - 1) / FEC_GROUP_SIZE);
-    transfer_.fragment_count = static_cast<uint16_t>(data_frags + parity_frags);
+    /* Normal mesh path — include FEC parity fragments.
+     *
+     * FEC layout: groups of (FEC_GROUP_SIZE data + 1 parity).
+     * Full groups contribute (FEC_GROUP_SIZE+1) seqs each.
+     * A trailing incomplete group contributes only its data seqs
+     * (no parity slot — the parity position would fall beyond the
+     * advertised fragment_count, creating a phantom seq that the
+     * sender skips but the cloud NACKs forever). */
+    uint16_t full_groups = static_cast<uint16_t>(data_frags / FEC_GROUP_SIZE);
+    uint16_t remaining   = static_cast<uint16_t>(data_frags % FEC_GROUP_SIZE);
+    transfer_.fragment_count = static_cast<uint16_t>(
+        full_groups * (FEC_GROUP_SIZE + 1) + remaining);
     if (transfer_.fragment_count > 60000)
     {
         ESP_LOGE(TAG,
@@ -394,16 +772,21 @@ bool TransferEngine::start_file_transfer(const char *filename,
     /* P8: Adaptive ARQ timeout — increase for multi-hop to avoid
      * spurious retransmissions when round-trip exceeds 700ms. */
     uint32_t arq_timeout = compute_arq_timeout_ms(effective_hops_to_exit);
+    uint32_t min_rto_floor = compute_min_rto_floor_ms(effective_hops_to_exit);
+    mesh_window_cap_ = compute_mesh_window_cap(effective_hops_to_exit);
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
         arq_[i].set_timeout(arq_timeout);
+        arq_[i].set_min_rto_floor(min_rto_floor);
     }
 
     ESP_LOGI(TAG,
-             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms",
+             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms rto_floor=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms mesh_window=%u",
              election_timeout_ms_,
              arq_timeout,
-             exit_node_timeout_ms_);
+             min_rto_floor,
+             exit_node_timeout_ms_,
+             mesh_window_cap_);
 
     /*
      * Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
@@ -421,15 +804,41 @@ bool TransferEngine::start_file_transfer(const char *filename,
 
 void TransferEngine::tick(uint32_t now_ms)
 {
+    uint8_t mesh_retx_used = 0;
+
     /* ARQ timeout retransmits — tick ALL instances.
      * Flow control is handled by the ESP-NOW TX semaphore: send()
-     * returns -1 when no TX slots are available, and tick() stops
-     * on the first failure.  Per-instance cap (8) prevents one ARQ
-     * from starving others. */
-    for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+     * returns -1 when no TX slots are available.  Use a shared mesh
+     * retransmit budget so multiple ARQ instances cannot consume the
+     * entire 16-slot ESP-NOW pipeline in one scheduler tick. */
+    if (transfer_.active && !local_exit_)
     {
-        arq_[i].tick(8);
+        static constexpr uint8_t MAX_TOTAL_MESH_RETX_PER_TICK = 4;
+        uint8_t retx_budget = MAX_TOTAL_MESH_RETX_PER_TICK;
+        for (uint8_t i = 0;
+             i < transfer_.exit_node_count && retx_budget > 0;
+             i++)
+        {
+            if (!transfer_.exit_node_alive[i])
+            {
+                continue;
+            }
+            uint8_t sent = arq_[i].tick(retx_budget);
+            mesh_retx_used = static_cast<uint8_t>(mesh_retx_used + sent);
+            retx_budget = (sent >= retx_budget)
+                              ? 0
+                              : static_cast<uint8_t>(retx_budget - sent);
+        }
     }
+    else
+    {
+        for (uint8_t i = 0; i < MAX_EXIT_NODES; i++)
+        {
+            arq_[i].tick(8);
+        }
+    }
+
+    total_mesh_retx_sent_ += mesh_retx_used;
 
     /* Abort transfer if any ARQ instance has fatally failed */
     if (transfer_.active && !local_exit_)
@@ -501,12 +910,14 @@ void TransferEngine::tick(uint32_t now_ms)
             reset_sender_transfer_state(false);
             return;
         }
-        if (is_exit_node_)
+        if (is_exit_node_ || exit_pending_)
         {
             ESP_LOGW(TAG,
-                     "Exit node cloud stall: no activity for %" PRIu32
-                     "ms, clearing exit-node role",
-                     now_ms - last_cloud_activity_ms_);
+                     "%s cloud stall: no activity for %" PRIu32
+                     "ms, clearing exit-node role (session=%u)",
+                     is_exit_node_ ? "Exit node" : "Exit pending",
+                     now_ms - last_cloud_activity_ms_,
+                     active_session_id_);
             clear_exit_node_state();
         }
     }
@@ -518,8 +929,25 @@ void TransferEngine::tick(uint32_t now_ms)
         uint16_t nack_seq = 0;
         while (drain_cloud_nack_fn_(active_session_id_, nack_seq))
         {
-            send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
+            if (observe_cloud_nack_fn_)
+            {
+                observe_cloud_nack_fn_(active_session_id_, nack_seq);
+            }
+            int rc = send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
+            if (rc < 0)
+            {
+                ESP_LOGD(TAG, "NACK paused: TX slots full (seq=%u)", nack_seq);
+                if (requeue_cloud_nack_fn_)
+                {
+                    requeue_cloud_nack_fn_(active_session_id_, nack_seq);
+                }
+                break; /* TX slots full — drain more next tick */
+            }
             ESP_LOGI(TAG, "Exit->source NACK for seq=%u", nack_seq);
+            /* Cloud NACKs prove the cloud link is alive — refresh the
+             * activity timestamp so the stall detector doesn't fire
+             * while the cloud is actively requesting retransmissions. */
+            last_cloud_activity_ms_ = now_ms;
         }
     }
 
@@ -538,6 +966,10 @@ void TransferEngine::tick(uint32_t now_ms)
             {
                 ESP_LOGD(TAG, "Deferred ACK paused: TX slots full (seq=%u)",
                          ack_seq);
+                if (requeue_fragment_ack_fn_)
+                {
+                    requeue_fragment_ack_fn_(active_session_id_, ack_seq);
+                }
                 break; /* TX slots full — drain more next tick */
             }
             ESP_LOGD(TAG, "Deferred ACK for seq=%u", ack_seq);
@@ -574,6 +1006,111 @@ void TransferEngine::tick(uint32_t now_ms)
 
     /* Feed fragments into ARQ window */
     transfer_tick();
+
+    uint16_t inflight = local_exit_ ? static_cast<uint16_t>(cloud_next_send_ - cloud_base_seq_)
+                                    : total_mesh_inflight();
+    if (inflight > max_total_inflight_)
+    {
+        max_total_inflight_ = inflight;
+    }
+
+    log_transfer_diag(now_ms, mesh_retx_used);
+}
+
+void TransferEngine::log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used)
+{
+    if (!transfer_.active)
+    {
+        return;
+    }
+    if (last_diag_log_ms_ != 0 && (now_ms - last_diag_log_ms_) < 1000)
+    {
+        return;
+    }
+    last_diag_log_ms_ = now_ms;
+
+    ESP_LOGI(TAG,
+             "diag: sid=%u next=%u/%u oow=%u redist=%u cong=%u retx_used=%u mesh_done=%u exits=%u hops=%u",
+             transfer_.session_id,
+             transfer_.next_fragment,
+             transfer_.fragment_count,
+             oow_retx_count_,
+             redist_count_,
+             congestion_backoff_ticks_,
+             mesh_retx_used,
+             mesh_upload_done_ ? 1 : 0,
+             transfer_.exit_node_count,
+             source_hops_to_exit_est_);
+
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        uint32_t ack_age = 0;
+        if (transfer_.last_ack_ms[i] != 0 && now_ms >= transfer_.last_ack_ms[i])
+        {
+            ack_age = now_ms - transfer_.last_ack_ms[i];
+        }
+        ESP_LOGI(TAG,
+                 "diag exit[%u]: addr=0x%04X alive=%u base=%u next=%u used=%u ack_age=%" PRIu32 "ms sent=%lu acked=%lu nacked=%lu weight=%.2f",
+                 i,
+                 transfer_.exit_nodes[i],
+                 transfer_.exit_node_alive[i] ? 1 : 0,
+                 arq_[i].get_base_seq(),
+                 arq_[i].get_next_seq(),
+                 arq_[i].sender_window_used(),
+                 ack_age,
+                 static_cast<unsigned long>(path_stats_[i].sent),
+                 static_cast<unsigned long>(path_stats_[i].acked),
+                  static_cast<unsigned long>(path_stats_[i].nacked),
+                  path_stats_[i].weight);
+    }
+
+    uint32_t elapsed_ms = (transfer_start_ms_ > 0 && now_ms >= transfer_start_ms_)
+                              ? (now_ms - transfer_start_ms_)
+                              : 0;
+    size_t sent_bytes = bytes_from_seq_progress(transfer_.next_fragment);
+    uint32_t acked_frags = total_acked_fragments();
+    uint32_t delta_ms = (last_telemetry_log_ms_ > 0 && now_ms > last_telemetry_log_ms_)
+                            ? (now_ms - last_telemetry_log_ms_)
+                            : 1000;
+    if (delta_ms == 0)
+    {
+        delta_ms = 1;
+    }
+    size_t delta_sent = sent_bytes - last_telemetry_sent_bytes_;
+    uint32_t delta_acked = acked_frags - last_telemetry_acked_frags_;
+    uint32_t tx_Bps = static_cast<uint32_t>((delta_sent * 1000ULL) / delta_ms);
+    uint32_t ack_fps = static_cast<uint32_t>((delta_acked * 1000ULL) / delta_ms);
+    uint16_t inflight = local_exit_ ? static_cast<uint16_t>(cloud_next_send_ - cloud_base_seq_)
+                                    : total_mesh_inflight();
+
+    append_telemetry_csv_row("periodic",
+                             now_ms,
+                             sent_bytes,
+                             tx_Bps,
+                             acked_frags,
+                             ack_fps,
+                             inflight);
+
+    ESP_LOGI(TAG,
+             "telemetry,sid=%u,elapsed_ms=%" PRIu32 ",sent_bytes=%zu,tx_Bps=%" PRIu32 ",acked_frags=%" PRIu32 ",ack_fps=%" PRIu32 ",inflight=%u,max_inflight=%u,mesh_retx=%" PRIu32 ",oow_queued=%" PRIu32 ",oow_sent=%" PRIu32 ",cong=%" PRIu32 ",bp=%" PRIu32 ",progress=%u",
+             transfer_.session_id,
+             elapsed_ms,
+             sent_bytes,
+             tx_Bps,
+             acked_frags,
+             ack_fps,
+             inflight,
+             max_total_inflight_,
+             total_mesh_retx_sent_,
+             total_oow_retx_queued_,
+             total_oow_retx_sent_,
+             total_congestion_events_,
+             total_local_backpressure_events_,
+             get_progress_pct());
+
+    last_telemetry_log_ms_ = now_ms;
+    last_telemetry_sent_bytes_ = sent_bytes;
+    last_telemetry_acked_frags_ = acked_frags;
 }
 
 void TransferEngine::election_timeout_tick(uint32_t now_ms)
@@ -630,19 +1167,25 @@ void TransferEngine::election_timeout_tick(uint32_t now_ms)
             scores[j + 1] = ts;
         }
 
-        /* 3. Accept candidates within quality threshold. For multi-hop source
-         * paths, keep the first rollout conservative and cap the session to a
-         * single exit to avoid striping across delayed relay paths. */
-        int16_t threshold = best_score / 2;
+        /* 3. Accept candidates within quality threshold, up to the
+         * configured maximum.  Each elected exit gets its own ARQ
+         * instance with independent RTT tracking, so multi-exit over
+         * multi-hop is safe. */
+        /* Threshold = best_score minus 2/3 its magnitude.  Using abs()
+         * ensures the margin always moves the threshold BELOW the best
+         * score, even when scores are negative (where dividing by 2 would
+         * incorrectly move toward zero, i.e. stricter). */
+        int16_t margin = static_cast<int16_t>(abs(best_score) * 2 / 3);
+        if (margin < 6) margin = 6;            /* minimum useful spread */
+        int16_t threshold = best_score - margin;
         uint8_t accepted = 0;
-        uint8_t accept_limit =
-            (source_hops_to_exit_est_ >= 2) ? 1 : MAX_EXIT_NODES;
-        if (source_hops_to_exit_est_ >= 2 && candidate_count_ > 1)
-        {
-            ESP_LOGI(TAG,
-                     "Multi-hop source path (%u hops): capping exit election to 1 candidate",
-                     source_hops_to_exit_est_);
-        }
+#ifdef CONFIG_FLP_MAX_ELECTED_EXITS
+        uint8_t accept_limit = static_cast<uint8_t>(CONFIG_FLP_MAX_ELECTED_EXITS);
+#else
+        uint8_t accept_limit = MAX_EXIT_NODES;
+#endif
+        if (accept_limit > MAX_EXIT_NODES)
+            accept_limit = MAX_EXIT_NODES;
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         for (uint8_t i = 0; i < candidate_count_ && accepted < accept_limit; i++)
         {

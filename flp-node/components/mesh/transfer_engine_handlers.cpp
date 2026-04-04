@@ -5,10 +5,25 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
+static constexpr uint32_t OOW_RECENT_SUPPRESS_MS = 1500;
+
+/* Query the RSSI of the Wi-Fi AP this STA is associated with.
+ * Returns a clamped int8_t (typ. -30..-90) or 0 on failure. */
+static int8_t get_wifi_sta_rssi()
+{
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+    {
+        int r = ap.rssi;
+        return static_cast<int8_t>(r < -128 ? -128 : (r > 0 ? 0 : r));
+    }
+    return 0;
+}
 
 void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
                                         const uint8_t *payload,
@@ -72,7 +87,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
             ack.session_id = ad.session_id;
             ack.exit_node_addr = my_addr_;
             ack.hops_to_gw = 0;
-            ack.rssi_to_gw = 0;
+            ack.rssi_to_gw = get_wifi_sta_rssi();
             ack.active_transfers = 1;
             send_fn_(hdr.src_addr,
                      PacketType::TRANSFER_ACK,
@@ -85,7 +100,7 @@ void TransferEngine::handle_transfer_ad(const PacketHeader &hdr,
         ack.session_id = ad.session_id;
         ack.exit_node_addr = my_addr_;
         ack.hops_to_gw = 0;
-        ack.rssi_to_gw = 0;
+        ack.rssi_to_gw = get_wifi_sta_rssi();
         ack.active_transfers = 0;
 
         send_fn_(hdr.src_addr,
@@ -237,10 +252,19 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
         }
         else
         {
-            /* MQTT queue full — send explicit NACK for faster retransmit */
-            send_fn_(source_addr_, PacketType::NACK, nullptr, 0, hdr.seq_num);
+            /* MQTT queue full — stay silent (no NACK).
+             *
+             * Sending an explicit NACK here causes a positive feedback loop:
+             * NACK → immediate retransmit → queue still full → NACK → ...
+             * which saturates both the mesh and MQTT channels, preventing
+             * any forward progress.
+             *
+             * Instead, let the sender's ARQ timeout handle recovery with
+             * exponential backoff, giving the MQTT queue time to drain.
+             * signal_congestion() throttles the sender's new-fragment
+             * feed rate via congestion_backoff_ticks_. */
             signal_congestion();
-            ESP_LOGW(TAG, "MQTT queue full, NACK seq=%u (backpressure)",
+            ESP_LOGD(TAG, "MQTT queue full, suppressed NACK seq=%u (silent backpressure)",
                      hdr.seq_num);
         }
         return;
@@ -254,29 +278,30 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 void TransferEngine::handle_ack(uint16_t seq, uint16_t from_addr)
 {
     int8_t idx = arq_index_for_peer(from_addr);
-    if (idx >= 0)
+    if (idx < 0)
     {
-        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-        uint16_t pre_base = arq_[idx].get_base_seq();
-        uint16_t next_seq = arq_[idx].get_next_seq();
+        return;
+    }
 
-        arq_[idx].handle_ack(seq);
+    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    bool tracked = arq_[idx].contains_sequence(seq);
+    uint32_t send_time = tracked ? arq_[idx].get_send_time(seq) : 0;
 
-        if (seq >= pre_base && seq < next_seq)
+    arq_[idx].handle_ack(seq);
+
+    if (tracked)
+    {
+        /* Phase 3: compute RTT sample from send timestamp */
+        if (send_time > 0 && now > send_time)
         {
-            /* Phase 3: compute RTT sample from send timestamp */
-            uint32_t send_time = arq_[idx].get_send_time(seq);
-            if (send_time > 0 && now > send_time)
-            {
-                float rtt_sample = static_cast<float>(now - send_time);
-                constexpr float ALPHA = 0.3f;
-                path_stats_[idx].ewma_rtt_ms =
-                    ALPHA * rtt_sample +
-                    (1.0f - ALPHA) * path_stats_[idx].ewma_rtt_ms;
-            }
-            path_stats_[idx].acked++;
-            transfer_.last_ack_ms[idx] = now;
+            float rtt_sample = static_cast<float>(now - send_time);
+            constexpr float ALPHA = 0.3f;
+            path_stats_[idx].ewma_rtt_ms =
+                ALPHA * rtt_sample +
+                (1.0f - ALPHA) * path_stats_[idx].ewma_rtt_ms;
         }
+        path_stats_[idx].acked++;
+        transfer_.last_ack_ms[idx] = now;
     }
 }
 
@@ -285,36 +310,32 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     int8_t idx = arq_index_for_peer(from_addr);
 
     /* Relay-originated congestion NACK: from_addr is the relay, not an exit
-     * node, so arq_index_for_peer() returns -1.  Scan active ARQ instances
-     * to find which one owns this seq.  This enables relay congestion echo
-     * (Fix #1) where relays immediately NACK dropped DATA fragments. */
-    if (idx < 0 && transfer_.active)
+     * node.  Scan active ARQ instances and retransmit whichever one still
+     * owns this seq. */
+    if (idx < 0)
     {
-        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
-        {
-            if (seq >= arq_[i].get_base_seq() && seq < arq_[i].get_next_seq())
-            {
-                idx = static_cast<int8_t>(i);
-                break;
-            }
-        }
+        idx = arq_index_for_sequence(seq);
         if (idx < 0)
         {
             return;
         }
-    }
-    else if (idx < 0)
-    {
-        return;
-    }
 
-    path_stats_[idx].nacked++; /* Phase 3 */
-
-    /* If seq is still within the ARQ window, normal retransmit */
-    if (seq >= arq_[idx].get_base_seq())
-    {
+        path_stats_[idx].nacked++; /* Phase 3 */
         arq_[idx].handle_nack(seq);
         return;
+    }
+
+    if (arq_[idx].contains_sequence(seq))
+    {
+        path_stats_[idx].nacked++; /* Phase 3 */
+        arq_[idx].handle_nack(seq);
+        return;
+    }
+
+    int8_t owner_idx = arq_index_for_sequence(seq);
+    if (owner_idx >= 0)
+    {
+        return; /* duplicate exit-originated NACK from a non-owning exit */
     }
 
     /*
@@ -329,19 +350,47 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     }
 
     /* Dedup: don't queue if already pending */
-    for (uint8_t i = 0; i < oow_retx_count_; i++)
+    for (uint16_t i = 0; i < oow_retx_count_; i++)
     {
         if (oow_retx_queue_[i] == seq)
         {
+            oow_retx_dst_[i] = from_addr;
+            return;
+        }
+    }
+
+    /* If we very recently re-sent this OOW seq, suppress duplicate cloud NACKs
+     * for a short window instead of re-queueing immediately. This keeps bursty
+     * repeated NACKs from ballooning the OOW backlog while the previous resend
+     * is still in flight to the exit/cloud path. */
+    uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    for (uint16_t i = 0; i < OOW_RECENT_RING_SIZE; i++)
+    {
+        if (oow_recent_ms_[i] == 0 || oow_recent_seq_[i] != seq)
+        {
+            continue;
+        }
+        if ((now_ms - oow_recent_ms_[i]) < OOW_RECENT_SUPPRESS_MS)
+        {
+            ESP_LOGD(TAG,
+                     "Suppressing duplicate recent OOW NACK seq=%u for 0x%04X",
+                     seq,
+                     from_addr);
             return;
         }
     }
 
     if (oow_retx_count_ < OOW_RETX_QUEUE_SIZE)
     {
-        oow_retx_queue_[oow_retx_count_++] = seq;
-        ESP_LOGI(TAG, "Queued out-of-window seq=%u for retx (%u pending)",
-                 seq, oow_retx_count_);
+        oow_retx_queue_[oow_retx_count_] = seq;
+        oow_retx_dst_[oow_retx_count_] = from_addr;
+        oow_retx_count_++;
+        total_oow_retx_queued_++;
+        ESP_LOGI(TAG,
+                 "Queued out-of-window seq=%u for retx to 0x%04X (%u pending)",
+                 seq,
+                 from_addr,
+                 oow_retx_count_);
     }
     else
     {
@@ -355,6 +404,18 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
         if (transfer_.exit_nodes[i] == addr)
+        {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
+int8_t TransferEngine::arq_index_for_sequence(uint16_t seq) const
+{
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (arq_[i].contains_sequence(seq))
         {
             return static_cast<int8_t>(i);
         }

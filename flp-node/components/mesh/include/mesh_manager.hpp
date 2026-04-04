@@ -45,7 +45,7 @@ inline constexpr EventBits_t FLP_EVT_EXIT_NODE_ELECTED = BIT2;
 namespace flp
 {
 
-static constexpr uint8_t kQueueDepth = 48;
+static constexpr uint16_t kQueueDepth = 256;
 static constexpr int8_t kDefaultRssi = -90;
 static constexpr float kLinkQualityPct = 100.0f;
 
@@ -54,7 +54,8 @@ inline bool requires_espnow_data_path(PacketType type)
     return type == PacketType::DATA || type == PacketType::PARITY;
 }
 
-class MqttClient; /* forward declaration */
+class MqttClient;   /* forward declaration */
+class UartIngest;   /* forward declaration */
 
 class MeshManager
 {
@@ -90,6 +91,12 @@ class MeshManager
     void set_mqtt_client(MqttClient *client)
     {
         mqtt_client_ = client;
+    }
+
+    /* UART ingest wiring (for downlink forwarding) */
+    void set_uart_ingest(UartIngest *ingest)
+    {
+        uart_ingest_ = ingest;
     }
 
     void subscribe_topic(const char *topic);
@@ -146,9 +153,23 @@ class MeshManager
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         return last_cloud_cmd_ms_ > 0 && (now - last_cloud_cmd_ms_) < 3000;
     }
+    bool has_recent_config_cmd() const
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        return last_config_topic_ms_ > 0 && (now - last_config_topic_ms_) < 3000;
+    }
+    bool has_recent_topic_msg() const
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        return last_topic_msg_ms_ > 0 && (now - last_topic_msg_ms_) < 4000;
+    }
     bool is_transfer_active() const
     {
         return transfer_engine_.is_transfer_active();
+    }
+    bool is_exit_node() const
+    {
+        return transfer_engine_.is_exit_node();
     }
     const char *get_transfer_filename() const
     {
@@ -247,6 +268,9 @@ class MeshManager
     /* MQTT bridge */
     MqttClient *mqtt_client_ = nullptr;
 
+    /* UART ingest (downlink forwarding) */
+    UartIngest *uart_ingest_ = nullptr;
+
     /* Topic subscriptions for cloud-to-deep-node messaging */
     char subscribed_topics_[4][32] = {};
     uint8_t subscribed_topic_count_ = 0;
@@ -258,9 +282,16 @@ class MeshManager
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
 
+    /* Config topic indicator (display auto-clears after 3s) */
+    uint32_t last_config_topic_ms_ = 0;
+
+    /* Generic topic message indicator (display auto-clears after 4s) */
+    uint32_t last_topic_msg_ms_ = 0;
+
     /* Display snapshot shared with display task */
     NodeStatus display_snapshot_ = {};
     char display_filename_buf_[33] = {};
+    char display_topic_msg_buf_[17] = {};
 
     /* Lab peer blacklist — drop direct (hop_count==0) packets from these addrs */
     std::vector<uint16_t> blocked_peers_; /* empty = disabled */
