@@ -246,6 +246,7 @@ class TransferEngine
     void exit_node_health_tick(uint32_t now_ms);
     void redistribute_dead_exit(uint8_t dead_idx);
     void recompute_weights();
+    int8_t select_mesh_target_for_seq(uint16_t seq) const;
     void log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used);
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
@@ -253,6 +254,7 @@ class TransferEngine
                                    uint16_t dst_addr = BROADCAST_ADDR,
                                    uint8_t max_retries = 3);
     int8_t arq_index_for_peer(uint16_t addr) const;
+    int8_t arq_index_for_sequence(uint16_t seq) const;
 
     static constexpr uint32_t BASE_ARQ_TIMEOUT_MS = 3000;
     static constexpr uint32_t PER_HOP_ARQ_TIMEOUT_MS = 1000;
@@ -321,9 +323,10 @@ class TransferEngine
     uint16_t redist_count_ = 0;
 
     /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
-     * already advanced past.  Drained throttled in tick_mesh_arq(). */
+     * already released.  Route to the exit that requested the resend. */
     static constexpr uint16_t OOW_RETX_QUEUE_SIZE = 1024;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
+    uint16_t oow_retx_dst_[OOW_RETX_QUEUE_SIZE] = {};
     uint16_t oow_retx_count_ = 0;
     uint32_t last_oow_retx_ms_ = 0;
 

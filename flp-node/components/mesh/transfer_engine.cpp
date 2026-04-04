@@ -98,6 +98,7 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     last_mesh_frag_send_ms_ = 0;
     redist_count_ = 0;
     oow_retx_count_ = 0;
+    memset(oow_retx_dst_, 0, sizeof(oow_retx_dst_));
     last_oow_retx_ms_ = 0;
     weight_recompute_counter_ = 0;
     memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));

@@ -260,6 +260,46 @@ void TransferEngine::recompute_weights()
     }
 }
 
+int8_t TransferEngine::select_mesh_target_for_seq(uint16_t seq) const
+{
+    int8_t best_idx = -1;
+    float best_score = -1.0f;
+
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (!transfer_.exit_node_alive[i] || !arq_[i].can_send_sequence(seq))
+        {
+            continue;
+        }
+
+        uint16_t used = arq_[i].sender_window_used();
+        uint16_t free_slots = (used < ARQ_WINDOW)
+                                  ? static_cast<uint16_t>(ARQ_WINDOW - used)
+                                  : 0;
+        float score = path_stats_[i].weight * static_cast<float>(free_slots);
+        if (score > best_score)
+        {
+            best_score = score;
+            best_idx = static_cast<int8_t>(i);
+        }
+    }
+
+    if (best_idx >= 0)
+    {
+        return best_idx;
+    }
+
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (transfer_.exit_node_alive[i] && arq_[i].can_send_sequence(seq))
+        {
+            return static_cast<int8_t>(i);
+        }
+    }
+
+    return -1;
+}
+
 /* --------------------------------------------------------------------------
  * Mesh-path multi-exit: feed fragments across alive exit nodes
  * via SelectiveRepeat ARQ over the mesh network.
@@ -313,10 +353,12 @@ void TransferEngine::tick_mesh_arq()
         for (uint8_t i = 0; i < oow_retx_count_; i++)
         {
             uint16_t seq = oow_retx_queue_[i];
+            uint16_t dst = oow_retx_dst_[i];
 
             if (!allow_oow_send || sent >= kMaxOowRetxPerTick)
             {
                 oow_retx_queue_[kept++] = seq;
+                oow_retx_dst_[kept - 1] = dst;
                 continue;
             }
 
@@ -386,6 +428,7 @@ void TransferEngine::tick_mesh_arq()
             if (got == 0)
             {
                 oow_retx_queue_[kept++] = seq;
+                oow_retx_dst_[kept - 1] = dst;
                 ESP_LOGW(TAG,
                          "Skipping zero-length OOW retx seq=%u offset=%zu frag_len=%zu size=%zu",
                          seq,
@@ -399,14 +442,8 @@ void TransferEngine::tick_mesh_arq()
                 continue;
             }
 
-            /* Route to the correct exit based on stride ownership.
-             * With multi-exit, seq % exit_count gives the owning ARQ index.
-             * Fall back to first alive exit only if the owner is dead. */
-            uint8_t owner = (transfer_.exit_node_count > 1)
-                                ? static_cast<uint8_t>(seq % transfer_.exit_node_count)
-                                : 0;
-            uint16_t dst = transfer_.exit_nodes[owner];
-            if (!transfer_.exit_node_alive[owner])
+            int8_t dst_idx = arq_index_for_peer(dst);
+            if (dst_idx < 0 || !transfer_.exit_node_alive[dst_idx])
             {
                 dst = transfer_.exit_nodes[0];
                 for (uint8_t e = 0; e < transfer_.exit_node_count; e++)
@@ -424,10 +461,12 @@ void TransferEngine::tick_mesh_arq()
             {
                 /* Send failed (TX slots full) — keep in queue for next tick */
                 oow_retx_queue_[kept++] = seq;
+                oow_retx_dst_[kept - 1] = dst;
                 ESP_LOGD(TAG, "OOW retx deferred: TX slots full (seq=%u)", seq);
                 for (uint8_t j = i + 1; j < oow_retx_count_; j++)
                 {
                     oow_retx_queue_[kept++] = oow_retx_queue_[j];
+                    oow_retx_dst_[kept - 1] = oow_retx_dst_[j];
                 }
                 break;
             }
@@ -447,23 +486,15 @@ void TransferEngine::tick_mesh_arq()
         for (uint8_t r = 0; r < redist_count_; r++)
         {
             uint16_t seq = redist_pending_[r];
-            uint8_t target = 0;
-            uint8_t rr = seq % alive_count;
-            uint8_t cnt = 0;
-            for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+            int8_t target = select_mesh_target_for_seq(seq);
+
+            if (target < 0)
             {
-                if (transfer_.exit_node_alive[i])
-                {
-                    if (cnt == rr)
-                    {
-                        target = i;
-                        break;
-                    }
-                    cnt++;
-                }
+                redist_pending_[new_count++] = seq;
+                continue;
             }
 
-            if (!arq_[target].sender_window_full())
+            if (arq_[target].can_send_sequence(seq))
             {
                 /* B2 fix: map seq to data index (skip parity slots) */
                 uint16_t rgroup = seq / (FEC_GROUP_SIZE + 1);
@@ -543,33 +574,13 @@ void TransferEngine::tick_mesh_arq()
     while (transfer_.next_fragment < transfer_.fragment_count &&
            new_sent < MAX_NEW_FRAGS_PER_TICK)
     {
-        /* Score all alive exits: weight * free_slots */
-        uint8_t arq_idx = 0;
-        float best_score = -1.0f;
-        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
-        {
-            if (!transfer_.exit_node_alive[i])
-            {
-                continue;
-            }
-            uint16_t used = arq_[i].sender_window_used();
-            uint16_t free_slots = (used < ARQ_WINDOW) ?
-                static_cast<uint16_t>(ARQ_WINDOW - used) : 0;
-            float score = path_stats_[i].weight *
-                          static_cast<float>(free_slots);
-            if (score > best_score)
-            {
-                best_score = score;
-                arq_idx = i;
-            }
-        }
-
-        if (best_score <= 0)
-        {
-            break; /* all windows full or no alive exits, wait for ACKs */
-        }
-
         uint16_t seq = transfer_.next_fragment;
+        int8_t arq_idx = select_mesh_target_for_seq(seq);
+        if (arq_idx < 0)
+        {
+            break; /* no exit can currently accept this seq */
+        }
+
         bool is_parity_slot = (seq % (FEC_GROUP_SIZE + 1) == FEC_GROUP_SIZE);
 
         if (is_parity_slot)
@@ -677,7 +688,7 @@ void TransferEngine::exit_node_health_tick(uint32_t now_ms)
             continue;
         }
 
-        bool has_pending = arq_[i].get_base_seq() < arq_[i].get_next_seq();
+        bool has_pending = arq_[i].has_pending();
         if (!has_pending)
         {
             continue;
@@ -724,8 +735,9 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
 {
     transfer_.exit_node_alive[dead_idx] = false;
 
-    uint16_t base = arq_[dead_idx].get_base_seq();
-    uint16_t next = arq_[dead_idx].get_next_seq();
+    uint16_t pending[ARQ_WINDOW] = {};
+    uint16_t pending_count =
+        arq_[dead_idx].snapshot_pending_sequences(pending, ARQ_WINDOW);
     arq_[dead_idx].reset_sender();
 
     uint8_t alive_count = 0;
@@ -749,8 +761,10 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
     }
 
     uint16_t redistributed = 0;
-    for (uint16_t seq = base; seq < next; seq++)
+    for (uint16_t p = 0; p < pending_count; p++)
     {
+        uint16_t seq = pending[p];
+
         /* Skip parity slots — parity cannot be reconstructed here without
          * re-XOR-ing all group members.  The receiver either has all data
          * fragments or will get them via normal ARQ retransmit. */
@@ -759,20 +773,10 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
             continue;
         }
 
-        uint8_t target = first_alive;
-        uint8_t rr = seq % alive_count;
-        uint8_t count = 0;
-        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+        int8_t target = select_mesh_target_for_seq(seq);
+        if (target < 0)
         {
-            if (transfer_.exit_node_alive[i])
-            {
-                if (count == rr)
-                {
-                    target = i;
-                    break;
-                }
-                count++;
-            }
+            target = static_cast<int8_t>(first_alive);
         }
 
         /* B2 fix: map seq to data index (skip parity slots) */
@@ -785,7 +789,7 @@ void TransferEngine::redistribute_dead_exit(uint8_t dead_idx)
                               ? remain
                               : transfer_.fragment_size;
 
-        if (!arq_[target].sender_window_full())
+        if (arq_[target].can_send_sequence(seq))
         {
             size_t got = transfer_.read_chunk(frag_buf_, offset, frag_len);
             if (got == 0)

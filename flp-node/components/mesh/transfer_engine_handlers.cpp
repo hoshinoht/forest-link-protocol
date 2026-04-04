@@ -277,29 +277,30 @@ void TransferEngine::handle_data(const PacketHeader &hdr,
 void TransferEngine::handle_ack(uint16_t seq, uint16_t from_addr)
 {
     int8_t idx = arq_index_for_peer(from_addr);
-    if (idx >= 0)
+    if (idx < 0)
     {
-        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-        uint16_t pre_base = arq_[idx].get_base_seq();
-        uint16_t next_seq = arq_[idx].get_next_seq();
+        return;
+    }
 
-        arq_[idx].handle_ack(seq);
+    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    bool tracked = arq_[idx].contains_sequence(seq);
+    uint32_t send_time = tracked ? arq_[idx].get_send_time(seq) : 0;
 
-        if (seq >= pre_base && seq < next_seq)
+    arq_[idx].handle_ack(seq);
+
+    if (tracked)
+    {
+        /* Phase 3: compute RTT sample from send timestamp */
+        if (send_time > 0 && now > send_time)
         {
-            /* Phase 3: compute RTT sample from send timestamp */
-            uint32_t send_time = arq_[idx].get_send_time(seq);
-            if (send_time > 0 && now > send_time)
-            {
-                float rtt_sample = static_cast<float>(now - send_time);
-                constexpr float ALPHA = 0.3f;
-                path_stats_[idx].ewma_rtt_ms =
-                    ALPHA * rtt_sample +
-                    (1.0f - ALPHA) * path_stats_[idx].ewma_rtt_ms;
-            }
-            path_stats_[idx].acked++;
-            transfer_.last_ack_ms[idx] = now;
+            float rtt_sample = static_cast<float>(now - send_time);
+            constexpr float ALPHA = 0.3f;
+            path_stats_[idx].ewma_rtt_ms =
+                ALPHA * rtt_sample +
+                (1.0f - ALPHA) * path_stats_[idx].ewma_rtt_ms;
         }
+        path_stats_[idx].acked++;
+        transfer_.last_ack_ms[idx] = now;
     }
 }
 
@@ -308,50 +309,33 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     int8_t idx = arq_index_for_peer(from_addr);
 
     /* Relay-originated congestion NACK: from_addr is the relay, not an exit
-     * node, so arq_index_for_peer() returns -1.  Scan active ARQ instances
-     * to find which one owns this seq.  This enables relay congestion echo
-     * (Fix #1) where relays immediately NACK dropped DATA fragments. */
-    if (idx < 0 && transfer_.active)
+     * node.  Scan active ARQ instances and retransmit whichever one still
+     * owns this seq. */
+    if (idx < 0)
     {
-        for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
-        {
-            if (seq >= arq_[i].get_base_seq() && seq < arq_[i].get_next_seq())
-            {
-                idx = static_cast<int8_t>(i);
-                break;
-            }
-        }
+        idx = arq_index_for_sequence(seq);
         if (idx < 0)
         {
             return;
         }
-    }
-    else if (idx < 0)
-    {
+
+        path_stats_[idx].nacked++; /* Phase 3 */
+        arq_[idx].handle_nack(seq);
         return;
     }
 
-    /* Multi-exit NACK dedup: with stride-based ownership, both exit nodes
-     * subscribe to the same cloud NACK topic and forward all NACKs.
-     * Only process the NACK if this seq belongs to the exit that sent it
-     * (seq % stride == offset).  Otherwise the same cloud NACK gets
-     * counted twice, burning through MAX_RETRIES at 2x the real rate. */
-    if (transfer_.exit_node_count > 1)
+    if (arq_[idx].contains_sequence(seq))
     {
-        uint8_t stride = transfer_.exit_node_count;
-        uint8_t uidx = static_cast<uint8_t>(idx);
-        if ((seq % stride) != uidx)
-        {
-            return; /* NACK from wrong exit for this seq — ignore */
-        }
+        path_stats_[idx].nacked++; /* Phase 3 */
+        arq_[idx].handle_nack(seq);
+        return;
     }
 
-    path_stats_[idx].nacked++; /* Phase 3 */
-
-    /* If seq is still within the ARQ window, normal retransmit */
-    if (seq >= arq_[idx].get_base_seq())
+    int8_t owner_idx = arq_index_for_sequence(seq);
+    if (owner_idx >= 0)
     {
-        arq_[idx].handle_nack(seq);
+        path_stats_[owner_idx].nacked++; /* Phase 3 */
+        arq_[owner_idx].handle_nack(seq);
         return;
     }
 
@@ -371,15 +355,21 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     {
         if (oow_retx_queue_[i] == seq)
         {
+            oow_retx_dst_[i] = from_addr;
             return;
         }
     }
 
     if (oow_retx_count_ < OOW_RETX_QUEUE_SIZE)
     {
-        oow_retx_queue_[oow_retx_count_++] = seq;
-        ESP_LOGI(TAG, "Queued out-of-window seq=%u for retx (%u pending)",
-                 seq, oow_retx_count_);
+        oow_retx_queue_[oow_retx_count_] = seq;
+        oow_retx_dst_[oow_retx_count_] = from_addr;
+        oow_retx_count_++;
+        ESP_LOGI(TAG,
+                 "Queued out-of-window seq=%u for retx to 0x%04X (%u pending)",
+                 seq,
+                 from_addr,
+                 oow_retx_count_);
     }
     else
     {
@@ -393,6 +383,18 @@ int8_t TransferEngine::arq_index_for_peer(uint16_t addr) const
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
         if (transfer_.exit_nodes[i] == addr)
+        {
+            return static_cast<int8_t>(i);
+        }
+    }
+    return -1;
+}
+
+int8_t TransferEngine::arq_index_for_sequence(uint16_t seq) const
+{
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        if (arq_[i].contains_sequence(seq))
         {
             return static_cast<int8_t>(i);
         }
