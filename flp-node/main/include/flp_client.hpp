@@ -52,6 +52,7 @@ class FlpClient
     uint8_t *payload_buf_ = nullptr;
     size_t payload_size_ = 0;
     char filename_[64] = {};
+    bool use_sd_stream_ = false;
 
 #if CONFIG_FLP_SD_ENABLED
     SdReadCache sd_cache_;

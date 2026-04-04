@@ -215,12 +215,28 @@ esp_err_t flp::SdReadCache::open(const char *path)
         alloc_size = MAX_CACHE_SIZE;
     }
 
-    uint8_t *buf = static_cast<uint8_t *>(
-        heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    /*
+     * Graceful degradation: if the preferred cache size is unavailable,
+     * progressively try smaller windows instead of failing outright.
+     */
+    constexpr size_t kMinCacheSize = 32 * 1024;
+    size_t chosen_size = alloc_size;
+    uint8_t *buf = nullptr;
+    while (chosen_size >= kMinCacheSize)
+    {
+        buf = static_cast<uint8_t *>(
+            heap_caps_malloc(chosen_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (buf)
+        {
+            break;
+        }
+        chosen_size /= 2;
+    }
     if (!buf)
     {
-        ESP_LOGE(TAG, "SdReadCache: PSRAM alloc failed (%zu bytes)",
-                 alloc_size);
+        ESP_LOGE(TAG,
+                 "SdReadCache: PSRAM alloc failed (tried down to %zu bytes)",
+                 kMinCacheSize);
         fclose(f);
         return ESP_ERR_NO_MEM;
     }
@@ -232,7 +248,15 @@ esp_err_t flp::SdReadCache::open(const char *path)
     file_ = f;
     file_size_ = static_cast<size_t>(fsize);
     cache_buf_ = buf;
-    cache_capacity_ = alloc_size;
+    cache_capacity_ = chosen_size;
+        if (cache_capacity_ < alloc_size)
+        {
+            ESP_LOGW(TAG,
+                     "SdReadCache: reduced cache from %zu KB to %zu KB due to PSRAM pressure",
+                     alloc_size / 1024,
+                     cache_capacity_ / 1024);
+        }
+
     cache_start_ = 0;
     cache_len_ = 0;
     hits_ = 0;

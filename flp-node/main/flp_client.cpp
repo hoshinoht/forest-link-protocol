@@ -36,6 +36,8 @@ void FlpClient::init(UartIngest *api, MeshManager *mgr,
 
 void FlpClient::load_demo_payload()
 {
+    use_sd_stream_ = false;
+
 #if CONFIG_FLP_SD_ENABLED
     esp_err_t sd_err = sdcard_init();
     if (sd_err == ESP_OK)
@@ -64,13 +66,19 @@ void FlpClient::load_demo_payload()
             }
             else
             {
-                ESP_LOGW(TAG, "PSRAM alloc failed for SD file, using fallback");
-                payload_size_ = 0;
+                /* Keep the cache resident and stream chunks during transfer. */
+                use_sd_stream_ = true;
+                ESP_LOGW(TAG,
+                         "PSRAM alloc failed for full SD mirror, using streamed SD mode");
             }
         }
         else
         {
-            ESP_LOGW(TAG, "%s not found on SD card, using fallback", filename_);
+            ESP_LOGW(TAG,
+                     "Failed to open %s from SD cache: %s (0x%x), using fallback",
+                     filename_,
+                     esp_err_to_name(cache_err),
+                     cache_err);
         }
     }
     else
@@ -80,7 +88,7 @@ void FlpClient::load_demo_payload()
 #endif
 
     /* Fallback: 8 KB synthetic pattern */
-    if (!payload_buf_ || payload_size_ == 0)
+    if ((!payload_buf_ && !use_sd_stream_) || payload_size_ == 0)
     {
         payload_buf_ = static_cast<uint8_t *>(
             heap_caps_malloc(FALLBACK_PAYLOAD_SIZE, MALLOC_CAP_SPIRAM));
@@ -103,7 +111,7 @@ void FlpClient::load_demo_payload()
 
 void FlpClient::do_transfer()
 {
-    if (!api_ || !payload_buf_ || payload_size_ == 0)
+    if (!api_ || payload_size_ == 0 || (!payload_buf_ && !use_sd_stream_))
     {
         ESP_LOGE(TAG, "Cannot transfer: no payload loaded");
         return;
@@ -131,13 +139,41 @@ void FlpClient::do_transfer()
 
     /* FILE_DATA in chunks */
     size_t offset = 0;
+    uint8_t chunk_buf[CHUNK_SIZE];
     while (offset < payload_size_)
     {
         size_t remaining = payload_size_ - offset;
         uint16_t chunk_len = static_cast<uint16_t>(
             remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE);
 
-        res = api_->file_data(payload_buf_ + offset, chunk_len);
+        const uint8_t *chunk_ptr = nullptr;
+        if (payload_buf_)
+        {
+            chunk_ptr = payload_buf_ + offset;
+        }
+        else
+        {
+#if CONFIG_FLP_SD_ENABLED
+            size_t got = sd_cache_.read(chunk_buf, offset, chunk_len);
+            if (got != chunk_len)
+            {
+                ESP_LOGE(TAG,
+                         "SD stream read failed at offset %zu: %zu/%u",
+                         offset,
+                         got,
+                         static_cast<unsigned>(chunk_len));
+                api_->abort_transfer();
+                return;
+            }
+            chunk_ptr = chunk_buf;
+#else
+            ESP_LOGE(TAG, "SD stream mode unavailable in this build");
+            api_->abort_transfer();
+            return;
+#endif
+        }
+
+        res = api_->file_data(chunk_ptr, chunk_len);
         if (res != UartResult::OK)
         {
             ESP_LOGE(TAG, "file_data failed at offset %zu: %u",
