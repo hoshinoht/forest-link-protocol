@@ -38,7 +38,7 @@ static constexpr UBaseType_t MQTT_FILE_QUEUE_DEPTH = 2;
  * shrinks automatically to keep memory bounded.
  */
 static constexpr size_t MQTT_FRAGMENT_QUEUE_BUDGET_BYTES =
-    256 * sizeof(LegacyFragmentPublishRequest);
+    512 * sizeof(LegacyFragmentPublishRequest);
 static constexpr UBaseType_t MQTT_FRAGMENT_QUEUE_DEPTH =
     static_cast<UBaseType_t>(
         (MQTT_FRAGMENT_QUEUE_BUDGET_BYTES / sizeof(flp::FragmentPublishRequest))
@@ -799,7 +799,7 @@ void MqttClient::process_fragment_publish()
     }
 
     /*
-     * Fragment data uses QoS 0, so it is sent once and does not rely on the 
+     * Fragment data uses QoS 0, so it is sent once and does not rely on the
      * ESP-MQTT retransmit outbox; recovery is handled by the cloud NACK path.
      */
     FragmentPublishRequest req;

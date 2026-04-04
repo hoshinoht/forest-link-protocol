@@ -169,6 +169,15 @@ func RunEngine(
 	recentlyCompletedMeta := make(map[string]time.Time)
 	recentlyCompletedSession := make(map[string]time.Time)
 
+	// Diagnostic counters (reset per active session in setupActive).
+	var duplicateChunkDrops int
+	var wrongSessionChunkDrops int
+	var stagedChunkCount int
+	var stagedOverflowDrops int
+	var recentlyCompletedChunkDrops int
+	var nextProgressLogPct int
+	var lastDiagLogTime float64
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -177,12 +186,35 @@ func RunEngine(
 	processChunk := func(chunk mqtt.FileChunk) (bool, bool) {
 		seq := int(chunk.SeqNum)
 		isNew := reassembler.WriteChunk(seq, chunk.Data)
-		if isNew {
-			sr.OnChunkReceived(seq)
-			lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
-			s := tq.ActiveTransfer
-			progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
-				reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
+		if !isNew {
+			duplicateChunkDrops++
+			if duplicateChunkDrops == 1 || duplicateChunkDrops%32 == 0 {
+				log.Printf("[transfer][diag] ignored chunk seq=%d for session %s (duplicate/out-of-range, drops=%d)",
+					seq, tq.ActiveTransfer.SessionID, duplicateChunkDrops)
+			}
+			return false, false
+		}
+
+		sr.OnChunkReceived(seq)
+		lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
+		s := tq.ActiveTransfer
+		progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount,
+			reassembler.ChunksReceived, reassembler.Progress(), true, s.StartedAt)
+
+		dataChunkCount := (s.TotalSize + reassembler.ChunkSize - 1) / reassembler.ChunkSize
+		pct := int(reassembler.Progress() * 100)
+		for nextProgressLogPct > 0 && nextProgressLogPct <= 100 && pct >= nextProgressLogPct {
+			log.Printf("[transfer][diag] progress session=%s %d%% (data=%d/%d chunks=%d/%d sr_base=%d pending=%d nacks=%d)",
+				s.SessionID,
+				nextProgressLogPct,
+				reassembler.DataChunksReceived,
+				dataChunkCount,
+				reassembler.ChunksReceived,
+				s.ChunkCount,
+				sr.expectedBase,
+				len(pendingChunks),
+				sr.NACKCount)
+			nextProgressLogPct += 10
 		}
 
 		if reassembler.IsComplete() {
@@ -223,9 +255,24 @@ func RunEngine(
 		lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
 		lastStallNACKTime = 0
 		stallNackRetries = 0
+		duplicateChunkDrops = 0
+		wrongSessionChunkDrops = 0
+		stagedChunkCount = 0
+		stagedOverflowDrops = 0
+		recentlyCompletedChunkDrops = 0
+		nextProgressLogPct = 10
+		lastDiagLogTime = 0
 		progress.Update(s.SessionID, s.Filename, s.TotalSize, s.ChunkCount, 0, 0, true, s.StartedAt)
-		log.Printf("[transfer] started session %s (%s, %d bytes, %d chunks)",
-			s.SessionID, s.Filename, s.TotalSize, s.ChunkCount)
+		log.Printf("[transfer] started session %s (node=%s file=%s size=%d chunks=%d frag=%d crc=0x%08X pending=%d queued=%d)",
+			s.SessionID,
+			s.NodeID,
+			s.Filename,
+			s.TotalSize,
+			s.ChunkCount,
+			s.FragmentSize,
+			s.CRC32,
+			len(pendingChunks),
+			len(tq.queue))
 
 		// B7 fix: replay staged chunks that match this session
 		if len(pendingChunks) > 0 {
@@ -266,6 +313,13 @@ func RunEngine(
 				nacks = sr.NACKCount
 			}
 			log.Printf("[transfer] completed session %s in %.1fs (%d NACKs)", s.SessionID, elapsed, nacks)
+			log.Printf("[transfer][diag] session %s stats: duplicate=%d wrong_session=%d staged=%d staged_overflow=%d completed_drop=%d",
+				s.SessionID,
+				duplicateChunkDrops,
+				wrongSessionChunkDrops,
+				stagedChunkCount,
+				stagedOverflowDrops,
+				recentlyCompletedChunkDrops)
 			expiresAt := time.Now().Add(recentlyCompletedTTL)
 			recentlyCompletedMeta[completedMetaKey(
 				s.SessionID,
@@ -286,6 +340,13 @@ func RunEngine(
 			}
 		} else {
 			log.Printf("[transfer] aborted session %s (timeout)", s.SessionID)
+			log.Printf("[transfer][diag] session %s stats at abort: duplicate=%d wrong_session=%d staged=%d staged_overflow=%d completed_drop=%d",
+				s.SessionID,
+				duplicateChunkDrops,
+				wrongSessionChunkDrops,
+				stagedChunkCount,
+				stagedOverflowDrops,
+				recentlyCompletedChunkDrops)
 		}
 		// Clear staged chunks on completion to prevent stale data
 		// from being replayed into a future session with the same ID
@@ -301,6 +362,14 @@ func RunEngine(
 
 		case meta := <-metaCh:
 			sessionID := meta.SessionID.String()
+			log.Printf("[transfer][diag] meta node=%s session=%s file=%s size=%d chunks=%d frag=%d crc=0x%08X",
+				meta.NodeID,
+				sessionID,
+				meta.Filename,
+				meta.TotalSize,
+				meta.ChunkCount,
+				meta.FragmentSize,
+				meta.CRC32)
 			metaKey := completedMetaKey(
 				sessionID,
 				meta.NodeID,
@@ -345,6 +414,11 @@ func RunEngine(
 			chunkKey := completedSessionKey(chunkSID, chunk.NodeID)
 			if expiresAt, ok := recentlyCompletedSession[chunkKey]; ok {
 				if time.Now().Before(expiresAt) {
+					recentlyCompletedChunkDrops++
+					if recentlyCompletedChunkDrops == 1 || recentlyCompletedChunkDrops%64 == 0 {
+						log.Printf("[transfer][diag] dropping chunk for completed session sid=%s node=%s seq=%d (drops=%d)",
+							chunkSID, chunk.NodeID, chunk.SeqNum, recentlyCompletedChunkDrops)
+					}
 					continue
 				}
 				delete(recentlyCompletedSession, chunkKey)
@@ -353,12 +427,31 @@ func RunEngine(
 			if tq.ActiveTransfer == nil || reassembler == nil || sr == nil {
 				if len(pendingChunks) < maxPendingChunks {
 					pendingChunks = append(pendingChunks, chunk)
+					stagedChunkCount++
+					if stagedChunkCount == 1 || stagedChunkCount%64 == 0 {
+						log.Printf("[transfer][diag] staged chunk sid=%s seq=%d pending=%d/%d",
+							chunkSID, chunk.SeqNum, len(pendingChunks), maxPendingChunks)
+					}
+				} else {
+					stagedOverflowDrops++
+					if stagedOverflowDrops == 1 || stagedOverflowDrops%16 == 0 {
+						log.Printf("[transfer][diag] pending buffer full, dropping chunk sid=%s seq=%d (drops=%d, cap=%d)",
+							chunkSID, chunk.SeqNum, stagedOverflowDrops, maxPendingChunks)
+					}
 				}
 				continue
 			}
 
 			// B4 fix: filter stale chunks from wrong session
 			if chunkSID != tq.ActiveTransfer.SessionID {
+				wrongSessionChunkDrops++
+				if wrongSessionChunkDrops == 1 || wrongSessionChunkDrops%32 == 0 {
+					log.Printf("[transfer][diag] dropping wrong-session chunk sid=%s seq=%d (active=%s drops=%d)",
+						chunkSID,
+						chunk.SeqNum,
+						tq.ActiveTransfer.SessionID,
+						wrongSessionChunkDrops)
+				}
 				continue
 			}
 
@@ -388,6 +481,30 @@ func RunEngine(
 					completeTransfer(false)
 				}
 			}
+			if tq.ActiveTransfer != nil && sr != nil && reassembler != nil {
+				now := float64(time.Now().UnixMilli()) / 1000.0
+				if lastDiagLogTime == 0 || now-lastDiagLogTime >= 5.0 {
+					s := tq.ActiveTransfer
+					dataChunkCount := (s.TotalSize + reassembler.ChunkSize - 1) / reassembler.ChunkSize
+					chunkAge := 0.0
+					if lastChunkTime > 0 {
+						chunkAge = now - lastChunkTime
+					}
+					log.Printf("[transfer][diag] live session=%s node=%s progress=%.1f%% data=%d/%d chunks=%d/%d base=%d pending=%d nacks=%d age=%.1fs",
+						s.SessionID,
+						s.NodeID,
+						reassembler.Progress()*100.0,
+						reassembler.DataChunksReceived,
+						dataChunkCount,
+						reassembler.ChunksReceived,
+						s.ChunkCount,
+						sr.expectedBase,
+						len(pendingChunks),
+						sr.NACKCount,
+						chunkAge)
+					lastDiagLogTime = now
+				}
+			}
 			// D1+B3 fix: stall-based end-to-end NACK bridge.
 			// If no chunks arrived for 5s but transfer is incomplete,
 			// publish missing seqs so exit nodes can re-request from source.
@@ -396,8 +513,8 @@ func RunEngine(
 				now := float64(time.Now().UnixMilli()) / 1000.0
 
 				cooldown := 4.0 * float64(int(1)<<stallNackRetries)
-				if cooldown > 32.0 {
-					cooldown = 32.0
+				if cooldown > 16.0 {
+					cooldown = 16.0
 				}
 
 				if now-lastStallNACKTime >= cooldown {
@@ -406,8 +523,12 @@ func RunEngine(
 						mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, gaps)
 						lastStallNACKTime = now
 						stallNackRetries++
-						log.Printf("[transfer] stall detected, published %d NACKs for session %s (cooldown: %.1fs)",
-							len(gaps), tq.ActiveTransfer.SessionID, cooldown)
+						log.Printf("[transfer] stall detected, published %d NACKs for session %s (seq=%d..%d cooldown=%.1fs)",
+							len(gaps),
+							tq.ActiveTransfer.SessionID,
+							gaps[0],
+							gaps[len(gaps)-1],
+							cooldown)
 					}
 				}
 			}
