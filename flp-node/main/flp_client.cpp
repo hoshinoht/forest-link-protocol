@@ -128,68 +128,74 @@ void FlpClient::do_transfer()
     ESP_LOGI(TAG, "Starting transfer: %s (%u bytes)",
              filename_, (unsigned)payload_size_);
 
-    /* FILE_BEGIN */
-    UartResult res = api_->file_begin(
-        static_cast<uint32_t>(payload_size_), filename_);
-    if (res != UartResult::OK)
+    if (use_sd_stream_)
     {
-        ESP_LOGE(TAG, "file_begin failed: %u", static_cast<unsigned>(res));
-        return;
-    }
-
-    /* FILE_DATA in chunks */
-    size_t offset = 0;
-    uint8_t chunk_buf[CHUNK_SIZE];
-    while (offset < payload_size_)
-    {
-        size_t remaining = payload_size_ - offset;
-        uint16_t chunk_len = static_cast<uint16_t>(
-            remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE);
-
-        const uint8_t *chunk_ptr = nullptr;
-        if (payload_buf_)
-        {
-            chunk_ptr = payload_buf_ + offset;
-        }
-        else
-        {
 #if CONFIG_FLP_SD_ENABLED
-            size_t got = sd_cache_.read(chunk_buf, offset, chunk_len);
-            if (got != chunk_len)
+        if (!mgr_)
+        {
+            ESP_LOGE(TAG, "Cannot stream transfer: mesh manager unavailable");
+            return;
+        }
+
+        ESP_LOGI(TAG,
+                 "Starting streamed transfer from SD cache: %s (%u bytes)",
+                 filename_,
+                 (unsigned)payload_size_);
+
+        bool started = mgr_->start_file_transfer(
+            filename_,
+            payload_size_,
+            [this](uint8_t *buf, size_t offset, size_t len) -> size_t
             {
-                ESP_LOGE(TAG,
-                         "SD stream read failed at offset %zu: %zu/%u",
-                         offset,
-                         got,
-                         static_cast<unsigned>(chunk_len));
+                return sd_cache_.read(buf, offset, len);
+            });
+        if (!started)
+        {
+            ESP_LOGE(TAG, "start_file_transfer (streamed) failed");
+            return;
+        }
+#else
+        ESP_LOGE(TAG, "SD stream mode unavailable in this build");
+        return;
+#endif
+    }
+    else
+    {
+        /* FILE_BEGIN */
+        UartResult res = api_->file_begin(
+            static_cast<uint32_t>(payload_size_), filename_);
+        if (res != UartResult::OK)
+        {
+            ESP_LOGE(TAG, "file_begin failed: %u", static_cast<unsigned>(res));
+            return;
+        }
+
+        /* FILE_DATA in chunks */
+        size_t offset = 0;
+        while (offset < payload_size_)
+        {
+            size_t remaining = payload_size_ - offset;
+            uint16_t chunk_len = static_cast<uint16_t>(
+                remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE);
+
+            res = api_->file_data(payload_buf_ + offset, chunk_len);
+            if (res != UartResult::OK)
+            {
+                ESP_LOGE(TAG, "file_data failed at offset %zu: %u",
+                         offset, static_cast<unsigned>(res));
                 api_->abort_transfer();
                 return;
             }
-            chunk_ptr = chunk_buf;
-#else
-            ESP_LOGE(TAG, "SD stream mode unavailable in this build");
-            api_->abort_transfer();
-            return;
-#endif
+            offset += chunk_len;
         }
 
-        res = api_->file_data(chunk_ptr, chunk_len);
+        /* FILE_END (non-blocking — starts mesh transfer) */
+        res = api_->file_end();
         if (res != UartResult::OK)
         {
-            ESP_LOGE(TAG, "file_data failed at offset %zu: %u",
-                     offset, static_cast<unsigned>(res));
-            api_->abort_transfer();
+            ESP_LOGE(TAG, "file_end failed: %u", static_cast<unsigned>(res));
             return;
         }
-        offset += chunk_len;
-    }
-
-    /* FILE_END (non-blocking — starts mesh transfer) */
-    res = api_->file_end();
-    if (res != UartResult::OK)
-    {
-        ESP_LOGE(TAG, "file_end failed: %u", static_cast<unsigned>(res));
-        return;
     }
 
     ESP_LOGI(TAG, "Transfer initiated, waiting for completion...");

@@ -161,9 +161,26 @@ void TransferEngine::init(EventGroupHandle_t events,
     my_addr_ = my_addr;
     send_fn_ = send_fn;
 
+    // Allocates memory for set exit nodes, and not max
+    // so that the allocation is only for how many exits this node expects
+    // to use
+    uint8_t prealloc_count = MAX_EXIT_NODES;
+#ifdef CONFIG_FLP_MAX_ELECTED_EXITS
+    prealloc_count = static_cast<uint8_t>(CONFIG_FLP_MAX_ELECTED_EXITS);
+    if (prealloc_count == 0)
+    {
+        prealloc_count = 1;
+    }
+    if (prealloc_count > MAX_EXIT_NODES)
+    {
+        prealloc_count = MAX_EXIT_NODES;
+    }
+#endif
+
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
-        if (!arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS))
+        if (i < prealloc_count &&
+            !arq_[i].init(ARQ_WINDOW, BASE_ARQ_TIMEOUT_MS))
         {
             ESP_LOGE(TAG, "Failed to init ARQ window %d", i);
         }
@@ -177,6 +194,11 @@ void TransferEngine::init(EventGroupHandle_t events,
                 return send_fn_(dst, type, data, len, seq);
             });
     }
+
+    ESP_LOGI(TAG,
+             "ARQ prealloc: %u/%u windows",
+             static_cast<unsigned>(prealloc_count),
+             static_cast<unsigned>(MAX_EXIT_NODES));
 
     ESP_LOGI(TAG, "TransferEngine initialized");
 }
