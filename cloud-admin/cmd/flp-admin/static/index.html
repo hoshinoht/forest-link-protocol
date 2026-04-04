@@ -416,12 +416,6 @@ tr:hover td { background: var(--md-sys-color-surface-container-high); }
     <span class="label">Messaging</span>
   </a>
 
-  <a class="nav-item" data-tab="comparison">
-    <div class="icon-wrap">
-      <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
-    </div>
-    <span class="label">Compare</span>
-  </a>
 </nav>
 
 <!-- ════════════════ Main Content ════════════════ -->
@@ -435,9 +429,6 @@ tr:hover td { background: var(--md-sys-color-surface-container-high); }
     <!-- ════ Topology ════ -->
     <div id="topology" class="panel active">
       <div class="stat-grid" id="topo-stats"></div>
-      <div style="display:flex;gap:12px;margin-bottom:16px;">
-        <button class="m3-btn-tonal" id="crawl-btn" onclick="crawlMesh()">Crawl Mesh</button>
-      </div>
       <div id="topo-container"></div>
     </div>
 
@@ -514,12 +505,6 @@ tr:hover td { background: var(--md-sys-color-surface-container-high); }
       <div class="msg-log" id="msg-log"></div>
     </div>
 
-    <!-- ════ Comparison ════ -->
-    <div id="comparison" class="panel">
-      <div class="chart-wrap"><canvas id="compare-pdr"></canvas></div>
-      <div class="chart-wrap"><canvas id="compare-throughput"></canvas></div>
-      <div class="chart-wrap"><canvas id="compare-latency"></canvas></div>
-    </div>
 
   </div>
 </div>
@@ -579,7 +564,6 @@ document.querySelectorAll('.nav-item').forEach(item => {
         document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
         item.classList.add('active');
         document.getElementById(item.dataset.tab).classList.add('active');
-        if (item.dataset.tab === 'comparison') loadComparison();
         if (item.dataset.tab === 'transfers') loadTransfers();
         if (item.dataset.tab === 'memory') loadHeap();
     });
@@ -718,31 +702,6 @@ async function loadTransfers() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   Comparison
-   ═══════════════════════════════════════════════════════════════════ */
-let cmpCharts = [];
-async function loadComparison() {
-    const r = await fetch('/api/comparison', {credentials:'same-origin'});
-    const data = await r.json();
-    cmpCharts.forEach(c => c.destroy()); cmpCharts = [];
-    if (!data.length) return;
-    const names = data.map(d=>d.name);
-    const colors = ['#A5D6A7','#66BB6A','#A1CED5','#FFB4AB','#EF5350','#8C9388'];
-    const bg = names.map((_,i)=>colors[i%colors.length]);
-    function bar(id,label,vals,unit) {
-        cmpCharts.push(new Chart(document.getElementById(id), {
-            type:'bar', data:{labels:names, datasets:[{label:label+(unit?' ('+unit+')':''), data:vals, backgroundColor:bg}]},
-            options:{responsive:true, indexAxis:'y',
-                plugins:{legend:{labels:{color:'#C2C9BD'}}},
-                scales:{x:{ticks:{color:'#8C9388'},grid:{color:'#42493F'}},y:{ticks:{color:'#C2C9BD'},grid:{color:'#42493F'}}}}
-        }));
-    }
-    bar('compare-pdr','PDR',data.map(d=>d.pdr*100),'%');
-    bar('compare-throughput','Throughput',data.map(d=>d.throughput_bps/1000),'kbps');
-    bar('compare-latency','Latency',data.map(d=>d.latency_ms),'ms');
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
    Memory / Heap
    ═══════════════════════════════════════════════════════════════════ */
 let heapChart = null;
@@ -858,23 +817,6 @@ async function pollActiveTransfer() {
 }
 setInterval(pollActiveTransfer, 2000);
 pollActiveTransfer();
-
-/* ═══════════════════════════════════════════════════════════════════════
-   Crawl Mesh
-   ═══════════════════════════════════════════════════════════════════ */
-async function crawlMesh() {
-    const btn = document.getElementById('crawl-btn');
-    btn.disabled=true; btn.textContent='Crawling...';
-    try {
-        const r = await fetch('/api/crawl', {credentials:'same-origin'});
-        const d = await r.json();
-        btn.textContent='Pinged '+d.nodes_pinged+' nodes';
-        setTimeout(()=>{btn.textContent='Crawl Mesh';btn.disabled=false;},3000);
-    } catch(e) {
-        btn.textContent='Error';
-        setTimeout(()=>{btn.textContent='Crawl Mesh';btn.disabled=false;},3000);
-    }
-}
 
 /* ═══════════════════════════════════════════════════════════════════════
    Node Commands

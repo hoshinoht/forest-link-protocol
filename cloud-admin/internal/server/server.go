@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,10 +23,7 @@ import (
 )
 
 // Assets must be set by the main package before calling Start.
-var (
-	StaticFS    embed.FS
-	BenchmarkFS embed.FS
-)
+var StaticFS embed.FS
 
 func jsonResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -300,70 +296,6 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		jsonResponse(w, result)
 	})
 
-	// GET /api/benchmarks
-	mux.HandleFunc("/api/benchmarks", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if store != nil {
-			data, err := store.QueryBenchmarks()
-			if err != nil {
-				errorResponse(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			jsonResponse(w, data)
-		} else {
-			jsonResponse(w, []interface{}{})
-		}
-	})
-
-	// GET /api/comparison
-	mux.HandleFunc("/api/comparison", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var benchmarks []interface{}
-
-		entries, err := BenchmarkFS.ReadDir("benchmarks")
-		if err == nil {
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].Name() < entries[j].Name()
-			})
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-					continue
-				}
-				data, err := BenchmarkFS.ReadFile("benchmarks/" + entry.Name())
-				if err != nil {
-					log.Printf("[http] failed to read benchmark %s: %v", entry.Name(), err)
-					continue
-				}
-				var parsed interface{}
-				if err := json.Unmarshal(data, &parsed); err != nil {
-					log.Printf("[http] failed to parse benchmark %s: %v", entry.Name(), err)
-					continue
-				}
-				benchmarks = append(benchmarks, parsed)
-			}
-		}
-
-		if store != nil {
-			flp, err := store.DerivedMetrics()
-			if err != nil {
-				log.Printf("[http] derived metrics error: %v", err)
-			} else if flp != nil {
-				benchmarks = append([]interface{}{flp}, benchmarks...)
-			}
-		}
-
-		if benchmarks == nil {
-			benchmarks = []interface{}{}
-		}
-		jsonResponse(w, benchmarks)
-	})
 
 	// GET /api/active-transfer
 	mux.HandleFunc("/api/active-transfer", func(w http.ResponseWriter, r *http.Request) {
@@ -375,29 +307,6 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		w.Write(progress.ToJSON())
 	})
 
-	// GET /api/crawl
-	mux.HandleFunc("/api/crawl", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		nodeIDs := topo.NodeIDs()
-		for _, id := range nodeIDs {
-			targetAddr, err := strconv.ParseUint(id, 16, 16)
-			if err != nil {
-				continue
-			}
-			payload := make([]byte, 3)
-			binary.LittleEndian.PutUint16(payload[0:2], uint16(targetAddr))
-			payload[2] = 0x01
-			mqttClient.PublishCmd(payload)
-		}
-		bcast := []byte{0xFF, 0xFF, 0x01}
-		mqttClient.PublishCmd(bcast)
-
-		jsonResponse(w, map[string]interface{}{"ok": true, "nodes_pinged": len(nodeIDs)})
-	})
 
 	var handler http.Handler = mux
 	if adminPass != "" {
