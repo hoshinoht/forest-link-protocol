@@ -179,6 +179,11 @@ flp::SdReadCache::~SdReadCache()
         heap_caps_free(cache_buf_);
         cache_buf_ = nullptr;
     }
+    if (random_cache_buf_)
+    {
+        heap_caps_free(random_cache_buf_);
+        random_cache_buf_ = nullptr;
+    }
 }
 
 esp_err_t flp::SdReadCache::open(const char *path)
@@ -244,6 +249,7 @@ esp_err_t flp::SdReadCache::open(const char *path)
     /* Release any previous state */
     if (file_)  { fclose(file_); }
     if (cache_buf_) { heap_caps_free(cache_buf_); }
+    if (random_cache_buf_) { heap_caps_free(random_cache_buf_); }
 
     file_ = f;
     file_size_ = static_cast<size_t>(fsize);
@@ -259,8 +265,23 @@ esp_err_t flp::SdReadCache::open(const char *path)
 
     cache_start_ = 0;
     cache_len_ = 0;
+    random_cache_buf_ = nullptr;
+    random_clock_ = 0;
+    random_hits_ = 0;
+    random_misses_ = 0;
+    memset(random_slots_, 0, sizeof(random_slots_));
     hits_ = 0;
     misses_ = 0;
+
+    size_t random_bytes = RANDOM_PAGE_SIZE * RANDOM_PAGE_COUNT;
+    random_cache_buf_ = static_cast<uint8_t *>(
+        heap_caps_malloc(random_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!random_cache_buf_)
+    {
+        ESP_LOGW(TAG,
+                 "SdReadCache: random cache alloc failed (%zu bytes), direct small reads only",
+                 random_bytes);
+    }
 
     /* Prime the cache — if file fits, this loads everything */
     refill(0);
@@ -314,8 +335,6 @@ bool flp::SdReadCache::refill(size_t offset)
 
 size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
 {
-    constexpr size_t kRandomReadBypassMaxLen = 4 * 1024;
-
     if (!cache_buf_ || !file_ || !buf || offset >= file_size_)
     {
         return 0;
@@ -339,19 +358,16 @@ size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
 
     /*
      * Cache miss. For small random reads (typical ARQ/OOW retransmits),
-     * avoid refilling a large cache window and read directly from SD.
-     * This preserves the hot sequential window and prevents refill thrash.
+     * route through a small page cache so random re-reads do not disturb
+     * the large sequential stream window.
      */
     misses_++;
-    if (cache_len_ > 0 && len <= kRandomReadBypassMaxLen)
+    if (cache_len_ > 0 && len <= RANDOM_PAGE_SIZE)
     {
-        if (fseek(file_, static_cast<long>(offset), SEEK_SET) == 0)
+        size_t got = read_via_random_pages(buf, offset, len);
+        if (got > 0)
         {
-            size_t got = fread(buf, 1, len, file_);
-            if (got > 0)
-            {
-                return got;
-            }
+            return got;
         }
     }
 
@@ -393,4 +409,154 @@ size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
     }
 
     return first;
+}
+
+size_t flp::SdReadCache::read_via_random_pages(uint8_t *buf,
+                                               size_t offset,
+                                               size_t len)
+{
+    if (!file_ || !buf || len == 0)
+    {
+        return 0;
+    }
+
+    size_t copied = 0;
+    while (copied < len)
+    {
+        size_t cur = offset + copied;
+        size_t page_index = cur / RANDOM_PAGE_SIZE;
+        size_t page_off = cur % RANDOM_PAGE_SIZE;
+        size_t need = len - copied;
+        size_t chunk = RANDOM_PAGE_SIZE - page_off;
+        if (chunk > need)
+        {
+            chunk = need;
+        }
+
+        if (!random_cache_buf_)
+        {
+            if (fseek(file_, static_cast<long>(cur), SEEK_SET) != 0)
+            {
+                break;
+            }
+            size_t got = fread(buf + copied, 1, chunk, file_);
+            copied += got;
+            if (got < chunk)
+            {
+                break;
+            }
+            continue;
+        }
+
+        int slot = find_random_page(page_index);
+        if (slot < 0)
+        {
+            random_misses_++;
+            slot = choose_random_slot();
+            if (slot < 0 || !load_random_page(page_index, slot))
+            {
+                break;
+            }
+        }
+        else
+        {
+            random_hits_++;
+            random_slots_[slot].stamp = ++random_clock_;
+        }
+
+        size_t avail = 0;
+        if (random_slots_[slot].valid_len > page_off)
+        {
+            avail = random_slots_[slot].valid_len - page_off;
+        }
+        if (avail == 0)
+        {
+            break;
+        }
+
+        size_t take = (avail < chunk) ? avail : chunk;
+        memcpy(buf + copied,
+               random_cache_buf_ + (static_cast<size_t>(slot) * RANDOM_PAGE_SIZE) + page_off,
+               take);
+        copied += take;
+        if (take < chunk)
+        {
+            break;
+        }
+    }
+
+    return copied;
+}
+
+int flp::SdReadCache::find_random_page(size_t page_index) const
+{
+    for (int i = 0; i < static_cast<int>(RANDOM_PAGE_COUNT); i++)
+    {
+        if (random_slots_[i].valid && random_slots_[i].page_index == page_index)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int flp::SdReadCache::choose_random_slot() const
+{
+    int oldest_slot = -1;
+    uint32_t oldest_stamp = 0;
+
+    for (int i = 0; i < static_cast<int>(RANDOM_PAGE_COUNT); i++)
+    {
+        if (!random_slots_[i].valid)
+        {
+            return i;
+        }
+
+        if (oldest_slot < 0 || random_slots_[i].stamp < oldest_stamp)
+        {
+            oldest_slot = i;
+            oldest_stamp = random_slots_[i].stamp;
+        }
+    }
+
+    return oldest_slot;
+}
+
+bool flp::SdReadCache::load_random_page(size_t page_index, int slot)
+{
+    if (!file_ || !random_cache_buf_ || slot < 0 ||
+        slot >= static_cast<int>(RANDOM_PAGE_COUNT))
+    {
+        return false;
+    }
+
+    size_t page_start = page_index * RANDOM_PAGE_SIZE;
+    if (page_start >= file_size_)
+    {
+        return false;
+    }
+
+    if (fseek(file_, static_cast<long>(page_start), SEEK_SET) != 0)
+    {
+        return false;
+    }
+
+    size_t want = RANDOM_PAGE_SIZE;
+    if (page_start + want > file_size_)
+    {
+        want = file_size_ - page_start;
+    }
+
+    uint8_t *dst = random_cache_buf_ + (static_cast<size_t>(slot) * RANDOM_PAGE_SIZE);
+    size_t got = fread(dst, 1, want, file_);
+    if (got == 0)
+    {
+        return false;
+    }
+
+    random_slots_[slot].valid = true;
+    random_slots_[slot].page_index = page_index;
+    random_slots_[slot].valid_len = got;
+    random_slots_[slot].stamp = ++random_clock_;
+    return true;
 }

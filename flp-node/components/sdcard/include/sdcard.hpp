@@ -44,6 +44,8 @@ class SdReadCache
 {
   public:
     static constexpr size_t MAX_CACHE_SIZE = 512 * 1024;  /* 512 KB cap */
+    static constexpr size_t RANDOM_PAGE_SIZE = 4 * 1024;
+    static constexpr size_t RANDOM_PAGE_COUNT = 16;
 
     SdReadCache() = default;
     ~SdReadCache();
@@ -80,14 +82,31 @@ class SdReadCache
     uint32_t cache_misses() const { return misses_; }
 
   private:
+    struct RandomPageSlot
+    {
+        size_t page_index = 0;
+        size_t valid_len = 0;
+        uint32_t stamp = 0;
+        bool valid = false;
+    };
+
     bool refill(size_t offset);
+    size_t read_via_random_pages(uint8_t *buf, size_t offset, size_t len);
+    int find_random_page(size_t page_index) const;
+    int choose_random_slot() const;
+    bool load_random_page(size_t page_index, int slot);
 
     FILE *file_ = nullptr;
     uint8_t *cache_buf_ = nullptr;  /* PSRAM-allocated */
+    uint8_t *random_cache_buf_ = nullptr;
     size_t file_size_ = 0;
     size_t cache_capacity_ = 0;     /* allocated buffer size */
     size_t cache_start_ = 0;        /* file offset of first cached byte */
     size_t cache_len_ = 0;          /* valid bytes currently in cache */
+    RandomPageSlot random_slots_[RANDOM_PAGE_COUNT] = {};
+    uint32_t random_clock_ = 0;
+    uint32_t random_hits_ = 0;
+    uint32_t random_misses_ = 0;
     uint32_t hits_ = 0;
     uint32_t misses_ = 0;
 };
