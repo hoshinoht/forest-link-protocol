@@ -172,7 +172,6 @@ func RunEngine(
 	// Stall NACK cooldown: don't flood every second
 	var lastStallNACKTime float64
 	var stallNackRetries int
-	stallSeqLastNACKTime := make(map[int]float64)
 	recentlyCompletedMeta := make(map[string]time.Time)
 	recentlyCompletedSession := make(map[string]time.Time)
 	activeMetaLastSeen := make(map[string]float64)
@@ -264,7 +263,6 @@ func RunEngine(
 		lastChunkTime = float64(time.Now().UnixMilli()) / 1000.0
 		lastStallNACKTime = 0
 		stallNackRetries = 0
-		stallSeqLastNACKTime = make(map[int]float64)
 		duplicateChunkDrops = 0
 		wrongSessionChunkDrops = 0
 		collidedSessionChunkDrops = 0
@@ -578,35 +576,23 @@ func RunEngine(
 				}
 
 				if now-lastStallNACKTime >= cooldown {
-					gaps := sr.CheckStall(lastChunkTime, 5.0)
-					if len(gaps) > 0 {
+					if len(sr.CheckStall(lastChunkTime, 5.0)) > 0 {
 						const perSeqNackCooldownSec = 8.0
 						const maxStallNacksPerTick = 8
-						filtered := make([]int, 0, len(gaps))
-						for _, seq := range gaps {
-							if lastAt, ok := stallSeqLastNACKTime[seq]; ok && now-lastAt < perSeqNackCooldownSec {
-								continue
-							}
-							filtered = append(filtered, seq)
-							if len(filtered) >= maxStallNacksPerTick {
-								break
-							}
-						}
+						const maxProbeAhead = 64
+						filtered := sr.BuildFilteredStallNACKs(maxStallNacksPerTick, maxProbeAhead, perSeqNackCooldownSec)
 						if len(filtered) > 0 {
 							mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, filtered)
-							for _, seq := range filtered {
-								stallSeqLastNACKTime[seq] = now
-							}
 							lastStallNACKTime = now
 							stallNackRetries++
-							log.Printf("[transfer] stall detected, published %d/%d NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs)",
+							log.Printf("[transfer] stall detected, published %d filtered NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs horizon=%d)",
 								len(filtered),
-								len(gaps),
 								tq.ActiveTransfer.SessionID,
 								filtered[0],
 								filtered[len(filtered)-1],
 								cooldown,
-								perSeqNackCooldownSec)
+								perSeqNackCooldownSec,
+								maxProbeAhead)
 						}
 					}
 				}

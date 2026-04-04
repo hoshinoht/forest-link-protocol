@@ -1,7 +1,10 @@
 // Package transfer implements selective-repeat ARQ and file reassembly.
 package transfer
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 // SelectiveRepeat implements a receiver-side selective repeat protocol.
 // It tracks received chunks via a bitmap and issues NACKs for missing
@@ -126,6 +129,61 @@ func (sr *SelectiveRepeat) CheckStall(lastChunkTime float64, stallSec float64) [
 			missing = append(missing, seq)
 		}
 	}
+	return missing
+}
+
+// BuildFilteredStallNACKs returns a bounded, near-base list of missing chunks
+// that are currently eligible for stall NACK publication.
+//
+// Filtering rules:
+// 1) only chunks actually missing in the bitmap,
+// 2) only within a near-base horizon,
+// 3) per-sequence cooldown shared via sr.lastNACKTime.
+func (sr *SelectiveRepeat) BuildFilteredStallNACKs(maxGaps, maxProbeAhead int, perSeqCooldownSec float64) []int {
+	if sr.bitmap == nil || sr.totalChunks == 0 {
+		return nil
+	}
+	if maxGaps <= 0 {
+		maxGaps = 8
+	}
+	if maxProbeAhead <= 0 {
+		maxProbeAhead = 64
+	}
+	if perSeqCooldownSec <= 0 {
+		perSeqCooldownSec = 8.0
+	}
+
+	now := float64(time.Now().UnixMilli()) / 1000.0
+	end := sr.expectedBase + maxProbeAhead
+	if end > sr.totalChunks {
+		end = sr.totalChunks
+	}
+
+	missing := make([]int, 0, maxGaps)
+	cooldownSuppressed := 0
+	alreadyReceived := 0
+	for seq := sr.expectedBase; seq < end && len(missing) < maxGaps; seq++ {
+		if sr.isReceived(seq) {
+			alreadyReceived++
+			continue
+		}
+		if last, ok := sr.lastNACKTime[seq]; ok && (now-last) < perSeqCooldownSec {
+			cooldownSuppressed++
+			continue
+		}
+		sr.lastNACKTime[seq] = now
+		missing = append(missing, seq)
+	}
+
+	if len(missing) > 0 || cooldownSuppressed > 0 {
+		log.Printf("[transfer][diag] stall-filter base=%d horizon=%d selected=%d cooldown_suppressed=%d already_received=%d",
+			sr.expectedBase,
+			end,
+			len(missing),
+			cooldownSuppressed,
+			alreadyReceived)
+	}
+
 	return missing
 }
 

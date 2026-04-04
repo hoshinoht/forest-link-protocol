@@ -331,10 +331,10 @@ void TransferEngine::tick_mesh_arq()
         return;
     }
 
-    if (mesh_upload_done_)
-    {
-        return;
-    }
+    /* Keep draining late cloud-driven OOW retransmits even after the mesh
+     * upload has fully drained. This closes the final reliability gap where
+     * cloud NACKs for a few missing fragments arrive after mesh_done=1. */
+    bool mesh_data_phase_done = mesh_upload_done_;
 
     /* Count alive exit nodes */
     uint8_t alive_count = 0;
@@ -527,6 +527,13 @@ void TransferEngine::tick_mesh_arq()
     if (oow_retx_count_ >= kOowBacklogHighWater)
     {
         signal_congestion();
+        return;
+    }
+
+    /* Mesh data phase is complete: do not send new data fragments or run
+     * redistribution logic, but continue to service OOW retransmits above. */
+    if (mesh_data_phase_done)
+    {
         return;
     }
 
