@@ -1,0 +1,2 @@
+timestamp_ms,node_addr,role,session_id,file,size_bytes,hops,exits,elapsed_ms,progress_pct,sent_bytes,tx_Bps,acked_frags,ack_fps,inflight,max_inflight,mesh_retx,oow_queued,oow_sent,cong,bp,mesh_ms,cloud_wait_ms,e2e_Bps,mesh_Bps,result
+107618,0x7AE0,source,44907,demo-large.jpg,1061002,2,2,97037,100,1061002,10959,833,0,0,24,148,67,67,0,0,96810,227,10933,10959,complete
