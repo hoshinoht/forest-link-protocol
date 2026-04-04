@@ -153,6 +153,11 @@ class MeshManager
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         return last_cloud_cmd_ms_ > 0 && (now - last_cloud_cmd_ms_) < 3000;
     }
+    bool has_recent_config_cmd() const
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        return last_config_topic_ms_ > 0 && (now - last_config_topic_ms_) < 3000;
+    }
     bool is_transfer_active() const
     {
         return transfer_engine_.is_transfer_active();
@@ -271,6 +276,9 @@ class MeshManager
 
     /* Cloud command indicator (display auto-clears after 3s) */
     uint32_t last_cloud_cmd_ms_ = 0;
+
+    /* Config topic indicator (display auto-clears after 3s) */
+    uint32_t last_config_topic_ms_ = 0;
 
     /* Display snapshot shared with display task */
     NodeStatus display_snapshot_ = {};

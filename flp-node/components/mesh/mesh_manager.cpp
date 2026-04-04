@@ -553,6 +553,7 @@ void MeshManager::run()
             display_snapshot_.uptime_s =
                 static_cast<uint32_t>(esp_timer_get_time() / 1000000);
             display_snapshot_.cloud_cmd_received = has_recent_cloud_cmd();
+            display_snapshot_.config_cmd_received = has_recent_config_cmd();
 
             const char *fn = transfer_engine_.current_filename();
             if (fn)

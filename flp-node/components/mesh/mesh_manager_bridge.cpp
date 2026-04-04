@@ -232,6 +232,12 @@ void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
                      topic,
                      payload_len);
 
+            if (strcmp(topic, "config") == 0)
+            {
+                last_config_topic_ms_ =
+                    static_cast<uint32_t>(esp_timer_get_time() / 1000);
+            }
+
             /* Forward to UART as downlink event */
             if (uart_ingest_)
             {

@@ -23,6 +23,7 @@ struct NodeStatus
     uint32_t free_heap_kb;
     uint32_t uptime_s;
     bool cloud_cmd_received;
+    bool config_cmd_received;
 };
 
 class OledDisplay
