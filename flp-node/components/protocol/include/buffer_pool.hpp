@@ -41,11 +41,10 @@ struct LegacyBufferSlab
 class BufferPool
 {
   public:
-    /* 
-     * Scale up for 2MB PSRAM constraint: Allocate ~1MB exactly for buffering.
-     * This yields ~706 slabs, massively increasing tolerance for ESP-NOW bursts.
+    /*
+     * Allocate 512 KB for buffering to reduce PSRAM pressure during startup.
      */
-    static constexpr size_t POOL_BUDGET_BYTES = 1048576; // 1 MB
+    static constexpr size_t POOL_BUDGET_BYTES = 512 * 1024; // 512 KB
     static constexpr uint16_t POOL_SIZE =
         static_cast<uint16_t>((POOL_BUDGET_BYTES / sizeof(BufferSlab)) > 0
                                  ? (POOL_BUDGET_BYTES / sizeof(BufferSlab))
