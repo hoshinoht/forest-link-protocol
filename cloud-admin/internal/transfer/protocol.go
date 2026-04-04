@@ -66,17 +66,27 @@ func (sr *SelectiveRepeat) OnChunkReceived(seq int) {
 }
 
 // CheckTimeouts sends NACKs for missing chunks in the current window,
-// with a per-sequence cooldown to prevent flooding.
-func (sr *SelectiveRepeat) CheckTimeouts() {
+// with a per-sequence cooldown and per-tick cap to prevent flooding.
+func (sr *SelectiveRepeat) CheckTimeouts(maxPerTick int) {
 	if sr.bitmap == nil {
 		return
+	}
+	if maxPerTick <= 0 {
+		maxPerTick = 8
 	}
 	now := float64(time.Now().UnixMilli()) / 1000.0
 	end := sr.expectedBase + sr.windowSize
 	if end > sr.totalChunks {
 		end = sr.totalChunks
 	}
-	const nackCooldown = 2.0
+	// Limit timeout probing to a near-base horizon so we do not spray far-ahead NACKs.
+	const maxProbeAhead = 64
+	horizon := sr.expectedBase + maxProbeAhead
+	if end > horizon {
+		end = horizon
+	}
+	const nackCooldown = 4.0
+	sent := 0
 
 	for seq := sr.expectedBase; seq < end; seq++ {
 		if sr.isReceived(seq) {
@@ -90,6 +100,10 @@ func (sr *SelectiveRepeat) CheckTimeouts() {
 		sr.NACKCount++
 		if sr.AckCallback != nil {
 			sr.AckCallback("NACK", seq)
+		}
+		sent++
+		if sent >= maxPerTick {
+			break
 		}
 	}
 }

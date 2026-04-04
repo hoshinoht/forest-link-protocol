@@ -3,7 +3,7 @@
 /*
  * =============================================================================
  * transfer_engine.hpp — File transfer state machine
- * 
+ *
  * Owns: ActiveTransfer, BroadcastRetry, exit-node election, SelectiveRepeat ARQ
  * Extracted from MeshManager to keep responsibilities focused.
  * =============================================================================
@@ -292,8 +292,8 @@ class TransferEngine
     static constexpr uint32_t BASE_ARQ_TIMEOUT_MS = 3000;
     static constexpr uint32_t PER_HOP_ARQ_TIMEOUT_MS = 1000;
     static constexpr uint32_t MAX_ARQ_TIMEOUT_MS = 8000;
-    static constexpr uint32_t MULTIHOP_MIN_RTO_FLOOR_MS = 1200;
-    static constexpr uint32_t MAX_MIN_RTO_FLOOR_MS = 2000;
+    static constexpr uint32_t MULTIHOP_MIN_RTO_FLOOR_MS = 2400;
+    static constexpr uint32_t MAX_MIN_RTO_FLOOR_MS = 4000;
     static constexpr uint32_t BASE_ELECTION_MS = 3000;
     static constexpr uint32_t PER_HOP_ELECTION_MS = 1250;
     static constexpr uint32_t MAX_ELECTION_MS = 9000;

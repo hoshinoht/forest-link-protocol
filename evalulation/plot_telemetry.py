@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path(__file__).with_name("flp_telemetry_7E40_experiment1.csv"),
+        default=Path(__file__).with_name("flp_telemetry_7AE0_experiment3.csv"),
         help="Path to telemetry CSV (default: evalulation/flp_telemetry_7E40_experiment1.csv)",
     )
     parser.add_argument(

@@ -63,8 +63,12 @@ uint32_t TransferEngine::compute_min_rto_floor_ms(uint8_t hops_to_exit)
         return 200;
     }
 
+    /* The first RTT sample on multi-hop paths tends to be optimistic because
+     * the sender is already running a full flight while the exit/MQTT side is
+     * still warming up. Keep the floor above the steady-state RTT so the
+     * bootstrap phase does not immediately self-trigger timeout retransmits. */
     uint32_t floor = MULTIHOP_MIN_RTO_FLOOR_MS +
-                     static_cast<uint32_t>(hops_to_exit - 2) * 300;
+                     static_cast<uint32_t>(hops_to_exit - 2) * 400;
     return (floor > MAX_MIN_RTO_FLOOR_MS) ? MAX_MIN_RTO_FLOOR_MS : floor;
 }
 
