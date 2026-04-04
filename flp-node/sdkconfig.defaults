@@ -32,6 +32,10 @@ CONFIG_FLP_DEMO_AUTO=y
 CONFIG_FLP_DEMO_AUTO_INTERVAL_S=60
 CONFIG_FLP_MAX_ELECTED_EXITS=2
 
+# FatFS long filename support for SD card assets and telemetry CSV
+# CONFIG_FATFS_LFN_NONE is not set
+CONFIG_FATFS_LFN_HEAP=y
+
 # IMPORTANT NOTE: As this is a prototype we will be hardcoding the Wi-Fi credentials for simplicity.
 # In a production system, you would want to implement a more secure and flexible way of configuring
 # Wi-Fi credentials (e.g., via a web interface, Bluetooth, or a mobile app

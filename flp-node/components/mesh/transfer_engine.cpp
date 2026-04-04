@@ -7,6 +7,7 @@
 #include "transfer_engine.hpp"
 
 #include <cinttypes>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -271,22 +272,29 @@ void TransferEngine::flush_telemetry_csv()
         return;
     }
 
-    FILE *f = fopen(telemetry_csv_path_, "ab+");
+    bool needs_header = true;
+    if (FILE *probe = fopen(telemetry_csv_path_, "rb"))
+    {
+        needs_header = false;
+        fclose(probe);
+    }
+
+    errno = 0;
+    FILE *f = fopen(telemetry_csv_path_, "ab");
     if (!f)
     {
-        ESP_LOGW(TAG, "Failed to open telemetry CSV %s", telemetry_csv_path_);
+        ESP_LOGW(TAG,
+                 "Failed to open telemetry CSV %s errno=%d",
+                 telemetry_csv_path_,
+                 errno);
         return;
     }
 
-    if (fseek(f, 0, SEEK_END) == 0)
+    if (needs_header)
     {
-        long end = ftell(f);
-        if (end == 0)
-        {
-            static constexpr const char *HEADER =
-                "timestamp_ms,node_addr,role,session_id,file,size_bytes,hops,exits,elapsed_ms,progress_pct,sent_bytes,tx_Bps,acked_frags,ack_fps,inflight,max_inflight,mesh_retx,oow_queued,oow_sent,cong,bp,mesh_ms,cloud_wait_ms,e2e_Bps,mesh_Bps,result\n";
-            fwrite(HEADER, 1, strlen(HEADER), f);
-        }
+        static constexpr const char *HEADER =
+            "timestamp_ms,node_addr,role,session_id,file,size_bytes,hops,exits,elapsed_ms,progress_pct,sent_bytes,tx_Bps,acked_frags,ack_fps,inflight,max_inflight,mesh_retx,oow_queued,oow_sent,cong,bp,mesh_ms,cloud_wait_ms,e2e_Bps,mesh_Bps,result\n";
+        fwrite(HEADER, 1, strlen(HEADER), f);
     }
 
     fwrite(telemetry_csv_buf_, 1, telemetry_csv_len_, f);
