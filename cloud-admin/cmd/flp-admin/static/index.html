@@ -492,12 +492,25 @@ tr:hover td { background: var(--md-sys-color-surface-container-high); }
 
     <!-- ════ Messaging ════ -->
     <div id="messaging" class="panel">
+      <div class="section-title">Send Message to Node</div>
       <div class="controls">
         <select class="m3-select" id="msg-node-select"><option value="FFFF">Broadcast (0xFFFF)</option></select>
-        <input class="m3-input" id="msg-topic" type="text" placeholder="Topic (e.g. config)" style="width:180px;">
-        <input class="m3-input" id="msg-payload" type="text" placeholder="Payload hex (optional)" style="width:220px;">
-        <button class="m3-btn" onclick="sendTopicMsg()">Send</button>
+        <input class="m3-input" id="msg-topic" type="text" placeholder="Topic (e.g. msg)" style="width:140px;">
       </div>
+      <div style="display:flex; gap:12px; margin-bottom:20px;">
+        <div style="flex:1;">
+          <div style="font-size:12px; color:#8C9388; margin-bottom:6px; text-transform:uppercase; font-weight:500;">Plain Text</div>
+          <input class="m3-input" id="msg-text" type="text" placeholder="Enter message text (e.g. Hello)" style="width:100%;">
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:12px; color:#8C9388; margin-bottom:6px; text-transform:uppercase; font-weight:500;">Or Hex Data</div>
+          <input class="m3-input" id="msg-payload" type="text" placeholder="Enter hex data (e.g. 48656C6C6F)" style="width:100%;">
+        </div>
+        <div style="display:flex; align-items:flex-end;">
+          <button class="m3-btn" onclick="sendTopicMsg()" style="height:40px;">Send</button>
+        </div>
+      </div>
+      <div class="section-title">Message Log</div>
       <div class="msg-log" id="msg-log"></div>
     </div>
 
@@ -772,20 +785,55 @@ async function sendTopicMsg() {
     const nodeId = document.getElementById('msg-node-select').value;
     const topic = document.getElementById('msg-topic').value.trim();
     if (!topic) { alert('Topic is required'); return; }
+
+    const msgText = document.getElementById('msg-text').value.trim();
     const payloadHex = document.getElementById('msg-payload').value.trim();
+
+    if (!msgText && !payloadHex) {
+        alert('Either message text or hex data is required');
+        return;
+    }
+    if (msgText && payloadHex) {
+        alert('Specify either message text OR hex data, not both');
+        return;
+    }
+
+    const body = { topic };
+    if (msgText) {
+        body.message = msgText;
+    } else {
+        body.data = payloadHex;
+    }
+
     const r = await fetch('/api/topic_msg/'+encodeURIComponent(nodeId), {
         method:'POST', credentials:'same-origin',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({topic, data:payloadHex})
+        body: JSON.stringify(body)
     });
     if (!r.ok) { alert('Request failed: '+r.status); return; }
     const data = await r.json();
+
     const log = document.getElementById('msg-log');
     const ts = new Date().toLocaleTimeString();
     const entry = document.createElement('div');
-    const status = data.ok ? ' OK' : ' ERR: '+(data.error||'unknown');
-    entry.textContent = '['+ts+'] -> 0x'+nodeId+' topic="'+topic+'"'+(payloadHex?' data='+payloadHex:'')+status;
+    let content = '';
+    if (msgText) {
+        content = `[${ts}] → 0x${nodeId} topic="${topic}" message="${msgText}" (${data.bytes} bytes)`;
+    } else {
+        content = `[${ts}] → 0x${nodeId} topic="${topic}" data=${payloadHex} (${data.bytes} bytes)`;
+    }
+    if (!data.ok) {
+        content += ` ERROR: ${data.error||'unknown'}`;
+        entry.style.color = '#FFB4AB';
+    } else {
+        entry.style.color = '#66BB6A';
+    }
+    entry.textContent = content;
     log.insertBefore(entry, log.firstChild);
+
+    // Clear inputs
+    document.getElementById('msg-text').value = '';
+    document.getElementById('msg-payload').value = '';
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
