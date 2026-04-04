@@ -180,6 +180,7 @@ func RunEngine(
 	// Diagnostic counters (reset per active session in setupActive).
 	var duplicateChunkDrops int
 	var wrongSessionChunkDrops int
+	var collidedSessionChunkDrops int
 	var stagedChunkCount int
 	var stagedOverflowDrops int
 	var recentlyCompletedChunkDrops int
@@ -266,6 +267,7 @@ func RunEngine(
 		stallSeqLastNACKTime = make(map[int]float64)
 		duplicateChunkDrops = 0
 		wrongSessionChunkDrops = 0
+		collidedSessionChunkDrops = 0
 		stagedChunkCount = 0
 		stagedOverflowDrops = 0
 		recentlyCompletedChunkDrops = 0
@@ -410,9 +412,9 @@ func RunEngine(
 				delete(recentlyCompletedMeta, metaKey)
 			}
 			if tq.ActiveTransfer != nil {
+				now := float64(time.Now().UnixMilli()) / 1000.0
 				activeKey := transferKey(tq.ActiveTransfer.SessionID, tq.ActiveTransfer.NodeID)
 				if activeKey == metaTransferKey {
-					now := float64(time.Now().UnixMilli()) / 1000.0
 					const duplicateMetaSuppressSec = 1.5
 					if lastSeen, ok := activeMetaLastSeen[metaTransferKey]; ok && now-lastSeen < duplicateMetaSuppressSec {
 						continue
@@ -420,8 +422,18 @@ func RunEngine(
 					activeMetaLastSeen[metaTransferKey] = now
 					log.Printf("[transfer] merging exit node %s into session %s",
 						meta.NodeID, sessionID)
+				} else if tq.ActiveTransfer.SessionID == sessionID && tq.ActiveTransfer.NodeID != meta.NodeID {
+					// Collision guard: different source node reused the same session ID.
+					// Never let this supersede or queue against the currently active source.
+					if lastSeen, ok := activeMetaLastSeen[metaTransferKey]; !ok || now-lastSeen >= 2.0 {
+						log.Printf("[transfer] ignoring colliding session id %s from %s (active source=%s)",
+							sessionID,
+							meta.NodeID,
+							tq.ActiveTransfer.NodeID)
+						activeMetaLastSeen[metaTransferKey] = now
+					}
+					continue
 				} else {
-					now := float64(time.Now().UnixMilli()) / 1000.0
 					staleSec := now - lastChunkTime
 					if staleSec > 10.0 || lastChunkTime == 0 {
 						log.Printf("[transfer] superseding stale session %s (no data for %.0fs) with %s",
@@ -470,6 +482,20 @@ func RunEngine(
 						log.Printf("[transfer][diag] pending buffer full, dropping chunk sid=%s seq=%d (drops=%d, cap=%d)",
 							chunkSID, chunk.SeqNum, stagedOverflowDrops, maxPendingChunks)
 					}
+				}
+				continue
+			}
+
+			// Session-ID collision from a different source should not poison wrong-session stats.
+			if chunkSID == tq.ActiveTransfer.SessionID && chunk.NodeID != tq.ActiveTransfer.NodeID {
+				collidedSessionChunkDrops++
+				if collidedSessionChunkDrops == 1 || collidedSessionChunkDrops%64 == 0 {
+					log.Printf("[transfer][diag] dropping colliding-session chunk sid=%s node=%s seq=%d (active node=%s drops=%d)",
+						chunkSID,
+						chunk.NodeID,
+						chunk.SeqNum,
+						tq.ActiveTransfer.NodeID,
+						collidedSessionChunkDrops)
 				}
 				continue
 			}
