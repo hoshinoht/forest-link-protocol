@@ -104,7 +104,7 @@ class SdReadCache
     size_t cache_start_ = 0;        /* file offset of first cached byte */
     size_t cache_len_ = 0;          /* valid bytes currently in cache */
     RandomPageSlot random_slots_[RANDOM_PAGE_COUNT] = {};
-    uint32_t random_clock_ = 0;
+    uint32_t random_clock_ = 0;  /* wraps at UINT32_MAX; acceptable at LoRa rates */
     uint32_t random_hits_ = 0;
     uint32_t random_misses_ = 0;
     uint32_t hits_ = 0;
