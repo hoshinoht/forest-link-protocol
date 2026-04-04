@@ -4,9 +4,10 @@
  * FlpClient — In-process demo client that exercises the UART ingest API.
  *
  * Replaces the old auto_demo_task / button_task scattered in main.cpp.
- * Loads demo payload from SD card (or generates a fallback), then drives
- * transfers through UartIngest::file_begin/data/end — the exact same
- * code path an external Pico W would use over the physical UART wire.
+ * Loads demo payload from SD card (or generates a fallback).
+ * SD-backed payloads are streamed directly into the transfer engine to
+ * avoid duplicating large buffers in PSRAM; fallback payloads still use
+ * the UartIngest::file_begin/data/end in-process path.
  */
 
 #include <cstddef>

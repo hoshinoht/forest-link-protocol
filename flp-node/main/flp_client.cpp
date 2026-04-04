@@ -37,6 +37,13 @@ void FlpClient::init(UartIngest *api, MeshManager *mgr,
 void FlpClient::load_demo_payload()
 {
     use_sd_stream_ = false;
+    payload_size_ = 0;
+
+    if (payload_buf_)
+    {
+        heap_caps_free(payload_buf_);
+        payload_buf_ = nullptr;
+    }
 
 #if CONFIG_FLP_SD_ENABLED
     esp_err_t sd_err = sdcard_init();
@@ -49,27 +56,17 @@ void FlpClient::load_demo_payload()
         {
             payload_size_ = sd_cache_.file_size();
 
-            /* Read entire file into a PSRAM buffer so we can feed it
-             * through the UART API's file_begin/data/end sequence. */
-            payload_buf_ = static_cast<uint8_t *>(
-                heap_caps_malloc(payload_size_, MALLOC_CAP_SPIRAM));
-            if (payload_buf_)
+            if (payload_size_ > 0)
             {
-                size_t read = sd_cache_.read(payload_buf_, 0, payload_size_);
-                if (read != payload_size_)
-                {
-                    ESP_LOGW(TAG, "SD read short: %zu/%zu", read, payload_size_);
-                    payload_size_ = read;
-                }
-                ESP_LOGI(TAG, "Loaded %s from SD card: %u bytes",
+                /* Keep demo payload in SD cache and stream chunks on demand.
+                 * This avoids duplicating large files in PSRAM via UART ingest. */
+                use_sd_stream_ = true;
+                ESP_LOGI(TAG, "Loaded %s from SD card: %u bytes (streamed)",
                          filename_, (unsigned)payload_size_);
             }
             else
             {
-                /* Keep the cache resident and stream chunks during transfer. */
-                use_sd_stream_ = true;
-                ESP_LOGW(TAG,
-                         "PSRAM alloc failed for full SD mirror, using streamed SD mode");
+                ESP_LOGW(TAG, "%s on SD card is empty, using fallback", filename_);
             }
         }
         else
