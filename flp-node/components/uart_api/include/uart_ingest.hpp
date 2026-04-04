@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
@@ -136,10 +137,13 @@ class UartIngest
 
     /* Ingest buffer (PSRAM) */
     uint8_t *ingest_buf_ = nullptr;
+    FILE *ingest_file_ = nullptr; /* SD-backed ingest fallback */
     size_t ingest_size_ = 0;     /* expected total size */
     size_t received_size_ = 0;   /* bytes received so far */
     char filename_[64] = {};
+    char ingest_path_[96] = {};
     bool ingest_active_ = false;
+    bool ingest_to_sd_ = false;
 
     /* Async transfer tracking (non-blocking FILE_END) */
     bool transfer_started_ = false;

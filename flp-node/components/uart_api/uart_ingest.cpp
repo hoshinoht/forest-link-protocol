@@ -1,11 +1,15 @@
 #include "uart_ingest.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "mesh_manager.hpp"
+#if CONFIG_FLP_SD_ENABLED
+#include "sdcard.hpp"
+#endif
 
 static const char *TAG = "uart_ingest";
 
@@ -258,6 +262,19 @@ UartResult UartIngest::file_begin(uint32_t file_size, const char *filename)
             heap_caps_free(ingest_buf_);
             ingest_buf_ = nullptr;
         }
+        if (ingest_file_)
+        {
+            fclose(ingest_file_);
+            ingest_file_ = nullptr;
+        }
+#if CONFIG_FLP_SD_ENABLED
+        if (ingest_to_sd_ && ingest_path_[0] != '\0')
+        {
+            std::remove(ingest_path_);
+        }
+#endif
+        ingest_to_sd_ = false;
+        ingest_path_[0] = '\0';
         ingest_active_ = false;
     }
 
@@ -267,39 +284,75 @@ UartResult UartIngest::file_begin(uint32_t file_size, const char *filename)
         return UartResult::ERR_ALLOC;
     }
 
-    size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-    if (file_size > available)
-    {
-        ESP_LOGE(TAG, "Not enough PSRAM: need %lu, largest block %zu",
-                 (unsigned long)file_size, available);
-        return UartResult::ERR_ALLOC;
-    }
-
     size_t name_len = strnlen(filename, sizeof(filename_) - 1);
     memcpy(filename_, filename, name_len);
     filename_[name_len] = '\0';
 
-    ingest_buf_ =
-        (uint8_t *)heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM);
-    if (!ingest_buf_)
+    ingest_to_sd_ = false;
+    ingest_path_[0] = '\0';
+
+    size_t available = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ingest_buf_ = static_cast<uint8_t *>(
+        heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM));
+    if (ingest_buf_)
     {
-        ESP_LOGE(TAG, "PSRAM alloc failed for %lu bytes",
-                 (unsigned long)file_size);
+        ingest_size_ = file_size;
+        received_size_ = 0;
+        ingest_active_ = true;
+
+        ESP_LOGI(TAG, "FILE_BEGIN: \"%s\" (%lu bytes, PSRAM)",
+                 filename_, (unsigned long)file_size);
+        return UartResult::OK;
+    }
+
+#if CONFIG_FLP_SD_ENABLED
+    esp_err_t sd_err = sdcard_init();
+    if (sd_err != ESP_OK)
+    {
+        ESP_LOGE(TAG,
+                 "Not enough PSRAM: need %lu, largest block %zu; SD init failed: %s",
+                 (unsigned long)file_size,
+                 available,
+                 esp_err_to_name(sd_err));
+        return UartResult::ERR_ALLOC;
+    }
+
+    std::snprintf(ingest_path_, sizeof(ingest_path_),
+                  "/sdcard/.flp_ingest_%08lx.bin",
+                  static_cast<unsigned long>(esp_timer_get_time() & 0xFFFFFFFF));
+    ingest_file_ = std::fopen(ingest_path_, "wb");
+    if (!ingest_file_)
+    {
+        ESP_LOGE(TAG,
+                 "PSRAM alloc failed for %lu bytes (largest %zu) and SD spool open failed: %s",
+                 (unsigned long)file_size,
+                 available,
+                 ingest_path_);
         return UartResult::ERR_ALLOC;
     }
 
     ingest_size_ = file_size;
     received_size_ = 0;
     ingest_active_ = true;
+    ingest_to_sd_ = true;
 
-    ESP_LOGI(TAG, "FILE_BEGIN: \"%s\" (%lu bytes)",
-             filename_, (unsigned long)file_size);
+    ESP_LOGW(TAG,
+             "FILE_BEGIN: \"%s\" (%lu bytes, SD spool %s; largest_psram=%zu)",
+             filename_,
+             (unsigned long)file_size,
+             ingest_path_,
+             available);
     return UartResult::OK;
+#else
+    ESP_LOGE(TAG, "Not enough PSRAM: need %lu, largest block %zu",
+             (unsigned long)file_size, available);
+    return UartResult::ERR_ALLOC;
+#endif
 }
 
 UartResult UartIngest::file_data(const uint8_t *data, uint16_t len)
 {
-    if (!ingest_active_ || !ingest_buf_)
+    if (!ingest_active_)
         return UartResult::ERR_NO_TRANSFER;
 
     if (transfer_started_)
@@ -312,14 +365,35 @@ UartResult UartIngest::file_data(const uint8_t *data, uint16_t len)
         return UartResult::ERR_OVERFLOW;
     }
 
-    memcpy(ingest_buf_ + received_size_, data, len);
+    if (ingest_to_sd_)
+    {
+        if (!ingest_file_)
+        {
+            return UartResult::ERR_NO_TRANSFER;
+        }
+        size_t wrote = std::fwrite(data, 1, len, ingest_file_);
+        if (wrote != len)
+        {
+            ESP_LOGE(TAG, "FILE_DATA SD write failed: %zu/%u", wrote, len);
+            return UartResult::ERR_ALLOC;
+        }
+    }
+    else
+    {
+        if (!ingest_buf_)
+        {
+            return UartResult::ERR_NO_TRANSFER;
+        }
+        memcpy(ingest_buf_ + received_size_, data, len);
+    }
+
     received_size_ += len;
     return UartResult::OK;
 }
 
 UartResult UartIngest::file_end()
 {
-    if (!ingest_active_ || !ingest_buf_)
+    if (!ingest_active_)
         return UartResult::ERR_NO_TRANSFER;
 
     if (transfer_started_)
@@ -338,10 +412,40 @@ UartResult UartIngest::file_end()
     if (events)
         xEventGroupClearBits(events, FLP_EVT_TRANSFER_COMPLETE);
 
-    bool started = mgr_->start_file_transfer(
-        filename_,
-        received_size_,
-        TransferEngine::make_buffer_reader(ingest_buf_, received_size_));
+    bool started = false;
+    if (ingest_to_sd_)
+    {
+#if CONFIG_FLP_SD_ENABLED
+        if (!ingest_file_)
+        {
+            return UartResult::ERR_NO_TRANSFER;
+        }
+        std::fflush(ingest_file_);
+        std::fclose(ingest_file_);
+        ingest_file_ = nullptr;
+
+        started = mgr_->start_file_transfer(
+            filename_,
+            received_size_,
+            [this](uint8_t *buf, size_t offset, size_t len) -> size_t
+            {
+                return sdcard_read_chunk(ingest_path_, buf, offset, len);
+            });
+#else
+        return UartResult::ERR_NO_TRANSFER;
+#endif
+    }
+    else
+    {
+        if (!ingest_buf_)
+        {
+            return UartResult::ERR_NO_TRANSFER;
+        }
+        started = mgr_->start_file_transfer(
+            filename_,
+            received_size_,
+            TransferEngine::make_buffer_reader(ingest_buf_, received_size_));
+    }
 
     if (!started)
         return UartResult::ERR_NO_TRANSFER;
@@ -386,8 +490,20 @@ UartResult UartIngest::abort_transfer()
         heap_caps_free(ingest_buf_);
         ingest_buf_ = nullptr;
     }
-    /* If transfer_started_, the buffer is owned by the transfer engine's
-     * ReadChunkFn closure. poll_transfer_progress() will free it once
+    if (ingest_file_)
+    {
+        std::fclose(ingest_file_);
+        ingest_file_ = nullptr;
+    }
+#if CONFIG_FLP_SD_ENABLED
+    if (ingest_to_sd_ && !transfer_started_ && ingest_path_[0] != '\0')
+    {
+        std::remove(ingest_path_);
+        ingest_path_[0] = '\0';
+    }
+#endif
+    /* If transfer_started_, the read closure owns the source for the
+     * transfer lifetime. poll_transfer_progress() will clean it up once
      * is_transfer_active() returns false. */
 
     ingest_active_ = false;
@@ -448,10 +564,23 @@ void UartIngest::poll_transfer_progress()
             heap_caps_free(ingest_buf_);
             ingest_buf_ = nullptr;
         }
+        if (ingest_file_)
+        {
+            std::fclose(ingest_file_);
+            ingest_file_ = nullptr;
+        }
+#if CONFIG_FLP_SD_ENABLED
+        if (ingest_to_sd_ && ingest_path_[0] != '\0')
+        {
+            std::remove(ingest_path_);
+            ingest_path_[0] = '\0';
+        }
+#endif
         ingest_active_ = false;
         transfer_started_ = false;
         received_size_ = 0;
         ingest_size_ = 0;
+        ingest_to_sd_ = false;
     }
 }
 
