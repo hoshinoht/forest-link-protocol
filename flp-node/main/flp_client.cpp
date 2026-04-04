@@ -12,7 +12,7 @@
 
 static const char *TAG = "flp_client";
 
-static constexpr const char *DEMO_FILENAME = "demo.txt";
+static constexpr const char *DEMO_FILENAME = "demo-large.jpg";
 static constexpr size_t FALLBACK_PAYLOAD_SIZE = 8192;
 static constexpr size_t CHUNK_SIZE = 1024;
 
