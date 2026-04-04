@@ -22,8 +22,6 @@ import (
 //go:embed static
 var staticFS embed.FS
 
-//go:embed benchmarks
-var benchmarkFS embed.FS
 
 func init() {
 	// FIX: Force log timestamps to Singapore Standard Time (UTC+8).
@@ -94,7 +92,6 @@ func main() {
 
 	// Inject embedded assets into the server package
 	server.StaticFS = staticFS
-	server.BenchmarkFS = benchmarkFS
 
 	// HTTP server
 	go server.Start(ctx, *webPort, topo, store, mqttClient, progress, *mqttPass)

@@ -1,1 +1,0 @@
-{"name": "ESP-NOW", "pdr": 0.98, "throughput_bps": 100000, "latency_ms": 10, "range_m": 200, "notes": "WiFi-based peer-to-peer, 2.4 GHz"}

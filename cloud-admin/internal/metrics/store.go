@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -237,53 +236,6 @@ func (m *Store) QueryTransfers() ([]map[string]interface{}, error) {
 	}
 	defer rows.Close()
 	return scanRows(rows)
-}
-
-// QueryBenchmarks returns all persistent benchmark rows, newest first.
-func (m *Store) QueryBenchmarks() ([]map[string]interface{}, error) {
-	rows, err := m.readDB.Query(
-		`SELECT id, session_id, timestamp, filename, file_size, chunk_count, fragment_size,
-			duration_sec, goodput_bps, retransmits, exit_node_count, pdr, latency_ms, range_m, notes
-		FROM benchmark_results ORDER BY timestamp DESC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRows(rows)
-}
-
-// DerivedMetrics computes aggregate protocol metrics from persistent benchmark_results.
-func (m *Store) DerivedMetrics() (map[string]interface{}, error) {
-	var avgGoodput, avgPDR, avgLatency sql.NullFloat64
-	var count int64
-	err := m.readDB.QueryRow(
-		"SELECT AVG(goodput_bps), AVG(pdr), AVG(latency_ms), COUNT(*) FROM benchmark_results",
-	).Scan(&avgGoodput, &avgPDR, &avgLatency, &count)
-	if err != nil {
-		return nil, err
-	}
-	if count == 0 {
-		return nil, nil
-	}
-
-	pdr := 1.0
-	if avgPDR.Valid {
-		pdr = avgPDR.Float64
-	}
-	lat := 0.0
-	if avgLatency.Valid {
-		lat = math.Round(avgLatency.Float64*100) / 100
-	}
-
-	return map[string]interface{}{
-		"name":           "FLP v3.7",
-		"pdr":            math.Round(pdr*10000) / 10000,
-		"throughput_bps": math.Round(avgGoodput.Float64*100) / 100,
-		"latency_ms":     lat,
-		"range_m":        1000,
-		"notes":          fmt.Sprintf("Aggregated from %d benchmark runs", count),
-	}, nil
 }
 
 // Cleanup deletes metrics older than 24 hours.
