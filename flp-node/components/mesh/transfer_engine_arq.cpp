@@ -9,7 +9,6 @@
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
-constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
 
 namespace
 {
@@ -20,6 +19,9 @@ constexpr uint8_t kMaxNewFragsMultiHop = 1;
 constexpr uint32_t kOowRetxBaseMs = 25;
 constexpr uint32_t kOowRetxPerHopMs = 10;
 constexpr uint8_t kMaxOowRetxPerTick = 1;
+constexpr uint16_t kOowBacklogHighWater = 32;
+constexpr uint16_t kOowBacklogCriticalWater = 96;
+constexpr uint32_t kOowMinIntervalMs = 8;
 } /* namespace */
 
 void TransferEngine::transfer_tick()
@@ -362,6 +364,22 @@ void TransferEngine::tick_mesh_arq()
     uint32_t oow_interval_ms =
         kOowRetxBaseMs +
         kOowRetxPerHopMs * static_cast<uint32_t>(source_hops_to_exit_est_);
+
+    uint8_t oow_send_budget = kMaxOowRetxPerTick;
+    if (oow_retx_count_ >= kOowBacklogCriticalWater)
+    {
+        oow_send_budget = 4;
+        oow_interval_ms = kOowMinIntervalMs;
+    }
+    else if (oow_retx_count_ >= kOowBacklogHighWater)
+    {
+        oow_send_budget = 2;
+        if (oow_interval_ms > 15)
+        {
+            oow_interval_ms = 15;
+        }
+    }
+
     bool allow_oow_send =
         ((now_pace - last_oow_retx_ms_) >= oow_interval_ms);
     if (oow_retx_count_ > 0 && transfer_.read_chunk)
@@ -373,7 +391,7 @@ void TransferEngine::tick_mesh_arq()
             uint16_t seq = oow_retx_queue_[i];
             uint16_t dst = oow_retx_dst_[i];
 
-            if (!allow_oow_send || sent >= kMaxOowRetxPerTick)
+            if (!allow_oow_send || sent >= oow_send_budget)
             {
                 oow_retx_queue_[kept++] = seq;
                 oow_retx_dst_[kept - 1] = dst;
@@ -500,6 +518,16 @@ void TransferEngine::tick_mesh_arq()
             allow_oow_send = false;
         }
         oow_retx_count_ = kept;
+    }
+
+    /*
+     * When OOW backlog is elevated, prioritize recovery over new data.
+     * Otherwise we keep advancing next_fragment and create more OOW pressure.
+     */
+    if (oow_retx_count_ >= kOowBacklogHighWater)
+    {
+        signal_congestion();
+        return;
     }
 
     /* Drain pending redistribution queue first */
