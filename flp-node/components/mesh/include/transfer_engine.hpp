@@ -194,6 +194,11 @@ class TransferEngine
     {
         total_local_backpressure_events_++;
         signal_congestion();
+        /* Local transport saturation is a stronger signal than relay/cloud
+         * congestion alone: slow the sender a bit more so the ESP-NOW data
+         * pool can drain instead of immediately re-entering a timeout storm. */
+        congestion_backoff_ticks_ += 2;
+        if (congestion_backoff_ticks_ > 16) { congestion_backoff_ticks_ = 16; }
     }
 
     /* Set callback for forwarding fragments to MQTT */
@@ -358,10 +363,14 @@ class TransferEngine
     /* Out-of-window retransmit queue: cloud NACKs for seqs the ARQ has
      * already released.  Route to the exit that requested the resend. */
     static constexpr uint16_t OOW_RETX_QUEUE_SIZE = 1024;
+    static constexpr uint16_t OOW_RECENT_RING_SIZE = 128;
     uint16_t oow_retx_queue_[OOW_RETX_QUEUE_SIZE] = {};
     uint16_t oow_retx_dst_[OOW_RETX_QUEUE_SIZE] = {};
     uint16_t oow_retx_count_ = 0;
     uint32_t last_oow_retx_ms_ = 0;
+    uint16_t oow_recent_seq_[OOW_RECENT_RING_SIZE] = {};
+    uint32_t oow_recent_ms_[OOW_RECENT_RING_SIZE] = {};
+    uint16_t oow_recent_write_ = 0;
 
     /* Congestion backoff: each signal_congestion() call adds one skip tick */
     uint8_t congestion_backoff_ticks_ = 0;

@@ -48,8 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path(__file__).with_name("flp_telemetry_7AE0.csv"),
-        help="Path to telemetry CSV (default: evalulation/flp_telemetry_7AE0.csv)",
+        default=Path(__file__).with_name("flp_telemetry_7E40_experiment1.csv"),
+        help="Path to telemetry CSV (default: evalulation/flp_telemetry_7E40_experiment1.csv)",
     )
     parser.add_argument(
         "--out-dir",
@@ -127,7 +127,8 @@ def main() -> int:
         finals.to_csv(out_dir / "final_summary.csv", index=False)
 
         completion_col = "total_ms" if "total_ms" in finals.columns else "elapsed_ms"
-        session_labels = finals["session_id"].fillna(-1).astype(int).astype(str)
+        session_labels = finals["session_id"].fillna(
+            -1).astype(int).astype(str)
 
         fig, axs = plt.subplots(2, 2, figsize=(12, 8))
 

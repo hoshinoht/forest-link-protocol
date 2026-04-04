@@ -10,6 +10,7 @@
 using namespace flp;
 
 static const char *TAG = "xfer_eng";
+static constexpr uint32_t OOW_RECENT_SUPPRESS_MS = 1500;
 
 /* Query the RSSI of the Wi-Fi AP this STA is associated with.
  * Returns a clamped int8_t (typ. -30..-90) or 0 on failure. */
@@ -354,6 +355,27 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
         if (oow_retx_queue_[i] == seq)
         {
             oow_retx_dst_[i] = from_addr;
+            return;
+        }
+    }
+
+    /* If we very recently re-sent this OOW seq, suppress duplicate cloud NACKs
+     * for a short window instead of re-queueing immediately. This keeps bursty
+     * repeated NACKs from ballooning the OOW backlog while the previous resend
+     * is still in flight to the exit/cloud path. */
+    uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    for (uint16_t i = 0; i < OOW_RECENT_RING_SIZE; i++)
+    {
+        if (oow_recent_ms_[i] == 0 || oow_recent_seq_[i] != seq)
+        {
+            continue;
+        }
+        if ((now_ms - oow_recent_ms_[i]) < OOW_RECENT_SUPPRESS_MS)
+        {
+            ESP_LOGD(TAG,
+                     "Suppressing duplicate recent OOW NACK seq=%u for 0x%04X",
+                     seq,
+                     from_addr);
             return;
         }
     }

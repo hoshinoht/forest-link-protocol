@@ -13,9 +13,9 @@ constexpr EventBits_t FLP_EVT_TRANSFER_COMPLETE = BIT1;
 
 namespace
 {
-constexpr uint32_t kPacingBaseMs = 10;
+constexpr uint32_t kPacingBaseMs = 15;
 constexpr uint32_t kPacingPerHopMs = 5;
-constexpr uint8_t kMaxNewFragsSingleHop = 2;
+constexpr uint8_t kMaxNewFragsSingleHop = 1;
 constexpr uint8_t kMaxNewFragsMultiHop = 1;
 constexpr uint32_t kOowRetxBaseMs = 25;
 constexpr uint32_t kOowRetxPerHopMs = 10;
@@ -489,6 +489,10 @@ void TransferEngine::tick_mesh_arq()
                 break;
             }
             total_oow_retx_sent_++;
+            oow_recent_seq_[oow_recent_write_] = seq;
+            oow_recent_ms_[oow_recent_write_] = now_pace;
+            oow_recent_write_ = static_cast<uint16_t>(
+                (oow_recent_write_ + 1) % OOW_RECENT_RING_SIZE);
             ESP_LOGI(TAG, "Re-sent out-of-window seq=%u%s to 0x%04X",
                      seq, is_parity ? " (parity)" : "", dst);
             sent++;

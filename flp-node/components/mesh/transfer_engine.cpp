@@ -405,6 +405,9 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
     redist_count_ = 0;
     oow_retx_count_ = 0;
     memset(oow_retx_dst_, 0, sizeof(oow_retx_dst_));
+    memset(oow_recent_seq_, 0, sizeof(oow_recent_seq_));
+    memset(oow_recent_ms_, 0, sizeof(oow_recent_ms_));
+    oow_recent_write_ = 0;
     last_oow_retx_ms_ = 0;
     weight_recompute_counter_ = 0;
     memset(cloud_ack_bitmap_, 0, sizeof(cloud_ack_bitmap_));
@@ -467,6 +470,9 @@ void TransferEngine::clear_exit_node_state()
     last_meta_publish_ms_ = 0;
     congestion_backoff_ticks_ = 0;
     oow_retx_count_ = 0;
+    memset(oow_recent_seq_, 0, sizeof(oow_recent_seq_));
+    memset(oow_recent_ms_, 0, sizeof(oow_recent_ms_));
+    oow_recent_write_ = 0;
     if (finished_session != 0 && mqtt_session_end_fn_)
     {
         mqtt_session_end_fn_(finished_session);

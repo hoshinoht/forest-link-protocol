@@ -205,7 +205,7 @@ esp_err_t flp::SdReadCache::open(const char *path)
     }
 
     /*
-    * Allocate min(file_size, MAX_CACHE_SIZE) in PSRAM (currently 256 KB).
+    * Allocate min(file_size, MAX_CACHE_SIZE) in PSRAM (currently 512 KB).
      * For files that fit entirely, this pre-loads the whole file so
      * every fragment read during transfer is a zero-cost PSRAM memcpy.
      */
