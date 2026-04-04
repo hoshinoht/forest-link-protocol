@@ -202,6 +202,7 @@ class TransferEngine
 
     using RequeueSeqFn = std::function<void(uint16_t session_id, uint16_t seq)>;
     void set_cloud_nack_requeue(RequeueSeqFn fn) { requeue_cloud_nack_fn_ = fn; }
+    void set_cloud_nack_observer(RequeueSeqFn fn) { observe_cloud_nack_fn_ = fn; }
 
     /* Set drain callback for deferred fragment ACKs (exit node: MQTT published OK) */
     void set_fragment_ack_drain(DrainSeqFn fn) { drain_fragment_ack_fn_ = fn; }
@@ -292,6 +293,7 @@ class TransferEngine
     DrainSeqFn drain_cloud_nack_fn_;
     DrainSeqFn drain_fragment_ack_fn_;
     RequeueSeqFn requeue_cloud_nack_fn_;
+    RequeueSeqFn observe_cloud_nack_fn_;
     RequeueSeqFn requeue_fragment_ack_fn_;
     TransferCompleteFn transfer_complete_fn_;
     SessionLifecycleFn mqtt_session_end_fn_;

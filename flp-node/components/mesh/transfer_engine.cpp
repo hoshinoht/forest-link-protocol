@@ -592,6 +592,10 @@ void TransferEngine::tick(uint32_t now_ms)
         uint16_t nack_seq = 0;
         while (drain_cloud_nack_fn_(active_session_id_, nack_seq))
         {
+            if (observe_cloud_nack_fn_)
+            {
+                observe_cloud_nack_fn_(active_session_id_, nack_seq);
+            }
             int rc = send_fn_(source_addr_, PacketType::NACK, nullptr, 0, nack_seq);
             if (rc < 0)
             {

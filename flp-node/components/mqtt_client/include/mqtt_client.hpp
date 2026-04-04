@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "packet.hpp"
@@ -147,6 +148,7 @@ class MqttClient
     /* Drain one cloud NACK (returns true if item was available) */
     bool drain_cloud_nack(uint16_t session_id, uint16_t &seq_out);
     bool requeue_cloud_nack(uint16_t session_id, uint16_t seq);
+    void mark_fragment_for_republish(uint16_t session_id, uint16_t seq);
 
     /* Drain one deferred fragment ACK (exit node: accepted by local MQTT
      * client/outbox). */
@@ -198,6 +200,17 @@ class MqttClient
     int outbox_size_bytes() const;
     void reset_transfer_runtime_state();
     void notify();
+    static constexpr uint16_t MAX_TRACKED_TRANSFER_FRAGMENTS = 60000;
+    static constexpr uint16_t FRAGMENT_BITMAP_BYTES =
+        (MAX_TRACKED_TRANSFER_FRAGMENTS + 7) / 8;
+    bool is_trackable_fragment(uint16_t seq) const
+    {
+        return seq < MAX_TRACKED_TRANSFER_FRAGMENTS;
+    }
+    bool bitmap_test(const uint8_t *bitmap, uint16_t seq) const;
+    void bitmap_set(uint8_t *bitmap, uint16_t seq);
+    void bitmap_clear(uint8_t *bitmap, uint16_t seq);
+    bool queue_fragment_ack(uint16_t session_id, uint16_t seq);
 
     /* Reusable scratch buffer for fragment chunk publishing — avoids 1474B
      * stack alloc in process_fragment_publish (mqtt_task only). */
@@ -209,6 +222,11 @@ class MqttClient
 
     /* Fragment publish queue (exit node mode) */
     QueueHandle_t fragment_publish_queue_ = nullptr;
+    FragmentPublishRequest pending_fragment_ = {};
+    bool have_pending_fragment_ = false;
+    uint8_t fragment_queued_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
+    uint8_t fragment_accepted_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
+    uint8_t fragment_ack_pending_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
 
     /* Deferred ACK queue: seq numbers of relay fragments accepted by the
      * local MQTT client/outbox. Drained by TransferEngine to send mesh ACKs
@@ -216,6 +234,7 @@ class MqttClient
     QueueHandle_t fragment_ack_queue_ = nullptr;
     QueueHandle_t transfer_complete_queue_ = nullptr;
     std::atomic<uint16_t> active_transfer_session_{0};
+    mutable SemaphoreHandle_t fragment_state_mutex_ = nullptr;
 };
 
 } /* namespace flp */

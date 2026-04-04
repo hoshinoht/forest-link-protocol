@@ -206,6 +206,14 @@ void MeshManager::init()
                 mqtt_client_->requeue_cloud_nack(session_id, seq);
             }
         });
+    transfer_engine_.set_cloud_nack_observer(
+        [this](uint16_t session_id, uint16_t seq)
+        {
+            if (mqtt_client_)
+            {
+                mqtt_client_->mark_fragment_for_republish(session_id, seq);
+            }
+        });
 
     /* Wire up deferred fragment ACK drain (exit node: ACK after MQTT publish) */
     transfer_engine_.set_fragment_ack_drain(

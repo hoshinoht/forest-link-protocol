@@ -100,6 +100,10 @@ void TransferEngine::tick_local_exit_arq()
             {
                 continue;
             }
+            if (observe_cloud_nack_fn_)
+            {
+                observe_cloud_nack_fn_(transfer_.session_id, nack_seq);
+            }
             /* Avoid duplicates in retransmit queue */
             bool already_queued = false;
             for (uint8_t i = 0; i < cloud_retx_count_; i++)

@@ -296,7 +296,7 @@ void SelectiveRepeat::handle_ack(uint16_t seq)
 
     if (!slot.sent || slot.seq_tag != seq || slot.len == 0)
     {
-        ESP_LOGW(TAG,
+        ESP_LOGD(TAG,
                  "ACK inactive slot: seq=%u tag=%u idx=%u base=%u next=%u sent=%d acked=%d len=%zu",
                  seq,
                  slot.seq_tag,

@@ -60,6 +60,75 @@ static constexpr int MQTT_OUTBOX_HIGH_WATER_BYTES = 48 * 1024;
 namespace flp
 {
 
+bool MqttClient::bitmap_test(const uint8_t *bitmap, uint16_t seq) const
+{
+    if (!bitmap || !is_trackable_fragment(seq))
+    {
+        return false;
+    }
+    return (bitmap[seq / 8] & (1U << (seq % 8))) != 0;
+}
+
+void MqttClient::bitmap_set(uint8_t *bitmap, uint16_t seq)
+{
+    if (!bitmap || !is_trackable_fragment(seq))
+    {
+        return;
+    }
+    bitmap[seq / 8] |= (1U << (seq % 8));
+}
+
+void MqttClient::bitmap_clear(uint8_t *bitmap, uint16_t seq)
+{
+    if (!bitmap || !is_trackable_fragment(seq))
+    {
+        return;
+    }
+    bitmap[seq / 8] &= static_cast<uint8_t>(~(1U << (seq % 8)));
+}
+
+bool MqttClient::queue_fragment_ack(uint16_t session_id, uint16_t seq)
+{
+    if (!fragment_ack_queue_)
+    {
+        return false;
+    }
+
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    if (bitmap_test(fragment_ack_pending_bitmap_, seq))
+    {
+        if (fragment_state_mutex_)
+        {
+            (void) xSemaphoreGive(fragment_state_mutex_);
+        }
+        return true;
+    }
+
+    FragmentAckItem ack = {};
+    ack.session_id = session_id;
+    ack.seq = seq;
+    if (xQueueSend(fragment_ack_queue_, &ack, 0) != pdTRUE)
+    {
+        if (fragment_state_mutex_)
+        {
+            (void) xSemaphoreGive(fragment_state_mutex_);
+        }
+        return false;
+    }
+
+    bitmap_set(fragment_ack_pending_bitmap_, seq);
+    if (fragment_state_mutex_)
+    {
+        (void) xSemaphoreGive(fragment_state_mutex_);
+    }
+    return true;
+}
+
 void MqttClient::notify()
 {
     TaskHandle_t t = task_.load(std::memory_order_relaxed);
@@ -71,6 +140,24 @@ void MqttClient::notify()
 
 bool MqttClient::is_fragment_queue_congested() const
 {
+    if (active_transfer_session_.load(std::memory_order_acquire) != 0 &&
+        !connected_.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+
+    bool have_pending = false;
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+    {
+        have_pending = have_pending_fragment_;
+        (void) xSemaphoreGive(fragment_state_mutex_);
+    }
+    if (have_pending)
+    {
+        return true;
+    }
+
     if (!fragment_publish_queue_)
     {
         return false;
@@ -99,10 +186,14 @@ void MqttClient::init()
         MALLOC_CAP_SPIRAM);
     transfer_complete_queue_ = xQueueCreate(
         MQTT_TRANSFER_COMPLETE_QUEUE_DEPTH, sizeof(TransferCompleteItem));
+    if (!fragment_state_mutex_)
+    {
+        fragment_state_mutex_ = xSemaphoreCreateMutex();
+    }
 
     if (!publish_queue_ || !file_publish_queue_ || !fragment_publish_queue_ ||
         !ack_queue_ || !nack_queue_ || !cmd_queue_ || !fragment_ack_queue_ ||
-        !transfer_complete_queue_)
+        !transfer_complete_queue_ || !fragment_state_mutex_)
     {
         ESP_LOGE(TAG, "Failed to create one or more MQTT queues");
         return;
@@ -283,7 +374,7 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                 uint16_t session_id = static_cast<uint16_t>(session_val);
                 if (active_session == 0 || session_id != active_session)
                 {
-                    ESP_LOGI(TAG,
+                    ESP_LOGD(TAG,
                              "Ignoring stale cloud ACK/NACK for session=%u (active=%u)",
                              session_id,
                              active_session);
@@ -486,7 +577,16 @@ void MqttClient::reset_transfer_runtime_state()
     {
         xQueueReset(transfer_complete_queue_);
     }
-
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+    {
+        have_pending_fragment_ = false;
+        memset(&pending_fragment_, 0, sizeof(pending_fragment_));
+        memset(fragment_queued_bitmap_, 0, sizeof(fragment_queued_bitmap_));
+        memset(fragment_accepted_bitmap_, 0, sizeof(fragment_accepted_bitmap_));
+        memset(fragment_ack_pending_bitmap_, 0, sizeof(fragment_ack_pending_bitmap_));
+        (void) xSemaphoreGive(fragment_state_mutex_);
+    }
 }
 
 void MqttClient::activate_transfer_session(uint16_t session_id)
@@ -781,11 +881,51 @@ bool MqttClient::publish_fragment(uint16_t session_id,
     strncpy(req.filename, filename, sizeof(req.filename) - 1);
     req.filename[sizeof(req.filename) - 1] = '\0';
 
+    uint16_t active_session =
+        active_transfer_session_.load(std::memory_order_acquire);
+    if (active_session != 0 && session_id != active_session)
+    {
+        ESP_LOGD(TAG,
+                 "publish_fragment: stale session=%u seq=%u (active=%u)",
+                 session_id,
+                 seq,
+                 active_session);
+        return false;
+    }
+
+    bool already_accepted = false;
+    bool already_queued = false;
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    already_accepted = bitmap_test(fragment_accepted_bitmap_, seq);
+    already_queued = bitmap_test(fragment_queued_bitmap_, seq);
+
+    if (already_accepted || already_queued)
+    {
+        (void) xSemaphoreGive(fragment_state_mutex_);
+        if (already_accepted && src_node != node_addr_ &&
+            !queue_fragment_ack(session_id, seq))
+        {
+            ESP_LOGD(TAG,
+                     "publish_fragment: duplicate accepted seq=%u but ACK queue full",
+                     seq);
+        }
+        return true;
+    }
+
     if (xQueueSend(fragment_publish_queue_, &req, 0) != pdTRUE)
     {
+        (void) xSemaphoreGive(fragment_state_mutex_);
         ESP_LOGW(TAG, "Fragment publish queue full, dropped seq=%u", seq);
         return false;
     }
+
+    bitmap_set(fragment_queued_bitmap_, seq);
+    (void) xSemaphoreGive(fragment_state_mutex_);
 
     notify();
     return true;
@@ -802,14 +942,49 @@ void MqttClient::process_fragment_publish()
      * Fragment data uses QoS 0, so it is sent once and does not rely on the
      * ESP-MQTT retransmit outbox; recovery is handled by the cloud NACK path.
      */
-    FragmentPublishRequest req;
-    while (xQueueReceive(fragment_publish_queue_, &req, 0) == pdTRUE)
+    char data_topic[64];
+    snprintf(data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
+
+    while (true)
     {
+        FragmentPublishRequest req = {};
+        bool from_pending = false;
+
+        if (fragment_state_mutex_ &&
+            xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) != pdTRUE)
+        {
+            break;
+        }
+
+        if (have_pending_fragment_)
+        {
+            req = pending_fragment_;
+            from_pending = true;
+        }
+        (void) xSemaphoreGive(fragment_state_mutex_);
+
+        if (!from_pending &&
+            xQueueReceive(fragment_publish_queue_, &req, 0) != pdTRUE)
+        {
+            break;
+        }
+
         uint16_t active_session =
             active_transfer_session_.load(std::memory_order_acquire);
         if (active_session == 0 || req.session_id != active_session)
         {
-            ESP_LOGI(TAG,
+            if (fragment_state_mutex_ &&
+                xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+            {
+                bitmap_clear(fragment_queued_bitmap_, req.seq);
+                if (from_pending)
+                {
+                    have_pending_fragment_ = false;
+                    memset(&pending_fragment_, 0, sizeof(pending_fragment_));
+                }
+                (void) xSemaphoreGive(fragment_state_mutex_);
+            }
+            ESP_LOGD(TAG,
                      "Dropping stale queued fragment session=%u seq=%u (active=%u)",
                      req.session_id,
                      req.seq,
@@ -820,10 +995,6 @@ void MqttClient::process_fragment_publish()
         /* B4 fix: Publish chunk with session ID prefix:
          * [session_id:2LE][seq:2LE][data] — enables cloud to filter
          * stale chunks from previous sessions. */
-        char data_topic[64];
-        snprintf(
-            data_topic, sizeof(data_topic), "flp/%04x/file/data", node_addr_);
-
         uint8_t *chunk_buf = chunk_scratch_;
         chunk_buf[0] = static_cast<uint8_t>(req.session_id & 0xFF);
         chunk_buf[1] = static_cast<uint8_t>((req.session_id >> 8) & 0xFF);
@@ -837,30 +1008,41 @@ void MqttClient::process_fragment_publish()
 
         if (msg_id < 0)
         {
-            /* Publish failed — put fragment back and retry next tick */
+            /* Publish failed — keep one pending fragment locally so a
+             * concurrent producer cannot steal the queue slot and drop it. */
             ESP_LOGW(TAG,
                      "MQTT publish failed, deferring seq=%u",
                      req.seq);
-            if (xQueueSendToFront(fragment_publish_queue_, &req, 0) != pdTRUE)
+            if (fragment_state_mutex_ &&
+                xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
             {
-                ESP_LOGE(TAG,
-                         "Fragment re-queue failed, seq=%u dropped", req.seq);
+                pending_fragment_ = req;
+                have_pending_fragment_ = true;
+                (void) xSemaphoreGive(fragment_state_mutex_);
             }
             break;
         }
 
-        if (fragment_ack_queue_ && req.src_node != node_addr_)
+        if (fragment_state_mutex_ &&
+            xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
         {
-            FragmentAckItem ack = {};
-            ack.session_id = req.session_id;
-            ack.seq = req.seq;
-            if (xQueueSend(fragment_ack_queue_, &ack, 0) != pdTRUE)
+            if (from_pending)
             {
-                ESP_LOGW(TAG,
-                         "Fragment ACK queue full, dropping seq=%u session=%u",
-                         req.seq,
-                         req.session_id);
+                have_pending_fragment_ = false;
+                memset(&pending_fragment_, 0, sizeof(pending_fragment_));
             }
+            bitmap_clear(fragment_queued_bitmap_, req.seq);
+            bitmap_set(fragment_accepted_bitmap_, req.seq);
+            (void) xSemaphoreGive(fragment_state_mutex_);
+        }
+
+        if (req.src_node != node_addr_ &&
+            !queue_fragment_ack(req.session_id, req.seq))
+        {
+            ESP_LOGW(TAG,
+                     "Fragment ACK queue full, dropping seq=%u session=%u",
+                     req.seq,
+                     req.session_id);
         }
 
         ESP_LOGI(TAG,
@@ -933,8 +1115,17 @@ void MqttClient::run()
          * drain (e.g. outbox was full), ensure the next ulTaskNotifyTake()
          * returns immediately instead of sleeping up to 30s for heartbeat.
          * Without this, a full outbox causes multi-second drain stalls. */
-        if (fragment_publish_queue_ &&
-            uxQueueMessagesWaiting(fragment_publish_queue_) > 0)
+        bool have_pending = false;
+        if (fragment_state_mutex_ &&
+            xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+        {
+            have_pending = have_pending_fragment_;
+            (void) xSemaphoreGive(fragment_state_mutex_);
+        }
+        if (connected_ && client_ &&
+            (have_pending ||
+             (fragment_publish_queue_ &&
+              uxQueueMessagesWaiting(fragment_publish_queue_) > 0)))
         {
             notify();
         }
@@ -1030,6 +1221,23 @@ bool MqttClient::requeue_cloud_nack(uint16_t session_id, uint16_t seq)
     return xQueueSendToFront(nack_queue_, &item, 0) == pdTRUE;
 }
 
+void MqttClient::mark_fragment_for_republish(uint16_t session_id, uint16_t seq)
+{
+    uint16_t active_session =
+        active_transfer_session_.load(std::memory_order_acquire);
+    if (active_session == 0 || session_id != active_session)
+    {
+        return;
+    }
+
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+    {
+        bitmap_clear(fragment_accepted_bitmap_, seq);
+        (void) xSemaphoreGive(fragment_state_mutex_);
+    }
+}
+
 bool MqttClient::drain_fragment_ack(uint16_t session_id, uint16_t &seq_out)
 {
     if (!fragment_ack_queue_)
@@ -1046,6 +1254,12 @@ bool MqttClient::drain_fragment_ack(uint16_t session_id, uint16_t &seq_out)
         }
         if (item.session_id == session_id)
         {
+            if (fragment_state_mutex_ &&
+                xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) == pdTRUE)
+            {
+                bitmap_clear(fragment_ack_pending_bitmap_, item.seq);
+                (void) xSemaphoreGive(fragment_state_mutex_);
+            }
             seq_out = item.seq;
             return true;
         }
@@ -1057,8 +1271,25 @@ bool MqttClient::drain_fragment_ack(uint16_t session_id, uint16_t &seq_out)
 bool MqttClient::requeue_fragment_ack(uint16_t session_id, uint16_t seq)
 {
     if (!fragment_ack_queue_) return false;
+    if (fragment_state_mutex_ &&
+        xSemaphoreTake(fragment_state_mutex_, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+    if (bitmap_test(fragment_ack_pending_bitmap_, seq))
+    {
+        (void) xSemaphoreGive(fragment_state_mutex_);
+        return true;
+    }
     FragmentAckItem item = {session_id, seq};
-    return xQueueSendToFront(fragment_ack_queue_, &item, 0) == pdTRUE;
+    if (xQueueSendToFront(fragment_ack_queue_, &item, 0) != pdTRUE)
+    {
+        (void) xSemaphoreGive(fragment_state_mutex_);
+        return false;
+    }
+    bitmap_set(fragment_ack_pending_bitmap_, seq);
+    (void) xSemaphoreGive(fragment_state_mutex_);
+    return true;
 }
 
 bool MqttClient::consume_transfer_complete(uint16_t session_id)
