@@ -314,6 +314,8 @@ bool flp::SdReadCache::refill(size_t offset)
 
 size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
 {
+    constexpr size_t kRandomReadBypassMaxLen = 4 * 1024;
+
     if (!cache_buf_ || !file_ || !buf || offset >= file_size_)
     {
         return 0;
@@ -335,8 +337,25 @@ size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
         return len;
     }
 
-    /* Cache miss — refill and retry */
+    /*
+     * Cache miss. For small random reads (typical ARQ/OOW retransmits),
+     * avoid refilling a large cache window and read directly from SD.
+     * This preserves the hot sequential window and prevents refill thrash.
+     */
     misses_++;
+    if (cache_len_ > 0 && len <= kRandomReadBypassMaxLen)
+    {
+        if (fseek(file_, static_cast<long>(offset), SEEK_SET) == 0)
+        {
+            size_t got = fread(buf, 1, len, file_);
+            if (got > 0)
+            {
+                return got;
+            }
+        }
+    }
+
+    /* Large or initial miss — refill and retry */
     if (!refill(offset))
     {
         return 0;
