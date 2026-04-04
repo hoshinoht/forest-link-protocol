@@ -1,5 +1,7 @@
 #include "selective_repeat.hpp"
 
+#include "itransport.hpp"
+
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -58,7 +60,6 @@ void SelectiveRepeat::reset_sender()
     exit_offset_ = 0;
     sender_failed_ = false;
     in_flight_ = 0;
-    min_rto_floor_ms_ = RTO_MIN_MS;
     /* Reset adaptive RTT state for the next transfer */
     srtt_ms_ = 0;
     rttvar_ms_ = 0;
@@ -395,6 +396,22 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
         return;
     }
 
+    uint32_t now = now_ms();
+
+    if (send_cb_)
+    {
+        int rc = send_cb_(peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
+        if (rc == TRANSPORT_SEND_BACKPRESSURE)
+        {
+            slot.send_time_ms = now;
+            return;
+        }
+        if (rc < 0)
+        {
+            return;
+        }
+    }
+
     slot.retries++;
     if (slot.retries >= MAX_RETRIES)
     {
@@ -403,14 +420,9 @@ void SelectiveRepeat::handle_nack(uint16_t seq)
         return;
     }
 
-    slot.send_time_ms = now_ms();
+    slot.send_time_ms = now;
 
     ESP_LOGD(TAG, "NACK retransmit seq=%u retry=%u", seq, slot.retries);
-
-    if (send_cb_)
-    {
-        send_cb_(peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
-    }
 }
 
 uint8_t SelectiveRepeat::tick(uint8_t max_sends)
@@ -477,6 +489,15 @@ uint8_t SelectiveRepeat::tick(uint8_t max_sends)
             {
                 int rc = send_cb_(
                     peer_addr_, PacketType::DATA, seq, slot.data, slot.len);
+                if (rc == TRANSPORT_SEND_BACKPRESSURE)
+                {
+                    /* Local transport is saturated.  Don't burn a retry, but
+                     * defer the next attempt by one full backoff interval so
+                     * we stop hammering the TX pool every scheduler tick. */
+                    slot.send_time_ms = now;
+                    break;
+                }
+
                 if (rc < 0)
                 {
                     /* Send failed (NO_MEM) — don't burn a retry, stop.

@@ -407,7 +407,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
                  "Payload %zu exceeds ESP-NOW max (%d), dropping",
                  len,
                  ESP_NOW_MAX_DATA_LEN_V2);
-        return -1;
+        return TRANSPORT_SEND_FAILED;
     }
 
     /* Classify packet: control (ACK/NACK/discovery/error) vs data.
@@ -440,7 +440,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
                  "TX %s pool full, deferring send to 0x%04X",
                  is_ctrl ? "ctrl" : "data", peer_addr);
         maybe_log_tx_diag(is_ctrl ? "ctrl_full" : "data_full", peer_addr);
-        return -1;
+        return TRANSPORT_SEND_BACKPRESSURE;
     }
 
     /* Record slot class so on_send() returns it to the right pool */
@@ -467,7 +467,9 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
                 (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
             if (sem) { xSemaphoreGive(sem); }
             maybe_log_tx_diag("bcast_err", peer_addr);
-            return -1;
+            return (err == ESP_ERR_ESPNOW_NO_MEM)
+                       ? TRANSPORT_SEND_BACKPRESSURE
+                       : TRANSPORT_SEND_FAILED;
         }
         tx_send_submit_count_.fetch_add(1, std::memory_order_relaxed);
         maybe_log_tx_diag("bcast_ok", peer_addr);
@@ -485,7 +487,7 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
             (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
         if (sem) { xSemaphoreGive(sem); }
         maybe_log_tx_diag("peer_miss", peer_addr);
-        return -1;
+        return TRANSPORT_SEND_FAILED;
     }
 
     esp_err_t err = esp_now_send(mac, data, len);
@@ -501,13 +503,15 @@ int EspNowTransport::send(uint16_t peer_addr, const uint8_t *data, size_t len)
             (tx_ring_write_ + TX_SLOT_DEPTH - 1) % TX_SLOT_DEPTH);
         if (sem) { xSemaphoreGive(sem); }
         maybe_log_tx_diag("send_err", peer_addr);
-        return -1;
+        return (err == ESP_ERR_ESPNOW_NO_MEM)
+                   ? TRANSPORT_SEND_BACKPRESSURE
+                   : TRANSPORT_SEND_FAILED;
     }
 
     tx_send_submit_count_.fetch_add(1, std::memory_order_relaxed);
     maybe_log_tx_diag("send_ok", peer_addr);
     ESP_LOGD(TAG, "Sent %zu bytes to peer 0x%04X", len, peer_addr);
-    return 0;
+    return TRANSPORT_SEND_OK;
 }
 
 /* ── Peer RSSI ──────────────────────────────────────────────────────────── */

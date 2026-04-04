@@ -19,6 +19,7 @@
 #include "esp_rom_sys.h"
 #include "soc/soc.h"
 #include "nvs_flash.h"
+#include "sdcard.hpp"
 #include "uart_ingest.hpp"
 #include "flp_client.hpp"
 #if !CONFIG_FLP_WIFI_DISABLED
@@ -269,6 +270,19 @@ extern "C" void app_main()
     mesh_manager.init();
     mesh_manager.subscribe_topic("config");
     mesh_manager.subscribe_topic("alert");
+
+#if CONFIG_FLP_SD_ENABLED
+    {
+        esp_err_t sd_err = flp::sdcard_init();
+        if (sd_err != ESP_OK)
+        {
+            ESP_LOGW(TAG,
+                     "Global SD mount failed: %s (0x%x)",
+                     esp_err_to_name(sd_err),
+                     sd_err);
+        }
+    }
+#endif
 
 #if CONFIG_FLP_LED_GPIO >= 0
     {

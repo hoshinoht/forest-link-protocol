@@ -363,6 +363,7 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
         oow_retx_queue_[oow_retx_count_] = seq;
         oow_retx_dst_[oow_retx_count_] = from_addr;
         oow_retx_count_++;
+        total_oow_retx_queued_++;
         ESP_LOGI(TAG,
                  "Queued out-of-window seq=%u for retx to 0x%04X (%u pending)",
                  seq,

@@ -7,8 +7,10 @@
 #include "transfer_engine.hpp"
 
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_rom_crc.h"
@@ -65,6 +67,19 @@ uint32_t TransferEngine::compute_min_rto_floor_ms(uint8_t hops_to_exit)
     return (floor > MAX_MIN_RTO_FLOOR_MS) ? MAX_MIN_RTO_FLOOR_MS : floor;
 }
 
+uint8_t TransferEngine::compute_mesh_window_cap(uint8_t hops_to_exit)
+{
+    if (hops_to_exit <= 1)
+    {
+        return ARQ_WINDOW;
+    }
+    if (hops_to_exit == 2)
+    {
+        return TWO_HOP_MESH_WINDOW_CAP;
+    }
+    return MULTIHOP_MESH_WINDOW_CAP;
+}
+
 uint32_t TransferEngine::compute_exit_timeout_ms(uint8_t hops_to_exit)
 {
     uint32_t timeout = BASE_EXIT_NODE_TIMEOUT_MS +
@@ -75,9 +90,292 @@ uint32_t TransferEngine::compute_exit_timeout_ms(uint8_t hops_to_exit)
                : timeout;
 }
 
+uint8_t TransferEngine::mesh_window_cap_per_exit() const
+{
+    uint8_t exits = (transfer_.exit_node_count > 0) ? transfer_.exit_node_count : 1;
+    uint8_t cap = static_cast<uint8_t>(mesh_window_cap_ / exits);
+    if (cap < MIN_PER_EXIT_WINDOW_CAP)
+    {
+        cap = MIN_PER_EXIT_WINDOW_CAP;
+    }
+    if (cap > ARQ_WINDOW)
+    {
+        cap = ARQ_WINDOW;
+    }
+    return cap;
+}
+
+uint16_t TransferEngine::total_mesh_inflight() const
+{
+    uint16_t total = 0;
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        total = static_cast<uint16_t>(total + arq_[i].sender_window_used());
+    }
+    return total;
+}
+
+uint32_t TransferEngine::total_acked_fragments() const
+{
+    if (local_exit_)
+    {
+        return cloud_base_seq_;
+    }
+
+    uint32_t total = 0;
+    for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
+    {
+        total += path_stats_[i].acked;
+    }
+    return total;
+}
+
+uint32_t TransferEngine::data_fragments_before_seq(uint16_t seq) const
+{
+    if (local_exit_)
+    {
+        return seq;
+    }
+
+    uint16_t stride = static_cast<uint16_t>(FEC_GROUP_SIZE + 1);
+    uint32_t groups = seq / stride;
+    uint32_t rem = seq % stride;
+    if (rem > FEC_GROUP_SIZE)
+    {
+        rem = FEC_GROUP_SIZE;
+    }
+    return groups * FEC_GROUP_SIZE + rem;
+}
+
+size_t TransferEngine::bytes_from_seq_progress(uint16_t seq) const
+{
+    uint32_t data_frags = data_fragments_before_seq(seq);
+    size_t bytes = static_cast<size_t>(data_frags) * transfer_.fragment_size;
+    return (bytes > transfer_.size) ? transfer_.size : bytes;
+}
+
+void TransferEngine::reset_telemetry(uint32_t now_ms)
+{
+    transfer_start_ms_ = now_ms;
+    mesh_upload_done_ms_ = 0;
+    last_telemetry_log_ms_ = now_ms;
+    last_telemetry_sent_bytes_ = 0;
+    last_telemetry_acked_frags_ = 0;
+    total_mesh_retx_sent_ = 0;
+    total_oow_retx_queued_ = 0;
+    total_oow_retx_sent_ = 0;
+    total_congestion_events_ = 0;
+    total_local_backpressure_events_ = 0;
+    max_total_inflight_ = 0;
+    telemetry_csv_len_ = 0;
+    telemetry_csv_dropped_ = false;
+    telemetry_summary_written_ = false;
+    snprintf(telemetry_csv_path_,
+             sizeof(telemetry_csv_path_),
+             "/sdcard/flp_telemetry_%04X.csv",
+             my_addr_);
+}
+
+bool TransferEngine::ensure_telemetry_csv_buffer()
+{
+    if (telemetry_csv_buf_)
+    {
+        return true;
+    }
+
+    telemetry_csv_buf_ = static_cast<char *>(
+        heap_caps_malloc(TELEMETRY_CSV_BUFFER_BYTES,
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!telemetry_csv_buf_)
+    {
+        ESP_LOGW(TAG, "Telemetry CSV buffer alloc failed");
+        return false;
+    }
+    telemetry_csv_buf_[0] = '\0';
+    return true;
+}
+
+void TransferEngine::append_telemetry_csv_row(const char *result,
+                                              uint32_t now_ms,
+                                              size_t sent_bytes,
+                                              uint32_t tx_Bps,
+                                              uint32_t acked_frags,
+                                              uint32_t ack_fps,
+                                              uint16_t inflight,
+                                              uint32_t mesh_ms,
+                                              uint32_t cloud_wait_ms,
+                                              uint32_t e2e_Bps,
+                                              uint32_t mesh_Bps)
+{
+    if (!ensure_telemetry_csv_buffer())
+    {
+        return;
+    }
+
+    uint32_t elapsed_ms = (transfer_start_ms_ > 0 && now_ms >= transfer_start_ms_)
+                              ? (now_ms - transfer_start_ms_)
+                              : 0;
+    const char *role = local_exit_ ? "local_exit" : (is_exit_node_ ? "exit" : "source");
+    char line[320];
+    int len = snprintf(
+        line,
+        sizeof(line),
+        "%" PRIu32 ",0x%04X,%s,%u,%s,%zu,%u,%u,%" PRIu32 ",%u,%zu,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%u,%u,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%s\n",
+        now_ms,
+        static_cast<unsigned>(my_addr_),
+        role,
+        static_cast<unsigned>(transfer_.session_id),
+        transfer_.filename,
+        transfer_.size,
+        static_cast<unsigned>(source_hops_to_exit_est_),
+        static_cast<unsigned>(transfer_.exit_node_count),
+        elapsed_ms,
+        static_cast<unsigned>(get_progress_pct()),
+        sent_bytes,
+        tx_Bps,
+        acked_frags,
+        ack_fps,
+        static_cast<unsigned>(inflight),
+        static_cast<unsigned>(max_total_inflight_),
+        total_mesh_retx_sent_,
+        total_oow_retx_queued_,
+        total_oow_retx_sent_,
+        total_congestion_events_,
+        total_local_backpressure_events_,
+        mesh_ms,
+        cloud_wait_ms,
+        e2e_Bps,
+        mesh_Bps,
+        result);
+    if (len <= 0)
+    {
+        return;
+    }
+
+    size_t need = static_cast<size_t>(len);
+    if ((telemetry_csv_len_ + need + 1) > TELEMETRY_CSV_BUFFER_BYTES)
+    {
+        telemetry_csv_dropped_ = true;
+        return;
+    }
+
+    memcpy(telemetry_csv_buf_ + telemetry_csv_len_, line, need);
+    telemetry_csv_len_ += need;
+    telemetry_csv_buf_[telemetry_csv_len_] = '\0';
+}
+
+void TransferEngine::flush_telemetry_csv()
+{
+    if (!telemetry_csv_buf_ || telemetry_csv_len_ == 0 || telemetry_csv_path_[0] == '\0')
+    {
+        return;
+    }
+
+    FILE *f = fopen(telemetry_csv_path_, "ab+");
+    if (!f)
+    {
+        ESP_LOGW(TAG, "Failed to open telemetry CSV %s", telemetry_csv_path_);
+        return;
+    }
+
+    if (fseek(f, 0, SEEK_END) == 0)
+    {
+        long end = ftell(f);
+        if (end == 0)
+        {
+            static constexpr const char *HEADER =
+                "timestamp_ms,node_addr,role,session_id,file,size_bytes,hops,exits,elapsed_ms,progress_pct,sent_bytes,tx_Bps,acked_frags,ack_fps,inflight,max_inflight,mesh_retx,oow_queued,oow_sent,cong,bp,mesh_ms,cloud_wait_ms,e2e_Bps,mesh_Bps,result\n";
+            fwrite(HEADER, 1, strlen(HEADER), f);
+        }
+    }
+
+    fwrite(telemetry_csv_buf_, 1, telemetry_csv_len_, f);
+    fflush(f);
+    fclose(f);
+
+    telemetry_csv_len_ = 0;
+    telemetry_csv_buf_[0] = '\0';
+    if (telemetry_csv_dropped_)
+    {
+        ESP_LOGW(TAG, "Telemetry CSV buffer overflowed during transfer");
+        telemetry_csv_dropped_ = false;
+    }
+}
+
+void TransferEngine::log_transfer_summary(const char *result, uint32_t now_ms)
+{
+    if (transfer_start_ms_ == 0 || transfer_.size == 0)
+    {
+        return;
+    }
+
+    uint32_t total_ms = now_ms - transfer_start_ms_;
+    if (total_ms == 0)
+    {
+        total_ms = 1;
+    }
+
+    uint32_t mesh_ms = (mesh_upload_done_ms_ > transfer_start_ms_)
+                           ? (mesh_upload_done_ms_ - transfer_start_ms_)
+                           : total_ms;
+    if (mesh_ms == 0)
+    {
+        mesh_ms = 1;
+    }
+
+    uint32_t cloud_wait_ms =
+        (mesh_upload_done_ms_ > 0 && now_ms > mesh_upload_done_ms_)
+            ? (now_ms - mesh_upload_done_ms_)
+            : 0;
+    uint32_t e2e_Bps =
+        static_cast<uint32_t>((transfer_.size * 1000ULL) / total_ms);
+    uint32_t mesh_Bps =
+        static_cast<uint32_t>((transfer_.size * 1000ULL) / mesh_ms);
+    uint32_t acked_frags = total_acked_fragments();
+    append_telemetry_csv_row(result,
+                             now_ms,
+                             transfer_.size,
+                             mesh_Bps,
+                             acked_frags,
+                             0,
+                             0,
+                             mesh_ms,
+                             cloud_wait_ms,
+                             e2e_Bps,
+                             mesh_Bps);
+    flush_telemetry_csv();
+    telemetry_summary_written_ = true;
+
+    ESP_LOGI(TAG,
+             "telemetry_final,result=%s,sid=%u,file=%s,size=%zu,total_ms=%" PRIu32 ",mesh_ms=%" PRIu32 ",cloud_wait_ms=%" PRIu32 ",e2e_Bps=%" PRIu32 ",mesh_Bps=%" PRIu32 ",acked=%" PRIu32 ",mesh_retx=%" PRIu32 ",oow_queued=%" PRIu32 ",oow_sent=%" PRIu32 ",cong=%" PRIu32 ",bp=%" PRIu32 ",max_inflight=%u,exits=%u,hops=%u",
+             result,
+             transfer_.session_id,
+             transfer_.filename,
+             transfer_.size,
+             total_ms,
+             mesh_ms,
+             cloud_wait_ms,
+             e2e_Bps,
+             mesh_Bps,
+             acked_frags,
+             total_mesh_retx_sent_,
+             total_oow_retx_queued_,
+             total_oow_retx_sent_,
+             total_congestion_events_,
+             total_local_backpressure_events_,
+             max_total_inflight_,
+             transfer_.exit_node_count,
+             source_hops_to_exit_est_);
+}
+
 void TransferEngine::reset_sender_transfer_state(bool signal_complete)
 {
     uint16_t finished_session = transfer_.session_id;
+
+    if (!telemetry_summary_written_)
+    {
+        flush_telemetry_csv();
+    }
 
     transfer_.active = false;
     transfer_.read_chunk = nullptr;
@@ -119,6 +417,19 @@ void TransferEngine::reset_sender_transfer_state(bool signal_complete)
         path_stats_[i] = ExitPathStats{};
         arq_[i].reset_sender();
     }
+
+    transfer_start_ms_ = 0;
+    mesh_upload_done_ms_ = 0;
+    last_telemetry_log_ms_ = 0;
+    last_telemetry_sent_bytes_ = 0;
+    last_telemetry_acked_frags_ = 0;
+    total_mesh_retx_sent_ = 0;
+    total_oow_retx_queued_ = 0;
+    total_oow_retx_sent_ = 0;
+    total_congestion_events_ = 0;
+    total_local_backpressure_events_ = 0;
+    max_total_inflight_ = 0;
+    telemetry_summary_written_ = false;
 
     if (finished_session != 0 && mqtt_session_end_fn_)
     {
@@ -265,6 +576,9 @@ void TransferEngine::handle_transfer_done(uint16_t sender,
              "stopping transfer",
              sender);
 
+    log_transfer_summary("complete",
+                         static_cast<uint32_t>(esp_timer_get_time() / 1000));
+
     reset_sender_transfer_state(true);
 }
 
@@ -331,6 +645,7 @@ bool TransferEngine::start_file_transfer(const char *filename,
     transfer_.crc32 = crc;
     last_meta_publish_ms_ =
         static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    reset_telemetry(last_meta_publish_ms_);
     source_hops_to_exit_est_ = effective_hops_to_exit;
     exit_node_timeout_ms_ = compute_exit_timeout_ms(effective_hops_to_exit);
 
@@ -440,6 +755,7 @@ bool TransferEngine::start_file_transfer(const char *filename,
      * spurious retransmissions when round-trip exceeds 700ms. */
     uint32_t arq_timeout = compute_arq_timeout_ms(effective_hops_to_exit);
     uint32_t min_rto_floor = compute_min_rto_floor_ms(effective_hops_to_exit);
+    mesh_window_cap_ = compute_mesh_window_cap(effective_hops_to_exit);
     for (int i = 0; i < MAX_EXIT_NODES; i++)
     {
         arq_[i].set_timeout(arq_timeout);
@@ -447,11 +763,12 @@ bool TransferEngine::start_file_transfer(const char *filename,
     }
 
     ESP_LOGI(TAG,
-             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms rto_floor=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms",
+             "Transfer timers: election=%" PRIu32 "ms arq=%" PRIu32 "ms rto_floor=%" PRIu32 "ms exit_timeout=%" PRIu32 "ms mesh_window=%u",
              election_timeout_ms_,
              arq_timeout,
              min_rto_floor,
-             exit_node_timeout_ms_);
+             exit_node_timeout_ms_,
+             mesh_window_cap_);
 
     /*
      * Send to EXIT_ANY_ADDR so relays forward toward exit nodes.
@@ -502,6 +819,8 @@ void TransferEngine::tick(uint32_t now_ms)
             arq_[i].tick(8);
         }
     }
+
+    total_mesh_retx_sent_ += mesh_retx_used;
 
     /* Abort transfer if any ARQ instance has fatally failed */
     if (transfer_.active && !local_exit_)
@@ -670,6 +989,13 @@ void TransferEngine::tick(uint32_t now_ms)
     /* Feed fragments into ARQ window */
     transfer_tick();
 
+    uint16_t inflight = local_exit_ ? static_cast<uint16_t>(cloud_next_send_ - cloud_base_seq_)
+                                    : total_mesh_inflight();
+    if (inflight > max_total_inflight_)
+    {
+        max_total_inflight_ = inflight;
+    }
+
     log_transfer_diag(now_ms, mesh_retx_used);
 }
 
@@ -716,9 +1042,57 @@ void TransferEngine::log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used)
                  ack_age,
                  static_cast<unsigned long>(path_stats_[i].sent),
                  static_cast<unsigned long>(path_stats_[i].acked),
-                 static_cast<unsigned long>(path_stats_[i].nacked),
-                 path_stats_[i].weight);
+                  static_cast<unsigned long>(path_stats_[i].nacked),
+                  path_stats_[i].weight);
     }
+
+    uint32_t elapsed_ms = (transfer_start_ms_ > 0 && now_ms >= transfer_start_ms_)
+                              ? (now_ms - transfer_start_ms_)
+                              : 0;
+    size_t sent_bytes = bytes_from_seq_progress(transfer_.next_fragment);
+    uint32_t acked_frags = total_acked_fragments();
+    uint32_t delta_ms = (last_telemetry_log_ms_ > 0 && now_ms > last_telemetry_log_ms_)
+                            ? (now_ms - last_telemetry_log_ms_)
+                            : 1000;
+    if (delta_ms == 0)
+    {
+        delta_ms = 1;
+    }
+    size_t delta_sent = sent_bytes - last_telemetry_sent_bytes_;
+    uint32_t delta_acked = acked_frags - last_telemetry_acked_frags_;
+    uint32_t tx_Bps = static_cast<uint32_t>((delta_sent * 1000ULL) / delta_ms);
+    uint32_t ack_fps = static_cast<uint32_t>((delta_acked * 1000ULL) / delta_ms);
+    uint16_t inflight = local_exit_ ? static_cast<uint16_t>(cloud_next_send_ - cloud_base_seq_)
+                                    : total_mesh_inflight();
+
+    append_telemetry_csv_row("periodic",
+                             now_ms,
+                             sent_bytes,
+                             tx_Bps,
+                             acked_frags,
+                             ack_fps,
+                             inflight);
+
+    ESP_LOGI(TAG,
+             "telemetry,sid=%u,elapsed_ms=%" PRIu32 ",sent_bytes=%zu,tx_Bps=%" PRIu32 ",acked_frags=%" PRIu32 ",ack_fps=%" PRIu32 ",inflight=%u,max_inflight=%u,mesh_retx=%" PRIu32 ",oow_queued=%" PRIu32 ",oow_sent=%" PRIu32 ",cong=%" PRIu32 ",bp=%" PRIu32 ",progress=%u",
+             transfer_.session_id,
+             elapsed_ms,
+             sent_bytes,
+             tx_Bps,
+             acked_frags,
+             ack_fps,
+             inflight,
+             max_total_inflight_,
+             total_mesh_retx_sent_,
+             total_oow_retx_queued_,
+             total_oow_retx_sent_,
+             total_congestion_events_,
+             total_local_backpressure_events_,
+             get_progress_pct());
+
+    last_telemetry_log_ms_ = now_ms;
+    last_telemetry_sent_bytes_ = sent_bytes;
+    last_telemetry_acked_frags_ = acked_frags;
 }
 
 void TransferEngine::election_timeout_tick(uint32_t now_ms)

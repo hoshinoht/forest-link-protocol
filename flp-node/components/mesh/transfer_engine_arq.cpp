@@ -191,6 +191,8 @@ void TransferEngine::tick_local_exit_arq()
         ESP_LOGI(TAG,
                  "Local-exit transfer complete (all ACK'd): %s",
                  transfer_.filename);
+        log_transfer_summary("complete",
+                             static_cast<uint32_t>(esp_timer_get_time() / 1000));
         reset_sender_transfer_state(true);
     }
 }
@@ -266,8 +268,14 @@ void TransferEngine::recompute_weights()
 
 int8_t TransferEngine::select_mesh_target_for_seq(uint16_t seq) const
 {
+    if (total_mesh_inflight() >= mesh_window_cap_)
+    {
+        return -1;
+    }
+
     int8_t best_idx = -1;
     float best_score = -1.0f;
+    uint8_t window_cap = mesh_window_cap_per_exit();
 
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
@@ -277,8 +285,13 @@ int8_t TransferEngine::select_mesh_target_for_seq(uint16_t seq) const
         }
 
         uint16_t used = arq_[i].sender_window_used();
-        uint16_t free_slots = (used < ARQ_WINDOW)
-                                  ? static_cast<uint16_t>(ARQ_WINDOW - used)
+        if (used >= window_cap)
+        {
+            continue;
+        }
+
+        uint16_t free_slots = (used < window_cap)
+                                  ? static_cast<uint16_t>(window_cap - used)
                                   : 0;
         float score = path_stats_[i].weight * static_cast<float>(free_slots);
         if (score > best_score)
@@ -295,7 +308,8 @@ int8_t TransferEngine::select_mesh_target_for_seq(uint16_t seq) const
 
     for (uint8_t i = 0; i < transfer_.exit_node_count; i++)
     {
-        if (transfer_.exit_node_alive[i] && arq_[i].can_send_sequence(seq))
+        if (transfer_.exit_node_alive[i] && arq_[i].can_send_sequence(seq) &&
+            arq_[i].sender_window_used() < window_cap)
         {
             return static_cast<int8_t>(i);
         }
@@ -474,6 +488,7 @@ void TransferEngine::tick_mesh_arq()
                 }
                 break;
             }
+            total_oow_retx_sent_++;
             ESP_LOGI(TAG, "Re-sent out-of-window seq=%u%s to 0x%04X",
                      seq, is_parity ? " (parity)" : "", dst);
             sent++;
@@ -668,6 +683,7 @@ void TransferEngine::tick_mesh_arq()
         if (all_done)
         {
             mesh_upload_done_ = true;
+            mesh_upload_done_ms_ = now_pace;
             ESP_LOGI(TAG,
                      "Mesh upload drained for %s; waiting for cloud completion",
                      transfer_.filename);

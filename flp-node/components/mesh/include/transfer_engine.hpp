@@ -186,8 +186,14 @@ class TransferEngine
      * to avoid stalling the transfer while giving the exit node drain time. */
     void signal_congestion()
     {
+        total_congestion_events_++;
         congestion_backoff_ticks_ += 2;
         if (congestion_backoff_ticks_ > 12) { congestion_backoff_ticks_ = 12; }
+    }
+    void note_local_backpressure()
+    {
+        total_local_backpressure_events_++;
+        signal_congestion();
     }
 
     /* Set callback for forwarding fragments to MQTT */
@@ -234,7 +240,26 @@ class TransferEngine
     static uint32_t compute_election_timeout_ms(uint8_t hops_to_exit);
     static uint32_t compute_arq_timeout_ms(uint8_t hops_to_exit);
     static uint32_t compute_min_rto_floor_ms(uint8_t hops_to_exit);
+    static uint8_t compute_mesh_window_cap(uint8_t hops_to_exit);
     static uint32_t compute_exit_timeout_ms(uint8_t hops_to_exit);
+    uint32_t total_acked_fragments() const;
+    uint32_t data_fragments_before_seq(uint16_t seq) const;
+    size_t bytes_from_seq_progress(uint16_t seq) const;
+    void reset_telemetry(uint32_t now_ms);
+    bool ensure_telemetry_csv_buffer();
+    void append_telemetry_csv_row(const char *result,
+                                  uint32_t now_ms,
+                                  size_t sent_bytes,
+                                  uint32_t tx_Bps,
+                                  uint32_t acked_frags,
+                                  uint32_t ack_fps,
+                                  uint16_t inflight,
+                                  uint32_t mesh_ms = 0,
+                                  uint32_t cloud_wait_ms = 0,
+                                  uint32_t e2e_Bps = 0,
+                                  uint32_t mesh_Bps = 0);
+    void flush_telemetry_csv();
+    void log_transfer_summary(const char *result, uint32_t now_ms);
 
     void transfer_tick();
     void tick_local_exit_arq();
@@ -248,6 +273,8 @@ class TransferEngine
     void redistribute_dead_exit(uint8_t dead_idx);
     void recompute_weights();
     int8_t select_mesh_target_for_seq(uint16_t seq) const;
+    uint16_t total_mesh_inflight() const;
+    uint8_t mesh_window_cap_per_exit() const;
     void log_transfer_diag(uint32_t now_ms, uint8_t mesh_retx_used);
     void send_broadcast_with_retry(PacketType type,
                                    const uint8_t *payload,
@@ -268,9 +295,13 @@ class TransferEngine
     static constexpr uint32_t BASE_EXIT_NODE_TIMEOUT_MS = 30000;
     static constexpr uint32_t PER_HOP_EXIT_NODE_TIMEOUT_MS = 5000;
     static constexpr uint32_t MAX_EXIT_NODE_TIMEOUT_MS = 60000;
+    static constexpr uint8_t TWO_HOP_MESH_WINDOW_CAP = 24;
+    static constexpr uint8_t MULTIHOP_MESH_WINDOW_CAP = 16;
+    static constexpr uint8_t MIN_PER_EXIT_WINDOW_CAP = 8;
     uint32_t election_timeout_ms_ = 3000; /* Step 6: adaptive election window */
     uint32_t exit_node_timeout_ms_ = BASE_EXIT_NODE_TIMEOUT_MS;
     uint8_t source_hops_to_exit_est_ = 1;
+    uint8_t mesh_window_cap_ = ARQ_WINDOW;
 
     SelectiveRepeat arq_[MAX_EXIT_NODES];
     ActiveTransfer transfer_ = {};
@@ -342,17 +373,38 @@ class TransferEngine
     uint32_t last_cloud_activity_ms_ = 0;
     uint32_t last_mesh_frag_send_ms_ = 0;
     bool mesh_upload_done_ = false;
+    uint32_t transfer_start_ms_ = 0;
+    uint32_t mesh_upload_done_ms_ = 0;
 
     /* Periodic meta re-publish: if the cloud restarts mid-transfer, it has
      * no session state. Re-publishing meta lets it pick up the session. */
     static constexpr uint32_t META_REPUBLISH_INTERVAL_MS = 10000;
     uint32_t last_meta_publish_ms_ = 0;
     uint32_t last_diag_log_ms_ = 0;
+    uint32_t last_telemetry_log_ms_ = 0;
+    size_t last_telemetry_sent_bytes_ = 0;
+    uint32_t last_telemetry_acked_frags_ = 0;
 
     /* Phase 3: per-exit-path quality stats for weighted scheduling */
     ExitPathStats path_stats_[MAX_EXIT_NODES] = {};
     uint16_t weight_recompute_counter_ = 0;
     static constexpr uint16_t WEIGHT_RECOMPUTE_INTERVAL = 16; /* every N frags */
+
+    /* Evaluation telemetry counters */
+    uint32_t total_mesh_retx_sent_ = 0;
+    uint32_t total_oow_retx_queued_ = 0;
+    uint32_t total_oow_retx_sent_ = 0;
+    uint32_t total_congestion_events_ = 0;
+    uint32_t total_local_backpressure_events_ = 0;
+    uint16_t max_total_inflight_ = 0;
+
+    /* Buffered CSV telemetry sink (flushed to SD at transfer end) */
+    static constexpr size_t TELEMETRY_CSV_BUFFER_BYTES = 32 * 1024;
+    char *telemetry_csv_buf_ = nullptr;
+    size_t telemetry_csv_len_ = 0;
+    bool telemetry_csv_dropped_ = false;
+    bool telemetry_summary_written_ = false;
+    char telemetry_csv_path_[48] = {};
 };
 
 } /* namespace flp */

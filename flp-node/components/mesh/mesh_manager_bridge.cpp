@@ -9,6 +9,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "mqtt_client.hpp"
+#include "itransport.hpp"
 #include "uart_ingest.hpp"
 
 using namespace flp;
@@ -457,12 +458,18 @@ int MeshManager::send_raw(Transport transport,
 
     uint32_t latency = static_cast<uint32_t>(
         (esp_timer_get_time() - t0_us) / 1000);
-    protocol_selector_.report_tx_result(transport, rc == 0, latency);
+    if (rc != TRANSPORT_SEND_BACKPRESSURE)
+    {
+        protocol_selector_.report_tx_result(transport, rc == TRANSPORT_SEND_OK, latency);
+    }
 
     /* Step 3d: Report link TX result for ETX calculation */
     if (peer_addr != BROADCAST_ADDR)
     {
-        route_table_.report_link_tx(peer_addr, rc == 0);
+        if (rc != TRANSPORT_SEND_BACKPRESSURE)
+        {
+            route_table_.report_link_tx(peer_addr, rc == TRANSPORT_SEND_OK);
+        }
     }
     return rc;
 }

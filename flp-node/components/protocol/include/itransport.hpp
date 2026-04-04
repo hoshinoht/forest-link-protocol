@@ -9,6 +9,10 @@
 namespace flp
 {
 
+static constexpr int TRANSPORT_SEND_OK = 0;
+static constexpr int TRANSPORT_SEND_FAILED = -1;
+static constexpr int TRANSPORT_SEND_BACKPRESSURE = -2;
+
 class ITransport
 {
   public:

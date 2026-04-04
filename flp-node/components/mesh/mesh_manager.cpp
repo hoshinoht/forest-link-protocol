@@ -19,6 +19,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "itransport.hpp"
 #include "mqtt_client.hpp"
 
 using namespace flp;
@@ -159,7 +160,12 @@ void MeshManager::init()
                                  (mqtt_client_ && mqtt_client_->is_fragment_queue_congested());
                 seq_num = seq_with_congestion(seq_num, congested);
             }
-            return send_packet(dst, type, payload, payload_len, seq_num);
+            int rc = send_packet(dst, type, payload, payload_len, seq_num);
+            if (rc == TRANSPORT_SEND_BACKPRESSURE)
+            {
+                transfer_engine_.note_local_backpressure();
+            }
+            return rc;
         });
 
     /* Wire up fragment forwarding to MQTT (returns false if queue full) */
