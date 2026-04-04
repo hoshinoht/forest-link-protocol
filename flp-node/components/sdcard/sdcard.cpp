@@ -51,7 +51,7 @@ esp_err_t flp::sdcard_init()
     bus_cfg.sclk_io_num = CONFIG_FLP_SD_SCK;
     bus_cfg.quadwp_io_num = -1;
     bus_cfg.quadhd_io_num = -1;
-    bus_cfg.max_transfer_sz = SdReadCache::MAX_CACHE_SIZE;
+    bus_cfg.max_transfer_sz = 4096;
 
     esp_err_t ret = spi_bus_initialize(
         static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -383,6 +383,12 @@ size_t flp::SdReadCache::read(uint8_t *buf, size_t offset, size_t len)
     {
         memcpy(buf, cache_buf_ + (offset - cache_start_), len);
         return len;
+    }
+
+    /* Verify offset is within the refilled window */
+    if (offset < cache_start_ || offset >= cache_start_ + cache_len_)
+    {
+        return 0;
     }
 
     /* Edge case: request spans two cache windows (shouldn't happen with
