@@ -158,6 +158,11 @@ class MeshManager
         uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         return last_config_topic_ms_ > 0 && (now - last_config_topic_ms_) < 3000;
     }
+    bool has_recent_topic_msg() const
+    {
+        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        return last_topic_msg_ms_ > 0 && (now - last_topic_msg_ms_) < 4000;
+    }
     bool is_transfer_active() const
     {
         return transfer_engine_.is_transfer_active();
@@ -280,9 +285,13 @@ class MeshManager
     /* Config topic indicator (display auto-clears after 3s) */
     uint32_t last_config_topic_ms_ = 0;
 
+    /* Generic topic message indicator (display auto-clears after 4s) */
+    uint32_t last_topic_msg_ms_ = 0;
+
     /* Display snapshot shared with display task */
     NodeStatus display_snapshot_ = {};
     char display_filename_buf_[33] = {};
+    char display_topic_msg_buf_[17] = {};
 
     /* Lab peer blacklist — drop direct (hop_count==0) packets from these addrs */
     std::vector<uint16_t> blocked_peers_; /* empty = disabled */

@@ -232,10 +232,27 @@ void MeshManager::handle_topic_msg(const uint8_t *data, size_t len)
                      topic,
                      payload_len);
 
+            uint32_t now_ms =
+                static_cast<uint32_t>(esp_timer_get_time() / 1000);
             if (strcmp(topic, "config") == 0)
             {
-                last_config_topic_ms_ =
-                    static_cast<uint32_t>(esp_timer_get_time() / 1000);
+                last_config_topic_ms_ = now_ms;
+            }
+            if (strcmp(topic, "msg") == 0)
+            {
+                const uint8_t *msg_payload = data + 1 + topic_len;
+                size_t copy_len = (payload_len < sizeof(display_topic_msg_buf_) - 1)
+                                      ? payload_len
+                                      : (sizeof(display_topic_msg_buf_) - 1);
+                for (size_t j = 0; j < copy_len; j++)
+                {
+                    uint8_t c = msg_payload[j];
+                    display_topic_msg_buf_[j] = (c >= 32 && c <= 126)
+                                                    ? static_cast<char>(c)
+                                                    : '.';
+                }
+                display_topic_msg_buf_[copy_len] = '\0';
+                last_topic_msg_ms_ = now_ms;
             }
 
             /* Forward to UART as downlink event */

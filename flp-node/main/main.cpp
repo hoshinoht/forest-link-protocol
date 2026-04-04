@@ -270,6 +270,7 @@ extern "C" void app_main()
     mesh_manager.init();
     mesh_manager.subscribe_topic("config");
     mesh_manager.subscribe_topic("alert");
+    mesh_manager.subscribe_topic("msg");
 
 #if CONFIG_FLP_SD_ENABLED
     {

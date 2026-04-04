@@ -126,6 +126,8 @@ void MeshManager::init()
     assert(display_mutex_);
     display_snapshot_.filename = display_filename_buf_;
     display_filename_buf_[0] = '\0';
+    display_snapshot_.topic_msg = display_topic_msg_buf_;
+    display_topic_msg_buf_[0] = '\0';
 
     /* Pass dual queues and buffer pool to transports */
     espnow_.set_packet_queue(hi_pri_queue_); /* fallback */
@@ -554,6 +556,8 @@ void MeshManager::run()
                 static_cast<uint32_t>(esp_timer_get_time() / 1000000);
             display_snapshot_.cloud_cmd_received = has_recent_cloud_cmd();
             display_snapshot_.config_cmd_received = has_recent_config_cmd();
+            display_snapshot_.topic_msg_received = has_recent_topic_msg();
+            display_snapshot_.topic_msg = display_topic_msg_buf_;
 
             const char *fn = transfer_engine_.current_filename();
             if (fn)
