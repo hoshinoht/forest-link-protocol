@@ -1,10 +1,12 @@
 package transfer
 
 import (
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -327,8 +329,9 @@ func (r *FileReassembler) DiagnoseCRC() {
 	fmt.Printf("[diag] Last %d bytes (offset %d): %q\n", tailSnip, tailStart, r.Buffer[tailStart:tailStart+tailSnip])
 }
 
-// Save writes the reassembled file to outputDir/<filename>.
-func (r *FileReassembler) Save(outputDir string) (string, error) {
+// Save writes the reassembled file to
+// outputDir/<senderID>_<filename> with duplicate-safe suffixing.
+func (r *FileReassembler) Save(outputDir, senderID string) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
@@ -337,7 +340,26 @@ func (r *FileReassembler) Save(outputDir string) (string, error) {
 	if safe == "." || safe == "/" {
 		safe = fmt.Sprintf("session_%s.bin", r.SessionID)
 	}
-	path := filepath.Join(outputDir, safe)
+
+	safeSender := filepath.Base(strings.TrimSpace(senderID))
+	if safeSender == "" || safeSender == "." || safeSender == "/" {
+		safeSender = "unknown"
+	}
+
+	baseName := fmt.Sprintf("%s_%s", safeSender, safe)
+	path := filepath.Join(outputDir, baseName)
+	if _, err := os.Stat(path); err == nil {
+		ext := filepath.Ext(baseName)
+		stem := strings.TrimSuffix(baseName, ext)
+		for i := 1; ; i++ {
+			candidate := filepath.Join(outputDir, fmt.Sprintf("%s_%d%s", stem, i, ext))
+			if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+				path = candidate
+				break
+			}
+		}
+	}
+
 	if err := os.WriteFile(path, r.Buffer[:r.TotalSize], 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}

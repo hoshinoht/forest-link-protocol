@@ -187,7 +187,7 @@ func RunEngine(
 
 		if reassembler.IsComplete() {
 			if reassembler.VerifyCRC() {
-				path, err := reassembler.Save(outputDir)
+				path, err := reassembler.Save(outputDir, tq.ActiveTransfer.NodeID)
 				if err != nil {
 					log.Printf("[transfer] failed to save file: %v", err)
 				} else {
