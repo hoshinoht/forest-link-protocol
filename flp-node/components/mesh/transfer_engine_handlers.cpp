@@ -334,9 +334,7 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     int8_t owner_idx = arq_index_for_sequence(seq);
     if (owner_idx >= 0)
     {
-        path_stats_[owner_idx].nacked++; /* Phase 3 */
-        arq_[owner_idx].handle_nack(seq);
-        return;
+        return; /* duplicate exit-originated NACK from a non-owning exit */
     }
 
     /*
@@ -351,7 +349,7 @@ void TransferEngine::handle_nack(uint16_t seq, uint16_t from_addr)
     }
 
     /* Dedup: don't queue if already pending */
-    for (uint8_t i = 0; i < oow_retx_count_; i++)
+    for (uint16_t i = 0; i < oow_retx_count_; i++)
     {
         if (oow_retx_queue_[i] == seq)
         {

@@ -349,8 +349,8 @@ void TransferEngine::tick_mesh_arq()
     if (oow_retx_count_ > 0 && transfer_.read_chunk)
     {
         uint8_t sent = 0;
-        uint8_t kept = 0;
-        for (uint8_t i = 0; i < oow_retx_count_; i++)
+        uint16_t kept = 0;
+        for (uint16_t i = 0; i < oow_retx_count_; i++)
         {
             uint16_t seq = oow_retx_queue_[i];
             uint16_t dst = oow_retx_dst_[i];
@@ -463,7 +463,7 @@ void TransferEngine::tick_mesh_arq()
                 oow_retx_queue_[kept++] = seq;
                 oow_retx_dst_[kept - 1] = dst;
                 ESP_LOGD(TAG, "OOW retx deferred: TX slots full (seq=%u)", seq);
-                for (uint8_t j = i + 1; j < oow_retx_count_; j++)
+                for (uint16_t j = i + 1; j < oow_retx_count_; j++)
                 {
                     oow_retx_queue_[kept++] = oow_retx_queue_[j];
                     oow_retx_dst_[kept - 1] = oow_retx_dst_[j];
@@ -482,8 +482,8 @@ void TransferEngine::tick_mesh_arq()
     /* Drain pending redistribution queue first */
     if (redist_count_ > 0)
     {
-        uint8_t new_count = 0;
-        for (uint8_t r = 0; r < redist_count_; r++)
+        uint16_t new_count = 0;
+        for (uint16_t r = 0; r < redist_count_; r++)
         {
             uint16_t seq = redist_pending_[r];
             int8_t target = select_mesh_target_for_seq(seq);
