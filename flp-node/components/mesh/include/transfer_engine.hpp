@@ -161,10 +161,18 @@ class TransferEngine
         {
             return 0;
         }
-        uint16_t progress_seq = local_exit_ ? cloud_base_seq_
-                                            : transfer_.next_fragment;
+        /* Use ACKs (not next_fragment) so progress only hits 100% once
+         * fragments are actually confirmed delivered — otherwise the
+         * sensor shows "complete" while cloud NACK recovery is still
+         * draining evicted-slot retransmits. */
+        uint32_t progress_frags =
+            local_exit_ ? cloud_base_seq_ : total_acked_fragments();
+        if (progress_frags > transfer_.fragment_count)
+        {
+            progress_frags = transfer_.fragment_count;
+        }
         return static_cast<uint8_t>(
-            (progress_seq * 100) / transfer_.fragment_count);
+            (progress_frags * 100) / transfer_.fragment_count);
     }
 
     /* Exit node status */

@@ -565,34 +565,53 @@ func RunEngine(
 					lastDiagLogTime = now
 				}
 			}
-			// D1+B3 fix: stall-based end-to-end NACK bridge.
-			// If no chunks arrived for 5s but transfer is incomplete,
-			// publish missing seqs so exit nodes can re-request from source.
-			// Cooldown: exponential backoff (10s, 20s, 40s...) to avoid flooding.
+			// Stall-based end-to-end NACK bridge. Mid-transfer uses
+			// exponential backoff (mesh ARQ is still working); tail
+			// phase (>=95%) flattens to 4s since cloud NACK is the
+			// only recovery path once slots are evicted.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
-				cooldown := 4.0 * float64(int(1)<<stallNackRetries)
-				if cooldown > 16.0 {
-					cooldown = 16.0
+				tailPhase := reassembler.Progress() >= 0.95
+
+				var cooldown float64
+				if tailPhase {
+					cooldown = 4.0
+				} else {
+					cooldown = 4.0 * float64(int(1)<<stallNackRetries)
+					if cooldown > 16.0 {
+						cooldown = 16.0
+					}
 				}
 
 				if now-lastStallNACKTime >= cooldown {
 					if len(sr.CheckStall(lastChunkTime, 5.0)) > 0 {
-						const perSeqNackCooldownSec = 8.0
+						// Shrink per-seq cooldown in tail phase so seqs
+						// become re-NACK-eligible on the next batch.
+						perSeqNackCooldownSec := 8.0
+						if tailPhase {
+							perSeqNackCooldownSec = 4.0
+						}
 						const maxStallNacksPerTick = 8
 						const maxProbeAhead = 64
 						filtered := sr.BuildFilteredStallNACKs(maxStallNacksPerTick, maxProbeAhead, perSeqNackCooldownSec)
 						if len(filtered) > 0 {
 							mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, filtered)
 							lastStallNACKTime = now
-							stallNackRetries++
-							log.Printf("[transfer] stall detected, published %d filtered NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs horizon=%d)",
+							if !tailPhase {
+								stallNackRetries++
+							}
+							phase := "mid"
+							if tailPhase {
+								phase = "tail"
+							}
+							log.Printf("[transfer] stall detected, published %d filtered NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs horizon=%d phase=%s)",
 								len(filtered),
 								tq.ActiveTransfer.SessionID,
 								filtered[0],
 								filtered[len(filtered)-1],
 								cooldown,
 								perSeqNackCooldownSec,
-								maxProbeAhead)
+								maxProbeAhead,
+								phase)
 						}
 					}
 				}

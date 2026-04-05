@@ -228,6 +228,20 @@ class MqttClient
     uint8_t fragment_accepted_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
     uint8_t fragment_ack_pending_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
 
+    /* Ring of recently-published fragment seqs. On MQTT disconnect,
+     * entries younger than the write timeout are injected as synthetic
+     * cloud NACKs to recover gray-zone losses (QoS 0 has no outbox). */
+    struct RecentPublishEntry
+    {
+        uint16_t session_id = 0;
+        uint16_t seq = 0;
+        uint32_t publish_ms = 0; /* 0 = empty slot */
+    };
+    static constexpr size_t RECENT_PUBLISH_RING_SIZE = 64;
+    static constexpr uint32_t RECENT_PUBLISH_REPLAY_MS = 15000;
+    RecentPublishEntry recent_publish_ring_[RECENT_PUBLISH_RING_SIZE] = {};
+    size_t recent_publish_write_ = 0;
+
     /* Deferred ACK queue: seq numbers of relay fragments accepted by the
      * local MQTT client/outbox. Drained by TransferEngine to send mesh ACKs
      * without waiting for broker PUBACK latency. */

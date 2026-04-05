@@ -165,6 +165,7 @@ class LoraTransport : public ITransport
     TaskHandle_t rx_task_ = nullptr;
     SemaphoreHandle_t tx_done_sem_ = nullptr;
     bool initialized_ = false;
+    bool dio1_isr_registered_ = false;
     uint8_t current_sf_ = 7;
     QueueHandle_t hi_pri_queue_ = nullptr;
     QueueHandle_t lo_pri_queue_ = nullptr;

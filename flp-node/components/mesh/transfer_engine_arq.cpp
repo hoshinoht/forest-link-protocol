@@ -18,7 +18,7 @@ constexpr uint8_t kMaxNewFragsSingleHop = 1;
 constexpr uint8_t kMaxNewFragsMultiHop = 1;
 constexpr uint32_t kOowRetxBaseMs = 25;
 constexpr uint32_t kOowRetxPerHopMs = 10;
-constexpr uint8_t kMaxOowRetxPerTick = 1;
+constexpr uint8_t kMaxOowRetxPerTick = 4;
 constexpr uint16_t kOowBacklogHighWater = 32;
 constexpr uint16_t kOowBacklogCriticalWater = 96;
 constexpr uint32_t kOowMinIntervalMs = 8;
@@ -515,7 +515,8 @@ void TransferEngine::tick_mesh_arq()
                      seq, is_parity ? " (parity)" : "", dst);
             sent++;
             last_oow_retx_ms_ = now_pace;
-            allow_oow_send = false;
+            /* Don't clear allow_oow_send — budget + TX backpressure
+             * already rate-limit; clearing it capped retx at 1/tick. */
         }
         oow_retx_count_ = kept;
     }
