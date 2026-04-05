@@ -312,38 +312,13 @@ void LoraTransport::rx_task_func(void *arg)
 
     while (true)
     {
-        /* Fix 8: Use a bounded timeout so the task recovers if the radio
-         * stops asserting DIO1 (e.g. after a TX timeout or chip lockup).
-         *
-         * On timeout we distinguish three cases:
-         *   (a) Normal idle — no LoRa traffic nearby.
-         *   (b) Missed DIO1 edge — pin is still high, ISR did not fire.
-         *   (c) Radio left in wrong state (STDBY/TX after an error).
-         * For (b) we fall through to normal IRQ processing.
-         * For (a)/(c) we force standby → RX-continuous as recovery.    */
-        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000)) == 0)
+        /* Poll DIO1 and also consume task notifications if ISR mode is used.
+         * Polling avoids gpio_install_isr_service heap allocations on targets
+         * where ISR service setup is unstable during boot. */
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20)) == 0)
         {
-            if (gpio_get_level(self->dio1_pin_) == 1)
+            if (gpio_get_level(self->dio1_pin_) == 0)
             {
-                /* Case (b): DIO1 asserted but edge missed — process it */
-                ESP_LOGW(TAG, "DIO1 edge missed, recovering stale IRQ");
-                /* fall through to normal IRQ processing below */
-            }
-            else
-            {
-                /* Cases (a)/(c): re-enter RX as a precaution.
-                 * Cheap and harmless if already in RX-continuous. */
-                if (self->radio_op_mutex_ &&
-                    xSemaphoreTake(self->radio_op_mutex_,
-                                   pdMS_TO_TICKS(100)) == pdTRUE)
-                {
-                    uint8_t stdby = sx1280::STDBY_RC;
-                    self->write_command(
-                        sx1280::CMD_SET_STANDBY, &stdby, 1);
-                    self->enter_rx_continuous();
-                    xSemaphoreGive(self->radio_op_mutex_);
-                    ESP_LOGD(TAG, "RX refreshed after idle timeout");
-                }
                 continue;
             }
         }
@@ -653,15 +628,10 @@ void LoraTransport::init(uint8_t rx_task_priority)
     dio1_cfg.intr_type = GPIO_INTR_POSEDGE;
     gpio_config(&dio1_cfg);
 
-    esp_err_t isr_ret = gpio_install_isr_service(0);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE)
-    {
-        ESP_LOGE(TAG, "gpio_install_isr_service failed: %s",
-                 esp_err_to_name(isr_ret));
-        cleanup_partial_init();
-        return;
-    }
-    gpio_isr_handler_add(dio1_pin_, dio1_isr_handler, this);
+    /* Use DIO1 polling in rx_task_func instead of global GPIO ISR service.
+     * This avoids heap allocations in gpio_install_isr_service during boot. */
+    dio1_isr_registered_ = false;
+    ESP_LOGI(TAG, "DIO1 ISR disabled; using polling RX trigger");
 
     /* Enter continuous RX mode */
     enter_rx_continuous();
@@ -683,7 +653,11 @@ void LoraTransport::deinit()
     set_rf_switch_idle();
 
     /* Remove ISR and delete RX task */
-    gpio_isr_handler_remove(dio1_pin_);
+    if (dio1_isr_registered_)
+    {
+        gpio_isr_handler_remove(dio1_pin_);
+        dio1_isr_registered_ = false;
+    }
     if (rx_task_)
     {
         vTaskDelete(rx_task_);

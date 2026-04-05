@@ -447,9 +447,13 @@ void MeshManager::handle_route_error(const PacketHeader &hdr,
 void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 {
     /* Step 5b: Congestion-aware forwarding */
-    UBaseType_t hi_spaces = uxQueueSpacesAvailable(hi_pri_queue_);
-    UBaseType_t lo_spaces = uxQueueSpacesAvailable(lo_pri_queue_);
-    bool congested = (hi_spaces + lo_spaces) < (kQueueDepth / 2);
+    bool congested = buffer_pool_.is_congested();
+    if (hi_pri_queue_ && lo_pri_queue_)
+    {
+        UBaseType_t hi_spaces = uxQueueSpacesAvailable(hi_pri_queue_);
+        UBaseType_t lo_spaces = uxQueueSpacesAvailable(lo_pri_queue_);
+        congested = (hi_spaces + lo_spaces) < (kQueueDepth / 2);
+    }
 
     if (congested)
     {
@@ -539,6 +543,11 @@ void MeshManager::forward_packet(BufferSlab *slab, const PacketHeader &hdr)
 
 uint8_t MeshManager::saturated_queue_load() const
 {
+    if (!hi_pri_queue_ || !lo_pri_queue_)
+    {
+        return 0;
+    }
+
     UBaseType_t hi_used = kQueueDepth - uxQueueSpacesAvailable(hi_pri_queue_);
     UBaseType_t lo_used = kQueueDepth - uxQueueSpacesAvailable(lo_pri_queue_);
     uint32_t total = hi_used + lo_used;
