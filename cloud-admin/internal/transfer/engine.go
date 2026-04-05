@@ -568,31 +568,61 @@ func RunEngine(
 			// D1+B3 fix: stall-based end-to-end NACK bridge.
 			// If no chunks arrived for 5s but transfer is incomplete,
 			// publish missing seqs so exit nodes can re-request from source.
-			// Cooldown: exponential backoff (10s, 20s, 40s...) to avoid flooding.
+			//
+			// Phase-aware cooldown:
+			//   - Mid-transfer (<95%): exponential backoff 4s→8s→16s. Mesh
+			//     ARQ is still actively filling gaps; we don't want to
+			//     NACK-storm while retransmits are in flight.
+			//   - Tail phase (>=95%): flat 4s cooldown, no backoff. The
+			//     sender's sliding window has evicted slots for these seqs,
+			//     so the ONLY recovery path is cloud NACK → OOW retx on
+			//     the source. Each missed opportunity here risks hitting
+			//     the transfer timeout with chunks still outstanding.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
-				cooldown := 4.0 * float64(int(1)<<stallNackRetries)
-				if cooldown > 16.0 {
-					cooldown = 16.0
+				tailPhase := reassembler.Progress() >= 0.95
+
+				var cooldown float64
+				if tailPhase {
+					cooldown = 4.0
+				} else {
+					cooldown = 4.0 * float64(int(1)<<stallNackRetries)
+					if cooldown > 16.0 {
+						cooldown = 16.0
+					}
 				}
 
 				if now-lastStallNACKTime >= cooldown {
 					if len(sr.CheckStall(lastChunkTime, 5.0)) > 0 {
-						const perSeqNackCooldownSec = 8.0
+						// In tail phase, shrink the per-seq cooldown to
+						// match the batch cadence so individual seqs
+						// become eligible for re-NACK on the next cycle
+						// instead of sitting suppressed for 8s.
+						perSeqNackCooldownSec := 8.0
+						if tailPhase {
+							perSeqNackCooldownSec = 4.0
+						}
 						const maxStallNacksPerTick = 8
 						const maxProbeAhead = 64
 						filtered := sr.BuildFilteredStallNACKs(maxStallNacksPerTick, maxProbeAhead, perSeqNackCooldownSec)
 						if len(filtered) > 0 {
 							mqttClient.PublishTransferNACK(tq.ActiveTransfer.SessionID, filtered)
 							lastStallNACKTime = now
-							stallNackRetries++
-							log.Printf("[transfer] stall detected, published %d filtered NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs horizon=%d)",
+							if !tailPhase {
+								stallNackRetries++
+							}
+							phase := "mid"
+							if tailPhase {
+								phase = "tail"
+							}
+							log.Printf("[transfer] stall detected, published %d filtered NACKs for session %s (seq=%d..%d cooldown=%.1fs per_seq=%.1fs horizon=%d phase=%s)",
 								len(filtered),
 								tq.ActiveTransfer.SessionID,
 								filtered[0],
 								filtered[len(filtered)-1],
 								cooldown,
 								perSeqNackCooldownSec,
-								maxProbeAhead)
+								maxProbeAhead,
+								phase)
 						}
 					}
 				}
