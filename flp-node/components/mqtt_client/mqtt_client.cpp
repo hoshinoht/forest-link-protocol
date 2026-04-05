@@ -305,19 +305,10 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             ESP_LOGW(TAG, "MQTT disconnected from broker");
             connected_ = false;
 
-            /*
-             * Gray-zone replay: any fragment we accepted into esp-mqtt's TX
-             * buffer during the window leading up to this disconnect may
-             * still have been in flight (not yet written to the TLS socket)
-             * when the transport stalled. For QoS 0 there is no outbox and
-             * no PUBACK, so those fragments are silently lost.
-             *
-             * Inject each recent-enough fragment into nack_queue_ as a
-             * synthetic cloud NACK. TransferEngine's tick already drains
-             * nack_queue_ and forwards entries as mesh NACKs back to the
-             * source; the source's OOW retx path (transfer_engine_arq.cpp)
-             * will re-read the chunk from the file and re-publish.
-             */
+            /* Gray-zone replay: fragments accepted into esp-mqtt's TX
+             * buffer but not yet on the wire at disconnect are silently
+             * lost (QoS 0). Inject them as synthetic cloud NACKs so the
+             * source's OOW retx path re-reads and re-publishes. */
             uint32_t now_ms =
                 static_cast<uint32_t>(esp_timer_get_time() / 1000);
             uint16_t active_sid = active_transfer_session_.load(
@@ -338,8 +329,7 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                     }
                     if (now_ms - e.publish_ms > RECENT_PUBLISH_REPLAY_MS)
                     {
-                        /* Old enough that the cloud has had a chance to
-                         * NACK it on its own; don't double-recover. */
+                        /* Cloud has had time to NACK on its own. */
                         e.publish_ms = 0;
                         skipped_age++;
                         continue;
@@ -348,16 +338,13 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                     if (xQueueSend(nack_queue_, &nack, 0) == pdTRUE)
                     {
                         replayed++;
-                        /* Also clear the accepted bit so if the same seq
-                         * gets re-published, it goes through the normal
-                         * publish path instead of being marked duplicate. */
+                        /* Clear accepted bit so re-publish isn't dedup'd. */
                         bitmap_clear(fragment_accepted_bitmap_, e.seq);
                         e.publish_ms = 0;
                     }
                     else
                     {
                         queue_full++;
-                        /* Leave in ring so a future event might retry. */
                     }
                 }
                 (void) xSemaphoreGive(fragment_state_mutex_);
@@ -1106,8 +1093,7 @@ void MqttClient::process_fragment_publish()
             bitmap_clear(fragment_queued_bitmap_, req.seq);
             bitmap_set(fragment_accepted_bitmap_, req.seq);
 
-            /* Track in the gray-zone ring so a subsequent disconnect can
-             * replay this seq as a synthetic cloud NACK. */
+            /* Track for gray-zone replay on disconnect. */
             RecentPublishEntry &slot =
                 recent_publish_ring_[recent_publish_write_];
             slot.session_id = req.session_id;

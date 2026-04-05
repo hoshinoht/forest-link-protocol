@@ -565,19 +565,10 @@ func RunEngine(
 					lastDiagLogTime = now
 				}
 			}
-			// D1+B3 fix: stall-based end-to-end NACK bridge.
-			// If no chunks arrived for 5s but transfer is incomplete,
-			// publish missing seqs so exit nodes can re-request from source.
-			//
-			// Phase-aware cooldown:
-			//   - Mid-transfer (<95%): exponential backoff 4s→8s→16s. Mesh
-			//     ARQ is still actively filling gaps; we don't want to
-			//     NACK-storm while retransmits are in flight.
-			//   - Tail phase (>=95%): flat 4s cooldown, no backoff. The
-			//     sender's sliding window has evicted slots for these seqs,
-			//     so the ONLY recovery path is cloud NACK → OOW retx on
-			//     the source. Each missed opportunity here risks hitting
-			//     the transfer timeout with chunks still outstanding.
+			// Stall-based end-to-end NACK bridge. Mid-transfer uses
+			// exponential backoff (mesh ARQ is still working); tail
+			// phase (>=95%) flattens to 4s since cloud NACK is the
+			// only recovery path once slots are evicted.
 			if sr != nil && reassembler != nil && !reassembler.IsComplete() {
 				tailPhase := reassembler.Progress() >= 0.95
 
@@ -593,10 +584,8 @@ func RunEngine(
 
 				if now-lastStallNACKTime >= cooldown {
 					if len(sr.CheckStall(lastChunkTime, 5.0)) > 0 {
-						// In tail phase, shrink the per-seq cooldown to
-						// match the batch cadence so individual seqs
-						// become eligible for re-NACK on the next cycle
-						// instead of sitting suppressed for 8s.
+						// Shrink per-seq cooldown in tail phase so seqs
+						// become re-NACK-eligible on the next batch.
 						perSeqNackCooldownSec := 8.0
 						if tailPhase {
 							perSeqNackCooldownSec = 4.0
