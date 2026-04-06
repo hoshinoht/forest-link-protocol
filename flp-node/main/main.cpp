@@ -200,11 +200,18 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_ERROR_CHECK(
-        esp_wifi_set_channel(CONFIG_FLP_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
-    ESP_LOGI(TAG,
-             "WiFi STA started (no AP) for ESP-NOW, ch=%d",
-             CONFIG_FLP_ESPNOW_CHANNEL);
+    /*
+     * No hardcoded ESP-NOW channel anymore. MeshManager owns channel
+     * selection: if a hop seed is persisted in NVS we will jump to the
+     * slotted-schedule channel on the first mesh tick; otherwise the
+     * legacy linear scan kicks in until a seed arrives. We still need
+     * the radio to start on *some* channel before that first tick, so
+     * pin it to channel 1 as a neutral starting point. The mesh task
+     * will retune within milliseconds.
+     */
+    ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
+    ESP_LOGI(TAG, "WiFi STA started (no AP) for ESP-NOW, "
+                  "ch=1 (placeholder, MeshManager will retune)");
 
 #if CONFIG_SPIRAM
     {

@@ -231,6 +231,25 @@ void LoraTransport::set_frequency(uint32_t freq_hz)
         (uint8_t) (rf_freq),
     };
     write_command(sx1280::CMD_SET_RF_FREQUENCY, params, 3);
+    current_freq_hz_ = freq_hz;
+}
+
+/*
+ * Hop schedule retune. Idempotent if the requested frequency matches
+ * the current one — important because mesh_manager calls this on every
+ * tick and we only want the standby/RX dance once per slot transition.
+ */
+void LoraTransport::set_freq_runtime(uint32_t freq_hz)
+{
+    if (!initialized_ || freq_hz == current_freq_hz_)
+    {
+        return;
+    }
+    uint8_t stdby = sx1280::STDBY_RC;
+    write_command(sx1280::CMD_SET_STANDBY, &stdby, 1);
+    set_frequency(freq_hz);
+    enter_rx_continuous();
+    ESP_LOGI(TAG, "LoRa retuned to %luHz", (unsigned long) freq_hz);
 }
 
 void LoraTransport::set_tx_power(int8_t dbm)

@@ -593,29 +593,59 @@ void MeshManager::run()
         }
 
         /*
-         * Channel hopping for relay nodes: if we have no route to the
-         * internet, cycle through WiFi channels 1-13 to find the
-         * gateway's ESP-NOW channel.  Sends a discovery probe on each
-         * channel to trigger an immediate response from any exit node.
-         * Stops automatically once a neighbor with internet is found.
+         * Channel hopping.
+         *
+         * If we have a hop seed, the WiFi channel and LoRa frequency are
+         * pure functions of (seed, current_slot). All converged nodes
+         * compute the same values independently — no per-node scan, no
+         * gateway-pinned channel. The slot is derived from our local
+         * monotonic clock plus the FTSP-style anchor maintained in
+         * anchor_, so this works regardless of whether cloud is
+         * currently reachable.
+         *
+         * Without a seed (cold boot, no NVS, no peers yet) we fall back
+         * to the legacy linear scan so we can still find a seeded peer.
+         * The fallback exits as soon as has_seed_ flips true.
          */
-        if (!has_internet_ &&
-            route_table_.min_hops_to_internet() >= ROUTE_HOPS_UNKNOWN)
+        if (has_seed_)
+        {
+            uint64_t slot = time_anchor::current_slot(anchor_, now);
+            uint8_t target_ch =
+                time_anchor::wifi_channel_for_slot(hop_seed_, slot);
+            if (target_ch != 0 && target_ch != current_channel_)
+            {
+                esp_wifi_set_channel(target_ch, WIFI_SECOND_CHAN_NONE);
+                ESP_LOGI(TAG,
+                         "[hop] wifi %u -> %u (slot=%llu)",
+                         (unsigned) current_channel_,
+                         (unsigned) target_ch,
+                         (unsigned long long) slot);
+                current_channel_ = target_ch;
+            }
+
+            uint32_t target_freq =
+                time_anchor::lora_freq_for_slot(hop_seed_, slot);
+            if (lora_.is_initialized() &&
+                target_freq != lora_.get_freq_hz())
+            {
+                lora_.set_freq_runtime(target_freq);
+            }
+        }
+        else if (!has_internet_ &&
+                 route_table_.min_hops_to_internet() >= ROUTE_HOPS_UNKNOWN)
         {
             /*
-             * Fast channel scan: dwell 1.5s per channel so a full
-             * 13-channel sweep completes in ~20s instead of ~65s.
-             * This ensures the relay finds the exit node quickly even
-             * if the exit boots while the relay is scanning a different
-             * channel.  Once a neighbor with internet is found, hopping
-             * stops and the relay stays on that channel.
+             * Legacy fallback (no seed yet): linear scan of WiFi
+             * channels 1-13 at 1.5 s dwell to find any seeded neighbor.
+             * Once a discovery from a seeded peer arrives, has_seed_
+             * flips true and the slotted hopping branch above takes over.
              */
             if (now - channel_hop_timer_ms_ > kChannelHopIntervalMs)
             {
                 channel_hop_idx_ = (channel_hop_idx_ % kMaxWifiChannels) + 1;
                 esp_wifi_set_channel(channel_hop_idx_, WIFI_SECOND_CHAN_NONE);
                 current_channel_ = channel_hop_idx_;
-                ESP_LOGI(TAG, "Channel hop: trying ch=%u", channel_hop_idx_);
+                ESP_LOGI(TAG, "Channel scan: trying ch=%u", channel_hop_idx_);
 
                 /* Probe immediately on the new channel */
                 send_discovery();

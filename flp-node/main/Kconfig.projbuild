@@ -30,17 +30,6 @@ menu "Forest Link Protocol"
             default 36
     endmenu
 
-    config FLP_ESPNOW_CHANNEL
-        int "ESP-NOW initial boot channel (relay-only nodes)"
-        default 1
-        range 1 13
-        help
-            Initial WiFi channel for relay-only nodes at boot, before
-            LoRa discovery has run. Once the node receives a discovery
-            broadcast from an exit node (or a relay that already knows
-            the channel), it auto-switches to match. This value only
-            matters for the first ~10 seconds after boot.
-
     config FLP_WIFI_DISABLED
         bool "Disable WiFi AP connection (relay-only node)"
         default n

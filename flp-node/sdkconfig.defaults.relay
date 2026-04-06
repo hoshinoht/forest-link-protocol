@@ -2,7 +2,6 @@
 # Usage: ./idf relay build
 
 CONFIG_FLP_WIFI_DISABLED=y
-CONFIG_FLP_ESPNOW_CHANNEL=1
 
 # PSRAM safe on relay nodes (no WiFi PHY calibration)
 CONFIG_SPIRAM=y

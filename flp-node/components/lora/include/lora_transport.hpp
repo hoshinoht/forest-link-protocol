@@ -113,6 +113,14 @@ class LoraTransport : public ITransport
 
     void configure(uint32_t freq_hz, uint8_t sf, uint32_t bw_hz);
 
+    /* Hop schedule retune: drops to standby, sets a new RF frequency,
+     * and resumes RX continuous. SF and bandwidth are preserved.
+     * Cheap enough to call once per slot transition (~30 s) without
+     * disturbing in-flight LoRa traffic noticeably. Idempotent — does
+     * nothing if freq_hz == current_freq_. */
+    void set_freq_runtime(uint32_t freq_hz);
+    uint32_t get_freq_hz() const { return current_freq_hz_; }
+
     /* Step 7: ADR — adaptive spreading factor */
     void set_spreading_factor(uint8_t sf);
     uint8_t get_spreading_factor() const { return current_sf_; }
@@ -167,6 +175,9 @@ class LoraTransport : public ITransport
     bool initialized_ = false;
     bool dio1_isr_registered_ = false;
     uint8_t current_sf_ = 7;
+    /* Tracked so set_freq_runtime() can no-op when the slot has not
+     * actually changed. Initialised in init() to the boot frequency. */
+    uint32_t current_freq_hz_ = 0;
     QueueHandle_t hi_pri_queue_ = nullptr;
     QueueHandle_t lo_pri_queue_ = nullptr;
 };
