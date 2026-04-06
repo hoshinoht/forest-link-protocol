@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"flp-admin/internal/epoch"
 	"flp-admin/internal/metrics"
 	"flp-admin/internal/mqtt"
 	"flp-admin/internal/topology"
@@ -51,7 +52,7 @@ func basicAuth(next http.Handler, password string) http.Handler {
 }
 
 // Start registers HTTP handlers and runs the server until ctx is cancelled.
-func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metrics.Store, mqttClient *mqtt.Client, progress *transfer.Progress, adminPass string) {
+func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metrics.Store, mqttClient *mqtt.Client, progress *transfer.Progress, epochPub *epoch.Publisher, adminPass string) {
 	mux := http.NewServeMux()
 
 	staticSub, err := fs.Sub(StaticFS, "static")
@@ -71,6 +72,21 @@ func Start(ctx context.Context, port int, topo *topology.Aggregator, store *metr
 		} else {
 			jsonResponse(w, map[string]interface{}{"nodes": []interface{}{}, "edges": []interface{}{}})
 		}
+	})
+
+	// GET /api/epoch — debug snapshot of the most recently published hop
+	// schedule anchor. Used to verify the publisher is alive and to compare
+	// against device-side anchor logs when measuring convergence.
+	mux.HandleFunc("/api/epoch", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			errorResponse(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if epochPub == nil {
+			errorResponse(w, "epoch publisher not running", http.StatusServiceUnavailable)
+			return
+		}
+		jsonResponse(w, epochPub.Snapshot())
 	})
 
 	// GET /api/metrics/<node_id>

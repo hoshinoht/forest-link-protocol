@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"flp-admin/internal/epoch"
 	"flp-admin/internal/metrics"
 	"flp-admin/internal/mqtt"
 	"flp-admin/internal/server"
@@ -76,6 +77,15 @@ func main() {
 	// Telemetry goroutine
 	go telemetry.Run(ctx, topoCh, metricCh, topo, store)
 
+	// Epoch publisher: publishes the retained flp/admin/epoch anchor every
+	// second so devices reaching MQTT can slave their FTSP-style logical
+	// clock to it. Bumps the cloud-admin reboot incarnation on construction.
+	epochPub, err := epoch.New(store, mqttClient)
+	if err != nil {
+		log.Fatalf("[main] failed to init epoch publisher: %v", err)
+	}
+	go epochPub.Run(ctx)
+
 	// Hourly retention cleanup
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
@@ -96,7 +106,7 @@ func main() {
 	server.StaticFS = staticFS
 
 	// HTTP server
-	go server.Start(ctx, *webPort, topo, store, mqttClient, progress, *mqttPass)
+	go server.Start(ctx, *webPort, topo, store, mqttClient, progress, epochPub, *mqttPass)
 
 	fmt.Fprintf(os.Stderr, "[admin] FLP Admin running. Dashboard at http://0.0.0.0:%d/\n", *webPort)
 

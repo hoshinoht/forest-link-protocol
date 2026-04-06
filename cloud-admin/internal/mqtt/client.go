@@ -387,3 +387,22 @@ func (c *Client) PublishCmd(payload []byte) {
 		log.Printf("[mqtt] publish cmd error: %v", tok.Error())
 	}
 }
+
+// PublishEpoch publishes the canonical hop schedule anchor to the retained
+// topic flp/admin/epoch. retained=true is critical here: late-joining exit
+// nodes that subscribe after the publisher has already started must
+// immediately receive the latest anchor without waiting for the next 1 s
+// publish tick. This is the first (and currently only) retained message in
+// the codebase.
+func (c *Client) PublishEpoch(msg EpochMsg) {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("[mqtt] publish epoch marshal error: %v", err)
+		return
+	}
+	tok := c.client.Publish("flp/admin/epoch", 1, true, payload)
+	tok.Wait()
+	if tok.Error() != nil {
+		log.Printf("[mqtt] publish epoch error: %v", tok.Error())
+	}
+}

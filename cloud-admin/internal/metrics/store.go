@@ -66,6 +66,13 @@ func (m *Store) initDB() error {
 			exit_node_count INTEGER, pdr REAL, latency_ms REAL,
 			range_m INTEGER DEFAULT 1000, notes TEXT
 		)`,
+		// Generic key/value store for small persistent state that does not
+		// belong in any of the time-series tables. Currently used by the
+		// epoch publisher for its incarnation counter and the hop seed.
+		`CREATE TABLE IF NOT EXISTS flp_state (
+			key TEXT PRIMARY KEY,
+			value BLOB NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_node_metrics_node_ts ON node_metrics (node_id, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_heap_metrics_node_ts ON heap_metrics (node_id, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_transfer_metrics_start ON transfer_metrics (start)`,
@@ -236,6 +243,34 @@ func (m *Store) QueryTransfers() ([]map[string]interface{}, error) {
 	}
 	defer rows.Close()
 	return scanRows(rows)
+}
+
+// GetState reads a value from the flp_state key/value table. Returns
+// (nil, nil) if the key does not exist — callers should treat that as
+// "not yet initialised" and decide whether to create the value.
+func (m *Store) GetState(key string) ([]byte, error) {
+	var v []byte
+	err := m.readDB.QueryRow(
+		"SELECT value FROM flp_state WHERE key=?", key,
+	).Scan(&v)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// SetState writes a value to the flp_state key/value table, replacing any
+// existing entry for the same key.
+func (m *Store) SetState(key string, value []byte) error {
+	_, err := m.writeDB.Exec(
+		"INSERT INTO flp_state (key, value) VALUES (?, ?) "+
+			"ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+		key, value,
+	)
+	return err
 }
 
 // Cleanup deletes metrics older than 24 hours.
