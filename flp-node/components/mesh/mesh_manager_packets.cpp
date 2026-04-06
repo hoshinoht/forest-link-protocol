@@ -7,6 +7,9 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "mqtt_client.hpp"
+#include "time_anchor.hpp"
+
+using flp::time_anchor::kSeedBroadcastPeriod;
 
 using namespace flp;
 
@@ -282,6 +285,31 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
                           ? payload_len
                           : sizeof(DiscoveryPayload);
     memcpy(&disc, payload, copy_len);
+
+    /*
+     * Optional TimeAnchor (and optional 32-byte hop seed) trailing the
+     * DiscoveryPayload. Layout:
+     *   [DiscoveryPayload (9 B)] [TimeAnchor (20 B)] [seed (32 B if flag)]
+     * Legacy peers send only the DiscoveryPayload — they pass the
+     * tail_len < sizeof(TimeAnchor) check and we leave anchor_ alone.
+     */
+    {
+        size_t tail_off = sizeof(DiscoveryPayload);
+        size_t tail_len =
+            payload_len > tail_off ? payload_len - tail_off : 0;
+        if (tail_len >= sizeof(TimeAnchor))
+        {
+            TimeAnchor recv_anchor = {};
+            memcpy(&recv_anchor, payload + tail_off, sizeof(TimeAnchor));
+            const uint8_t *seed_in = nullptr;
+            if ((recv_anchor.flags & kTimeAnchorFlagSeedFollows) != 0 &&
+                tail_len >= sizeof(TimeAnchor) + HOP_SEED_SIZE)
+            {
+                seed_in = payload + tail_off + sizeof(TimeAnchor);
+            }
+            merge_anchor(recv_anchor, seed_in);
+        }
+    }
 
     const char *rx_transport = rx_transport_name(source);
 
@@ -617,6 +645,33 @@ void MeshManager::send_discovery()
     memcpy(buf, &hdr, PACKET_HEADER_SIZE);
     memcpy(buf + PACKET_HEADER_SIZE, &disc, sizeof(disc));
     size_t total = PACKET_HEADER_SIZE + sizeof(disc);
+
+    /*
+     * Append the FTSP-style TimeAnchor if we have a seed. The anchor
+     * floods through the mesh by piggy-backing on every discovery, and
+     * once every kSeedBroadcastPeriod broadcasts (~60 s) we also append
+     * the full 32-byte seed so un-seeded peers can pick it up.
+     */
+    if (has_seed_)
+    {
+        anchor_broadcast_count_++;
+        TimeAnchor a = anchor_;
+        /* Re-stamp origin_local_ms with our current local clock so the
+         * receiver's extrapolation reference is the time the packet
+         * left us, not whatever was in the anchor when we last adopted it. */
+        a.origin_local_ms =
+            static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        bool include_seed =
+            (anchor_broadcast_count_ % kSeedBroadcastPeriod == 0);
+        a.flags = include_seed ? kTimeAnchorFlagSeedFollows : 0;
+        memcpy(buf + total, &a, sizeof(TimeAnchor));
+        total += sizeof(TimeAnchor);
+        if (include_seed)
+        {
+            memcpy(buf + total, hop_seed_, HOP_SEED_SIZE);
+            total += HOP_SEED_SIZE;
+        }
+    }
 
     /*
      * Step 5a: Smart discovery transport selection.

@@ -72,6 +72,26 @@ struct TransferCompleteItem
     uint16_t session_id;
 };
 
+/*
+ * Cloud-side hop schedule anchor, parsed from the retained MQTT topic
+ * flp/admin/epoch. Exit nodes that successfully reach MQTT receive this
+ * and queue it for the mesh task to consume; the mesh task then updates
+ * its TimeAnchor and floods the new state through the discovery path.
+ *
+ * received_at_local_ms is captured at MQTT RX time so the mesh task can
+ * extrapolate "where in the slot are we now" without trusting any clock
+ * other than its own monotonic esp_timer_get_time().
+ */
+struct CloudEpochItem
+{
+    uint64_t epoch;
+    uint32_t incarnation;
+    uint32_t slot_ms;
+    int64_t  published_at_ms;
+    uint8_t  seed[HOP_SEED_SIZE];
+    uint32_t received_at_local_ms;
+};
+
 /* Inbound mesh command from cloud (MQTT -> exit node -> mesh) */
 struct MeshCmdItem
 {
@@ -150,6 +170,12 @@ class MqttClient
     bool requeue_cloud_nack(uint16_t session_id, uint16_t seq);
     void mark_fragment_for_republish(uint16_t session_id, uint16_t seq);
 
+    /* Drain one cloud-side hop schedule anchor (returns true if item
+     * was available). Exit nodes receive these from the retained
+     * flp/admin/epoch topic; mesh task consumes and floods through
+     * discovery broadcasts. */
+    bool drain_cloud_epoch(CloudEpochItem &out);
+
     /* Drain one deferred fragment ACK (exit node: accepted by local MQTT
      * client/outbox). */
     bool drain_fragment_ack(uint16_t session_id, uint16_t &seq_out);
@@ -181,6 +207,7 @@ class MqttClient
     QueueHandle_t ack_queue_ = nullptr;
     QueueHandle_t nack_queue_ = nullptr;
     QueueHandle_t cmd_queue_ = nullptr; /* inbound mesh commands from cloud */
+    QueueHandle_t cloud_epoch_queue_ = nullptr; /* hop schedule anchors from cloud */
     std::atomic<TaskHandle_t> task_{nullptr};
     MqttRxCallback rx_callback_ = nullptr;
     std::atomic<bool> connected_{false};

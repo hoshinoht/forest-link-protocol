@@ -186,6 +186,10 @@ void MqttClient::init()
         MALLOC_CAP_SPIRAM);
     transfer_complete_queue_ = xQueueCreate(
         MQTT_TRANSFER_COMPLETE_QUEUE_DEPTH, sizeof(TransferCompleteItem));
+    /* Hop schedule anchor queue: only meaningful on exit nodes that
+     * actually receive flp/admin/epoch. Depth of 4 is generous — the
+     * mesh task drains it on every tick. */
+    cloud_epoch_queue_ = xQueueCreate(4, sizeof(CloudEpochItem));
     if (!fragment_state_mutex_)
     {
         fragment_state_mutex_ = xSemaphoreCreateMutex();
@@ -193,7 +197,8 @@ void MqttClient::init()
 
     if (!publish_queue_ || !file_publish_queue_ || !fragment_publish_queue_ ||
         !ack_queue_ || !nack_queue_ || !cmd_queue_ || !fragment_ack_queue_ ||
-        !transfer_complete_queue_ || !fragment_state_mutex_)
+        !transfer_complete_queue_ || !cloud_epoch_queue_ ||
+        !fragment_state_mutex_)
     {
         ESP_LOGE(TAG, "Failed to create one or more MQTT queues");
         return;
@@ -291,6 +296,10 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
             esp_mqtt_client_subscribe(client_, "flp/admin/ack/+", 1);
             /* Session consensus: cloud notifies transfer completion */
             esp_mqtt_client_subscribe(client_, "flp/admin/complete/+", 1);
+            /* Hop schedule anchor: retained, so the broker delivers the
+             * latest value immediately on subscribe. Mesh task will pick
+             * it up via drain_cloud_epoch() on its next tick. */
+            esp_mqtt_client_subscribe(client_, "flp/admin/epoch", 1);
             /* Fix 13: unblock any task waiting for first MQTT connection */
             if (connected_event_group_)
             {
@@ -552,6 +561,131 @@ void MqttClient::handle_mqtt_event(esp_mqtt_event_handle_t event)
                                  queued);
                     }
                 }
+            }
+
+            /* Hop schedule anchor (retained topic).
+             * Topic: flp/admin/epoch
+             * Payload (JSON):
+             *   {"epoch":N,"incarnation":N,"seed_hex":"<64 hex>",
+             *    "slot_ms":N,"published_at_ms":N,...}
+             * Parse with hand-rolled strstr-style scanning to match the
+             * code style of the other admin topic handlers — keeps the
+             * MQTT component free of cJSON / heavy parsers. */
+            else if (strcmp(topic_buf, "flp/admin/epoch") == 0 &&
+                     event->data && event->data_len > 0)
+            {
+                /* Generous local buffer — the wire payload is small but
+                 * we cannot trust the broker to terminate. */
+                char ebuf[768];
+                size_t elen = (event->data_len < sizeof(ebuf) - 1)
+                                  ? static_cast<size_t>(event->data_len)
+                                  : sizeof(ebuf) - 1;
+                memcpy(ebuf, event->data, elen);
+                ebuf[elen] = '\0';
+
+                /* Helper lambdas: find "key":N and decode the integer.
+                 * Returns true on success and writes *out. */
+                auto parse_u64 = [&](const char *key, uint64_t *out) -> bool {
+                    const char *p = strstr(ebuf, key);
+                    if (!p) return false;
+                    p += strlen(key);
+                    while (*p == ' ' || *p == ':' || *p == '\t') p++;
+                    char *end = nullptr;
+                    unsigned long long v = strtoull(p, &end, 10);
+                    if (end == p) return false;
+                    *out = static_cast<uint64_t>(v);
+                    return true;
+                };
+                auto parse_i64 = [&](const char *key, int64_t *out) -> bool {
+                    const char *p = strstr(ebuf, key);
+                    if (!p) return false;
+                    p += strlen(key);
+                    while (*p == ' ' || *p == ':' || *p == '\t') p++;
+                    char *end = nullptr;
+                    long long v = strtoll(p, &end, 10);
+                    if (end == p) return false;
+                    *out = static_cast<int64_t>(v);
+                    return true;
+                };
+
+                CloudEpochItem item = {};
+                uint64_t epoch64 = 0, inc64 = 0, slot64 = 0;
+                int64_t pub_ms = 0;
+                if (!parse_u64("\"epoch\"", &epoch64) ||
+                    !parse_u64("\"incarnation\"", &inc64) ||
+                    !parse_u64("\"slot_ms\"", &slot64) ||
+                    !parse_i64("\"published_at_ms\"", &pub_ms))
+                {
+                    ESP_LOGW(TAG,
+                             "Malformed flp/admin/epoch payload (len=%d)",
+                             event->data_len);
+                    break;
+                }
+                item.epoch = epoch64;
+                item.incarnation = static_cast<uint32_t>(inc64);
+                item.slot_ms = static_cast<uint32_t>(slot64);
+                item.published_at_ms = pub_ms;
+
+                /* Decode the 64-char hex seed into 32 bytes. */
+                const char *sp = strstr(ebuf, "\"seed_hex\"");
+                if (!sp)
+                {
+                    ESP_LOGW(TAG, "epoch payload missing seed_hex");
+                    break;
+                }
+                sp = strchr(sp, '"');           /* "seed_hex" -> opening quote */
+                if (!sp) break;
+                sp++;                           /* skip first " of seed_hex */
+                sp = strchr(sp, '"');           /* closing quote of "seed_hex" */
+                if (!sp) break;
+                sp++;
+                while (*sp == ' ' || *sp == ':' || *sp == '\t') sp++;
+                if (*sp != '"') break;
+                sp++;                           /* now at first hex char */
+                bool hex_ok = true;
+                for (size_t i = 0; i < HOP_SEED_SIZE; i++)
+                {
+                    char hi = sp[2 * i];
+                    char lo = sp[2 * i + 1];
+                    auto h2n = [](char c) -> int {
+                        if (c >= '0' && c <= '9') return c - '0';
+                        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                        return -1;
+                    };
+                    int hv = h2n(hi);
+                    int lv = h2n(lo);
+                    if (hv < 0 || lv < 0)
+                    {
+                        hex_ok = false;
+                        break;
+                    }
+                    item.seed[i] = static_cast<uint8_t>((hv << 4) | lv);
+                }
+                if (!hex_ok)
+                {
+                    ESP_LOGW(TAG, "epoch payload has malformed seed_hex");
+                    break;
+                }
+
+                item.received_at_local_ms =
+                    static_cast<uint32_t>(esp_timer_get_time() / 1000);
+
+                if (cloud_epoch_queue_ &&
+                    xQueueSend(cloud_epoch_queue_, &item, 0) != pdTRUE)
+                {
+                    /* Mesh task hasn't drained yet — overwrite the oldest
+                     * by clearing one slot and re-sending. The newest
+                     * anchor is always the most useful one. */
+                    CloudEpochItem drop = {};
+                    (void) xQueueReceive(cloud_epoch_queue_, &drop, 0);
+                    (void) xQueueSend(cloud_epoch_queue_, &item, 0);
+                }
+                ESP_LOGI(TAG,
+                         "Cloud epoch RX: epoch=%llu inc=%u slot_ms=%u",
+                         (unsigned long long) item.epoch,
+                         (unsigned) item.incarnation,
+                         (unsigned) item.slot_ms);
             }
 
             /* Session consensus: cloud confirms transfer complete.
@@ -1234,6 +1368,15 @@ bool MqttClient::receive_cmd(MeshCmdItem &out)
         return false;
     }
     return xQueueReceive(cmd_queue_, &out, 0) == pdTRUE;
+}
+
+bool MqttClient::drain_cloud_epoch(CloudEpochItem &out)
+{
+    if (!cloud_epoch_queue_)
+    {
+        return false;
+    }
+    return xQueueReceive(cloud_epoch_queue_, &out, 0) == pdTRUE;
 }
 
 bool MqttClient::drain_cloud_ack(uint16_t session_id, uint16_t &seq_out)

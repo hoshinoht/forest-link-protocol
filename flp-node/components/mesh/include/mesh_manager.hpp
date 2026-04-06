@@ -204,6 +204,22 @@ class MeshManager
                             size_t payload_len);
     void forward_packet(BufferSlab *slab, const PacketHeader &hdr);
     void send_discovery();
+
+    /* Merge an incoming TimeAnchor into anchor_ via the LWW rule.
+     * If seed_in is non-null, it points at the 32-byte hop seed
+     * piggy-backed in the same discovery packet — captured and
+     * persisted to NVS the first time we see it. */
+    void merge_anchor(const TimeAnchor &recv, const uint8_t *seed_in);
+
+    /* Apply a hop schedule anchor pulled directly from MQTT
+     * (flp/admin/epoch). Equivalent to merge_anchor() but builds the
+     * TimeAnchor locally from the cloud-provided fields. */
+    void apply_cloud_epoch(const struct CloudEpochItem &item);
+
+    /* Persist hop_seed_ to NVS. No-op if NVS open fails. */
+    void persist_hop_seed();
+    /* Try to load hop_seed_ from NVS at boot; sets has_seed_ on success. */
+    void load_hop_seed_from_nvs();
     int send_raw(Transport transport,
                  const uint8_t *data,
                  size_t len,
@@ -250,6 +266,21 @@ class MeshManager
      * "flp" key "incarnation". Stored 32-bit for monotonicity, truncated to
      * 8-bit on the wire. Compared via inc_newer() (RFC1982 8-bit serial). */
     uint8_t my_incarnation_ = 0;
+
+    /* FTSP-style hop schedule anchor — see time_anchor.hpp.
+     * has_seed_ goes true once we acquire the 32-byte seed (either via
+     * MQTT directly or piggy-backed on a peer's discovery broadcast).
+     * Until then, the legacy linear channel scan stays in charge. */
+    TimeAnchor anchor_ = {};
+    uint8_t hop_seed_[HOP_SEED_SIZE] = {};
+    bool has_seed_ = false;
+    /* Counts emitted discovery broadcasts; every Nth broadcast also
+     * carries the full 32-byte seed in the payload so un-seeded
+     * neighbors can pick it up without a separate request. */
+    uint32_t anchor_broadcast_count_ = 0;
+    /* Throttles the periodic [anchor] log line in run() so it appears
+     * roughly every 10 s. */
+    uint32_t anchor_log_timer_ms_ = 0;
 
     /* Hysteresis: track current preferred parent for check_better_route() */
     uint16_t preferred_parent_ = BROADCAST_ADDR;

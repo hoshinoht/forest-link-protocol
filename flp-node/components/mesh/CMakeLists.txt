@@ -7,5 +7,5 @@ idf_component_register(
          "transfer_engine_handlers.cpp"
          "transfer_engine_arq.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES espnow lora protocol mqtt_client esp_timer esp_wifi diagnostics display
+    REQUIRES espnow lora protocol mqtt_client esp_timer esp_wifi diagnostics display mbedtls nvs_flash
 )

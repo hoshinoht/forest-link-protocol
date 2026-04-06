@@ -22,6 +22,7 @@
 #include "itransport.hpp"
 #include "mqtt_client.hpp"
 #include "nvs.h"
+#include "time_anchor.hpp"
 
 using namespace flp;
 
@@ -41,6 +42,9 @@ constexpr uint32_t kBiasIntervalMs = 10000;
 constexpr uint32_t kTelemetryIntervalMs = 30000;
 constexpr uint32_t kChannelHopIntervalMs = 1500;
 constexpr uint8_t kMaxWifiChannels = 13;
+/* How often to log the current anchor / extrapolated slot for
+ * convergence debugging. */
+constexpr uint32_t kAnchorLogIntervalMs = 10000;
 } /* namespace */
 
 void MeshManager::set_has_internet(bool v)
@@ -149,6 +153,13 @@ void MeshManager::init()
                      esp_err_to_name(err));
         }
     }
+
+    /* Try to load the persisted hop seed. If present, has_seed_ becomes
+     * true and the slotted hopping path will be used (in commit 5);
+     * otherwise we fall back to the legacy linear channel scan until
+     * either MQTT delivers a fresh anchor or a seeded peer broadcasts
+     * one to us. */
+    load_hop_seed_from_nvs();
 
     /* Init buffer pool */
     buffer_pool_.init();
@@ -532,6 +543,45 @@ void MeshManager::run()
         }
 
         /*
+         * Drain any hop schedule anchors the MQTT client received from
+         * cloud. Only meaningful on exit nodes that actually have a
+         * working uplink, but the drain is cheap on relays (queue is
+         * always empty). Each drained item updates anchor_ + persists
+         * the seed if it changed.
+         */
+        if (mqtt_client_)
+        {
+            CloudEpochItem ep_item = {};
+            while (mqtt_client_->drain_cloud_epoch(ep_item))
+            {
+                apply_cloud_epoch(ep_item);
+            }
+        }
+
+        /*
+         * Periodic [anchor] log line for convergence debugging — once
+         * the mesh starts hopping for real (commit 5) this will let us
+         * verify that all nodes agree on the same slot at the same
+         * wall-clock instant. No-op until we have a seed.
+         */
+        if (has_seed_ && (now - anchor_log_timer_ms_ > kAnchorLogIntervalMs))
+        {
+            uint64_t slot = time_anchor::current_slot(anchor_, now);
+            uint8_t  ch = time_anchor::wifi_channel_for_slot(hop_seed_, slot);
+            uint32_t fr = time_anchor::lora_freq_for_slot(hop_seed_, slot);
+            ESP_LOGI(TAG,
+                     "[anchor] epoch=%llu inc=%u origin=0x%04X slot=%llu "
+                     "wifi_ch=%u lora_freq=%lu",
+                     (unsigned long long) anchor_.cloud_epoch,
+                     (unsigned) anchor_.cloud_incarnation,
+                     anchor_.origin_node,
+                     (unsigned long long) slot,
+                     (unsigned) ch,
+                     (unsigned long) fr);
+            anchor_log_timer_ms_ = now;
+        }
+
+        /*
          * Publish topology + metrics + heap every 30s via relay.
          * relay_publish() handles both exit nodes (direct MQTT) and
          * deep-field nodes (MESH_PUB routed through mesh to exit).
@@ -618,4 +668,107 @@ void MeshManager::run()
             xSemaphoreGive(display_mutex_);
         }
     }
+}
+
+/* ── FTSP-style hop schedule anchor: load / persist / merge / apply ──── */
+
+void MeshManager::load_hop_seed_from_nvs()
+{
+    nvs_handle_t flp_nvs = 0;
+    if (nvs_open("flp", NVS_READONLY, &flp_nvs) != ESP_OK)
+    {
+        return; /* first boot, or NVS not initialised — no seed yet */
+    }
+    size_t len = HOP_SEED_SIZE;
+    esp_err_t err = nvs_get_blob(flp_nvs, "hop_seed", hop_seed_, &len);
+    nvs_close(flp_nvs);
+    if (err == ESP_OK && len == HOP_SEED_SIZE)
+    {
+        has_seed_ = true;
+        ESP_LOGI(TAG, "[anchor] loaded persisted hop seed (32 bytes)");
+    }
+}
+
+void MeshManager::persist_hop_seed()
+{
+    nvs_handle_t flp_nvs = 0;
+    if (nvs_open("flp", NVS_READWRITE, &flp_nvs) != ESP_OK)
+    {
+        return;
+    }
+    if (nvs_set_blob(flp_nvs, "hop_seed", hop_seed_, HOP_SEED_SIZE) == ESP_OK)
+    {
+        nvs_commit(flp_nvs);
+    }
+    nvs_close(flp_nvs);
+}
+
+void MeshManager::merge_anchor(const TimeAnchor &recv,
+                               const uint8_t *seed_in)
+{
+    /* Capture a freshly-broadcast seed before evaluating the merge so
+     * the very first anchor we ever receive (which carries the seed)
+     * unlocks slotted hopping immediately. */
+    if (seed_in != nullptr && !has_seed_)
+    {
+        memcpy(hop_seed_, seed_in, HOP_SEED_SIZE);
+        has_seed_ = true;
+        persist_hop_seed();
+        ESP_LOGI(TAG,
+                 "[anchor] received hop seed from peer 0x%04X (origin 0x%04X)",
+                 recv.origin_node, recv.origin_node);
+    }
+
+    if (!time_anchor::should_adopt(recv, anchor_))
+    {
+        return;
+    }
+
+    /* Adopt: copy the (incarnation, epoch, origin) tuple from the sender,
+     * but re-stamp origin_local_ms with OUR own monotonic clock. The
+     * field is purely a local extrapolation reference — see
+     * time_anchor.hpp for the rationale. */
+    anchor_ = recv;
+    anchor_.origin_local_ms =
+        static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    ESP_LOGD(TAG,
+             "[anchor] adopted via mesh: epoch=%llu inc=%u origin=0x%04X",
+             (unsigned long long) anchor_.cloud_epoch,
+             (unsigned) anchor_.cloud_incarnation,
+             anchor_.origin_node);
+}
+
+void MeshManager::apply_cloud_epoch(const CloudEpochItem &item)
+{
+    /* Always capture the seed from cloud — it is authoritative.
+     * If our previously-held seed differs, replace it. */
+    bool seed_changed =
+        !has_seed_ ||
+        memcmp(hop_seed_, item.seed, HOP_SEED_SIZE) != 0;
+    if (seed_changed)
+    {
+        memcpy(hop_seed_, item.seed, HOP_SEED_SIZE);
+        has_seed_ = true;
+        persist_hop_seed();
+        ESP_LOGI(TAG, "[anchor] persisted hop seed from cloud");
+    }
+
+    /* Build a TimeAnchor from the cloud message. Origin is OUR address
+     * because we are the node that just touched cloud — downstream
+     * peers will see this as our authoritative anchor. */
+    TimeAnchor a = {};
+    a.cloud_epoch = item.epoch;
+    a.cloud_incarnation = item.incarnation;
+    a.origin_node = my_addr_;
+    a.origin_local_ms = item.received_at_local_ms;
+    a.seed_version = 1;
+    a.flags = 0;
+    /* Run the merge so we respect any newer anchor we already had —
+     * e.g. if a different node fetched a later epoch concurrently. */
+    merge_anchor(a, nullptr); /* seed already handled above */
+    ESP_LOGI(TAG,
+             "[anchor] applied cloud epoch: epoch=%llu inc=%u slot_ms=%u",
+             (unsigned long long) item.epoch,
+             (unsigned) item.incarnation,
+             (unsigned) item.slot_ms);
 }

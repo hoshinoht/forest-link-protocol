@@ -134,6 +134,43 @@ static_assert(sizeof(DiscoveryPayload) == 9, "DiscoveryPayload must be 9 bytes")
  * compatibility with un-upgraded peers; missing fields default to 0. */
 static constexpr size_t LEGACY_DISCOVERY_PAYLOAD_SIZE = 8;
 
+/*
+ * TimeAnchor — FTSP-style logical clock state, propagated by piggybacking
+ * on DISCOVERY broadcasts. Devices merge incoming anchors with a
+ * max-register CRDT rule (highest cloud_incarnation wins, tiebreak by
+ * cloud_epoch then origin_node) so the mesh converges on a single shared
+ * notion of "what slot are we in".
+ *
+ * The hop schedule (WiFi channel + LoRa frequency) is then a pure
+ * function of (seed, slot), letting all converged nodes compute the
+ * same channel independently.
+ *
+ * Wire layout follows the DiscoveryPayload in a discovery packet:
+ *   [DiscoveryPayload (9 B)] [TimeAnchor (20 B)] [optional 32-byte seed]
+ *
+ * The trailing seed is included only when flags bit 0 is set; this
+ * happens once every kSeedBroadcastPeriod discovery broadcasts so
+ * un-seeded nodes can pick the seed up from any seeded neighbor without
+ * paying the airtime cost on every send.
+ */
+struct __attribute__((packed)) TimeAnchor
+{
+    uint64_t cloud_epoch;       /* monotonic slot counter from cloud-admin */
+    uint32_t cloud_incarnation; /* cloud-admin reboot counter (top-level fence) */
+    uint16_t origin_node;       /* MAC-derived addr of original cloud-toucher */
+    uint32_t origin_local_ms;   /* THIS node's local clock at last adopt — used for extrapolation */
+    uint8_t seed_version;       /* reserved for future seed rotation; 1 = first seed */
+    uint8_t flags;              /* bit 0: this packet also carries the 32-byte seed */
+};
+static_assert(sizeof(TimeAnchor) == 20, "TimeAnchor must be 20 bytes");
+
+/* Bit 0 of TimeAnchor.flags: a 32-byte hop seed follows the anchor in
+ * the discovery payload. */
+static constexpr uint8_t kTimeAnchorFlagSeedFollows = 0x01;
+
+/* Length of the shared HMAC seed in bytes. */
+static constexpr size_t HOP_SEED_SIZE = 32;
+
 struct __attribute__((packed)) RouteErrorPayload
 {
     uint16_t dead_addr;      /* the neighbor that went unreachable */
