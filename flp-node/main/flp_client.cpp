@@ -13,7 +13,6 @@
 static const char *TAG = "flp_client";
 
 static constexpr const char *DEMO_FILENAME = "demo-large.jpg";
-static constexpr size_t FALLBACK_PAYLOAD_SIZE = 8192;
 static constexpr size_t CHUNK_SIZE = 1024;
 
 namespace flp
@@ -38,12 +37,7 @@ void FlpClient::load_demo_payload()
 {
     use_sd_stream_ = false;
     payload_size_ = 0;
-
-    if (payload_buf_)
-    {
-        heap_caps_free(payload_buf_);
-        payload_buf_ = nullptr;
-    }
+    payload_buf_ = nullptr;
 
 #if CONFIG_FLP_SD_ENABLED
     esp_err_t sd_err = sdcard_init();
@@ -87,20 +81,14 @@ void FlpClient::load_demo_payload()
     /* Fallback: 8 KB synthetic pattern */
     if ((!payload_buf_ && !use_sd_stream_) || payload_size_ == 0)
     {
-        payload_buf_ = static_cast<uint8_t *>(
-            heap_caps_malloc(FALLBACK_PAYLOAD_SIZE, MALLOC_CAP_SPIRAM));
-        if (payload_buf_)
+        for (size_t i = 0; i < kFallbackPayloadSize; i++)
         {
-            for (size_t i = 0; i < FALLBACK_PAYLOAD_SIZE; i++)
-                payload_buf_[i] = static_cast<uint8_t>('A' + (i % 26));
-            payload_size_ = FALLBACK_PAYLOAD_SIZE;
-            ESP_LOGI(TAG, "Using fallback payload: %u bytes",
-                     (unsigned)payload_size_);
+            fallback_payload_[i] = static_cast<uint8_t>('A' + (i % 26));
         }
-        else
-        {
-            ESP_LOGE(TAG, "Failed to allocate fallback payload in PSRAM");
-        }
+        payload_buf_ = fallback_payload_;
+        payload_size_ = kFallbackPayloadSize;
+        ESP_LOGI(TAG, "Using fallback payload: %u bytes",
+                 (unsigned)payload_size_);
     }
 }
 

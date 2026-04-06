@@ -29,6 +29,8 @@ class MeshManager;
 class FlpClient
 {
   public:
+    static constexpr size_t kFallbackPayloadSize = 8192;
+
     FlpClient() = default;
 
     /* Call after uart_ingest.init() and mesh_manager.init().
@@ -54,6 +56,7 @@ class FlpClient
     size_t payload_size_ = 0;
     char filename_[64] = {};
     bool use_sd_stream_ = false;
+    uint8_t fallback_payload_[kFallbackPayloadSize] = {};
 
 #if CONFIG_FLP_SD_ENABLED
     SdReadCache sd_cache_;

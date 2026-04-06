@@ -18,7 +18,7 @@ constexpr uint8_t kMaxNewFragsSingleHop = 1;
 constexpr uint8_t kMaxNewFragsMultiHop = 1;
 constexpr uint32_t kOowRetxBaseMs = 25;
 constexpr uint32_t kOowRetxPerHopMs = 10;
-constexpr uint8_t kMaxOowRetxPerTick = 1;
+constexpr uint8_t kMaxOowRetxPerTick = 4;
 constexpr uint16_t kOowBacklogHighWater = 32;
 constexpr uint16_t kOowBacklogCriticalWater = 96;
 constexpr uint32_t kOowMinIntervalMs = 8;
@@ -515,7 +515,15 @@ void TransferEngine::tick_mesh_arq()
                      seq, is_parity ? " (parity)" : "", dst);
             sent++;
             last_oow_retx_ms_ = now_pace;
-            allow_oow_send = false;
+            /*
+             * Do NOT clear allow_oow_send here. Clearing it after the first
+             * send capped throughput at 1 retx per tick_mesh_arq() call, which
+             * made cloud-NACK recovery crawl when a burst of missing seqs
+             * arrived (typical case: 47 seqs stuck at 99.7%).  The `sent >=
+             * oow_send_budget` check above (budget = kMaxOowRetxPerTick) is
+             * the intended rate limit; and send_fn_() returns backpressure
+             * when TX slots are full, so we won't overrun ESP-NOW.
+             */
         }
         oow_retx_count_ = kept;
     }
