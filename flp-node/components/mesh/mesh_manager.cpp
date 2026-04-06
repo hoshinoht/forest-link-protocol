@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 #include "itransport.hpp"
 #include "mqtt_client.hpp"
+#include "nvs.h"
 
 using namespace flp;
 
@@ -105,6 +106,49 @@ void MeshManager::init()
     my_addr_ = static_cast<uint16_t>((mac[kNodeMacHighByteIdx] << 8) |
                                      mac[kNodeMacLowByteIdx]);
     ESP_LOGI(TAG, "Node addr: 0x%04X", my_addr_);
+
+    /*
+     * Load and bump the gateway incarnation counter from NVS. This makes
+     * every reboot of an exit node visible to the rest of the mesh as a
+     * monotonically increasing value, which fences stale DSDV state held
+     * by neighbors that did not see the reboot (commit 30c36212 race fix).
+     *
+     * NVS namespace "flp" is created on first write. We persist a 32-bit
+     * value for monotonicity across many reboots even though the wire
+     * field is 8-bit (compared via inc_newer / RFC1982).
+     */
+    {
+        nvs_handle_t flp_nvs = 0;
+        esp_err_t err = nvs_open("flp", NVS_READWRITE, &flp_nvs);
+        if (err == ESP_OK)
+        {
+            uint32_t stored = 0;
+            nvs_get_u32(flp_nvs, "incarnation", &stored); /* leaves 0 on miss */
+            stored++;
+            esp_err_t set_err = nvs_set_u32(flp_nvs, "incarnation", stored);
+            if (set_err == ESP_OK)
+            {
+                nvs_commit(flp_nvs);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "nvs_set incarnation failed: %s",
+                         esp_err_to_name(set_err));
+            }
+            my_incarnation_ = static_cast<uint8_t>(stored & 0xFF);
+            ESP_LOGI(TAG,
+                     "gw incarnation = %u (boot count %" PRIu32 ")",
+                     (unsigned) my_incarnation_,
+                     stored);
+            nvs_close(flp_nvs);
+        }
+        else
+        {
+            ESP_LOGW(TAG,
+                     "nvs_open(\"flp\") failed: %s — incarnation will be 0",
+                     esp_err_to_name(err));
+        }
+    }
 
     /* Init buffer pool */
     buffer_pool_.init();

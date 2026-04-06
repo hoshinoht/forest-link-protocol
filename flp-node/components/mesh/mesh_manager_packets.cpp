@@ -336,10 +336,12 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
 
     /*
      * Step 1e: Use DSDV sequence-numbered update instead of plain
-     * set_hops_to_internet. Only accept if sequence check passes.
+     * set_hops_to_internet. Only accept if sequence/incarnation check passes.
+     * gw_incarnation defaults to 0 for legacy peers (backward compat).
      */
     route_table_.update_inet_route(
-        hdr.src_addr, disc.hops_to_internet, disc.inet_seq, disc.inet_origin);
+        hdr.src_addr, disc.hops_to_internet, disc.inet_seq, disc.inet_origin,
+        disc.gw_incarnation);
     route_table_.set_queue_load(hdr.src_addr, disc.queue_load);
 
     /*
@@ -360,17 +362,19 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
         esp_wifi_get_channel(&resp_ch, &resp_sec);
         resp.flags |= (resp_ch & kDiscoveryChMask) << kDiscoveryChShift;
 
-        /* Step 1d: Populate sequence info */
+        /* Step 1d: Populate sequence info (incarnation tracks origin) */
         if (has_internet_)
         {
             resp.inet_seq = my_inet_seq_;
             resp.inet_origin = my_addr_;
+            resp.gw_incarnation = my_incarnation_;
         }
         else
         {
             auto best = route_table_.best_inet_route();
             resp.inet_seq = best.seq;
             resp.inet_origin = best.origin;
+            resp.gw_incarnation = best.incarnation;
         }
 
         /* Populate queue load for load-aware routing (same as broadcast) */
@@ -576,17 +580,22 @@ void MeshManager::send_discovery()
     esp_wifi_get_channel(&ch, &sec);
     disc.flags |= (ch & kDiscoveryChMask) << kDiscoveryChShift;
 
-    /* Step 1d: Populate DSDV sequence info */
+    /* Step 1d: Populate DSDV sequence info.
+     * gw_incarnation always tracks inet_origin: when we are the origin,
+     * advertise our own NVS-persisted incarnation; when relaying, advertise
+     * the incarnation we last learned for the chosen origin. */
     if (has_internet_)
     {
         disc.inet_seq = ++my_inet_seq_;
         disc.inet_origin = my_addr_;
+        disc.gw_incarnation = my_incarnation_;
     }
     else
     {
         auto best = route_table_.best_inet_route();
         disc.inet_seq = best.seq;
         disc.inet_origin = best.origin;
+        disc.gw_incarnation = best.incarnation;
     }
 
     /* Populate queue load for load-aware routing */

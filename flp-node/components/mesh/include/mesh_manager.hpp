@@ -246,6 +246,11 @@ class MeshManager
     /* Step 1d: DSDV sequence number for internet route */
     uint16_t my_inet_seq_ = 0;
 
+    /* Gateway incarnation: bumped on every boot, persisted in NVS namespace
+     * "flp" key "incarnation". Stored 32-bit for monotonicity, truncated to
+     * 8-bit on the wire. Compared via inc_newer() (RFC1982 8-bit serial). */
+    uint8_t my_incarnation_ = 0;
+
     /* Hysteresis: track current preferred parent for check_better_route() */
     uint16_t preferred_parent_ = BROADCAST_ADDR;
 

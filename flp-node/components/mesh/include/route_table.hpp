@@ -15,6 +15,14 @@ static inline bool seq_newer(uint16_t a, uint16_t b)
     return static_cast<int16_t>(a - b) > 0;
 }
 
+/* 8-bit RFC 1982 serial arithmetic for the gateway incarnation field.
+ * Wraparound at 256 reboots is unlikely in practice but the half-window
+ * rule keeps the comparison correct even if it does occur. */
+static inline bool inc_newer(uint8_t a, uint8_t b)
+{
+    return static_cast<int8_t>(a - b) > 0;
+}
+
 inline constexpr uint8_t ROUTE_HOPS_UNKNOWN = 0xFF;
 inline constexpr int8_t ROUTE_RSSI_INVALID = -127;
 inline constexpr uint8_t ROUTE_FLAG_ESPNOW = 0x01;
@@ -33,6 +41,7 @@ struct NeighborEntry
     bool has_internet;
     uint16_t inet_seq;       /* sequence number of the internet route */
     uint16_t inet_origin;    /* which exit node this route comes from */
+    uint8_t inet_incarnation;/* origin gateway's reboot counter — fences DSDV state across gateway restarts (commit 30c36212 race fix) */
     uint16_t tx_count;       /* packets sent to this neighbor */
     uint16_t tx_success;     /* successful transmissions */
     uint16_t etx_x100;      /* ETX * 100 (fixed-point, e.g. 150 = 1.5 ETX) */
@@ -115,9 +124,21 @@ class RouteTable
         }
     }
 
-    /* Step 1c: DSDV sequence-numbered route update */
+    /* Step 1c: DSDV sequence-numbered route update.
+     *
+     * incarnation fencing (commit 30c36212 fix): when an advertisement
+     * arrives with a strictly newer incarnation for the same origin, the
+     * gateway has rebooted and reset its inet_seq space. Accept the new
+     * (origin, seq, incarnation) tuple unconditionally — neighbors that
+     * still hold the gateway's pre-reboot seq must not gate the fresh
+     * advertisement.
+     *
+     * For same-incarnation updates, fall through to the existing serial
+     * arithmetic on inet_seq (unchanged behavior).
+     */
     bool update_inet_route(uint16_t neighbor_addr, uint8_t hops_inet,
-                           uint16_t seq, uint16_t origin)
+                           uint16_t seq, uint16_t origin,
+                           uint8_t incarnation = 0)
     {
         for (uint8_t i = 0; i < count_; i++)
         {
@@ -125,12 +146,30 @@ class RouteTable
             {
                 continue;
             }
-            /* Higher seq from same origin: accept unconditionally */
+            /* Same origin, newer incarnation: gateway rebooted, fence stale state */
+            if (origin == neighbors_[i].inet_origin &&
+                inc_newer(incarnation, neighbors_[i].inet_incarnation))
+            {
+                neighbors_[i].hops_to_internet = hops_inet;
+                neighbors_[i].inet_seq = seq;
+                neighbors_[i].inet_origin = origin;
+                neighbors_[i].inet_incarnation = incarnation;
+                return true;
+            }
+            /* Same origin, older incarnation: caller is reporting state from
+             * before a reboot we already learned about. Reject. */
+            if (origin == neighbors_[i].inet_origin &&
+                inc_newer(neighbors_[i].inet_incarnation, incarnation))
+            {
+                return false;
+            }
+            /* Higher seq from same origin (and same incarnation): accept */
             if (origin == neighbors_[i].inet_origin && seq_newer(seq, neighbors_[i].inet_seq))
             {
                 neighbors_[i].hops_to_internet = hops_inet;
                 neighbors_[i].inet_seq = seq;
                 neighbors_[i].inet_origin = origin;
+                neighbors_[i].inet_incarnation = incarnation;
                 return true;
             }
             /* Same seq: accept only if lower hop count */
@@ -143,7 +182,9 @@ class RouteTable
                 }
                 return false;
             }
-            /* Different origin: accept if better route */
+            /* Different origin: accept if better route. Note: incarnations
+             * are per-origin so we cannot compare them across origins; we
+             * adopt the new origin's incarnation alongside its seq. */
             if (origin != neighbors_[i].inet_origin)
             {
                 if (seq_newer(seq, neighbors_[i].inet_seq) ||
@@ -152,6 +193,7 @@ class RouteTable
                     neighbors_[i].hops_to_internet = hops_inet;
                     neighbors_[i].inet_seq = seq;
                     neighbors_[i].inet_origin = origin;
+                    neighbors_[i].inet_incarnation = incarnation;
                     return true;
                 }
                 return false;
@@ -300,17 +342,18 @@ class RouteTable
         }
     }
 
-    /* Step 1f: Get best inet route info (hops, seq, origin) */
+    /* Step 1f: Get best inet route info (hops, seq, origin, incarnation) */
     struct InetRouteInfo
     {
         uint8_t hops;
         uint16_t seq;
         uint16_t origin;
+        uint8_t incarnation;
     };
 
     InetRouteInfo best_inet_route() const
     {
-        InetRouteInfo best = {ROUTE_HOPS_UNKNOWN, 0, 0};
+        InetRouteInfo best = {ROUTE_HOPS_UNKNOWN, 0, 0, 0};
         for (uint8_t i = 0; i < count_; i++)
         {
             if (neighbors_[i].hops_to_internet < best.hops)
@@ -318,6 +361,7 @@ class RouteTable
                 best.hops = neighbors_[i].hops_to_internet;
                 best.seq = neighbors_[i].inet_seq;
                 best.origin = neighbors_[i].inet_origin;
+                best.incarnation = neighbors_[i].inet_incarnation;
             }
         }
         return best;
