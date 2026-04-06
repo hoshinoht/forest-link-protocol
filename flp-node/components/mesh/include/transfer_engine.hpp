@@ -161,17 +161,10 @@ class TransferEngine
         {
             return 0;
         }
-        /*
-         * Mesh path: use ACKs from the exit node, not next_fragment.
-         * next_fragment counts fragments dispatched into the ARQ window,
-         * which hits 100% the instant the sender has pushed everything —
-         * before the receiver has actually confirmed delivery, and before
-         * any cloud-side NACK-driven retransmits have drained. Reporting
-         * 100% at that moment makes the sensor "look complete" while the
-         * gateway is still missing chunks (see OOW retx path in
-         * tick_mesh_arq()). Using acked keeps the progress bar honest:
-         * it only reaches 100% once every fragment has been custody-ACK'd.
-         */
+        /* Use ACKs (not next_fragment) so progress only hits 100% once
+         * fragments are actually confirmed delivered — otherwise the
+         * sensor shows "complete" while cloud NACK recovery is still
+         * draining evicted-slot retransmits. */
         uint32_t progress_frags =
             local_exit_ ? cloud_base_seq_ : total_acked_fragments();
         if (progress_frags > transfer_.fragment_count)

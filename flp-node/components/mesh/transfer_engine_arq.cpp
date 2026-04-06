@@ -515,15 +515,8 @@ void TransferEngine::tick_mesh_arq()
                      seq, is_parity ? " (parity)" : "", dst);
             sent++;
             last_oow_retx_ms_ = now_pace;
-            /*
-             * Do NOT clear allow_oow_send here. Clearing it after the first
-             * send capped throughput at 1 retx per tick_mesh_arq() call, which
-             * made cloud-NACK recovery crawl when a burst of missing seqs
-             * arrived (typical case: 47 seqs stuck at 99.7%).  The `sent >=
-             * oow_send_budget` check above (budget = kMaxOowRetxPerTick) is
-             * the intended rate limit; and send_fn_() returns backpressure
-             * when TX slots are full, so we won't overrun ESP-NOW.
-             */
+            /* Don't clear allow_oow_send — budget + TX backpressure
+             * already rate-limit; clearing it capped retx at 1/tick. */
         }
         oow_retx_count_ = kept;
     }
