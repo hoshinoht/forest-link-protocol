@@ -120,9 +120,11 @@ static void test_serialize_includes_queue_load(void)
  * Group 3: Payload Struct Sizes
  * ====================================================================== */
 
-static void test_discovery_payload_size_is_8(void)
+static void test_discovery_payload_size_is_9(void)
 {
-    TEST_ASSERT_EQUAL(8, (int)sizeof(DiscoveryPayload));
+    /* Grew from 8 -> 9 bytes when gw_incarnation was appended.
+     * Receivers tolerate the legacy 8-byte size; senders always emit 9. */
+    TEST_ASSERT_EQUAL(9, (int)sizeof(DiscoveryPayload));
 }
 
 static void test_transfer_ack_payload_size_is_7(void)
@@ -277,7 +279,7 @@ void run_mesh_improvement_tests(void)
     RUN_TEST(test_serialize_includes_queue_load);
 
     /* Group 3: Payload sizes */
-    RUN_TEST(test_discovery_payload_size_is_8);
+    RUN_TEST(test_discovery_payload_size_is_9);
     RUN_TEST(test_transfer_ack_payload_size_is_7);
     RUN_TEST(test_exit_offline_payload_size_is_4);
 

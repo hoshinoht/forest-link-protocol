@@ -267,13 +267,21 @@ void MeshManager::handle_discovery(const PacketHeader &hdr,
                                    const uint8_t *payload,
                                    size_t payload_len)
 {
-    if (payload_len < sizeof(DiscoveryPayload))
+    /*
+     * Backward-compat: legacy peers (built before gw_incarnation was added)
+     * still send 8-byte DiscoveryPayloads. Accept any payload >= the legacy
+     * minimum and zero-fill any trailing fields the sender did not include.
+     */
+    if (payload_len < LEGACY_DISCOVERY_PAYLOAD_SIZE)
     {
         return;
     }
 
-    DiscoveryPayload disc;
-    memcpy(&disc, payload, sizeof(disc));
+    DiscoveryPayload disc = {};
+    size_t copy_len = payload_len < sizeof(DiscoveryPayload)
+                          ? payload_len
+                          : sizeof(DiscoveryPayload);
+    memcpy(&disc, payload, copy_len);
 
     const char *rx_transport = rx_transport_name(source);
 

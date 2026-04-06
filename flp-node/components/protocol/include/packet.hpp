@@ -118,6 +118,7 @@ struct __attribute__((packed)) DiscoveryPayload
     uint16_t inet_seq;       /* monotonic sequence from originating exit node */
     uint16_t inet_origin;    /* address of the exit node this route comes from */
     uint8_t queue_load;      /* forwarding queue utilisation (hi_used + lo_used) */
+    uint8_t gw_incarnation;  /* origin gateway's reboot counter (RFC1982 8-bit serial). Fences DSDV state across reboots so a freshly-restarted gateway is not silently ignored by neighbors that still hold its pre-reboot inet_seq. Always carries the incarnation of inet_origin, not of the immediate sender. */
 };
 
 /* Discovery flags bit layout constants */
@@ -126,7 +127,12 @@ static constexpr uint8_t kDiscoveryChShift = 1;
 static constexpr uint8_t kDiscoveryChMask = 0x0F;
 static constexpr uint8_t kDiscoverySfShift = 5;
 static constexpr uint8_t kDiscoverySfMask = 0x07;
-static_assert(sizeof(DiscoveryPayload) == 8, "DiscoveryPayload must be 8 bytes");
+static_assert(sizeof(DiscoveryPayload) == 9, "DiscoveryPayload must be 9 bytes");
+
+/* Wire size of the DiscoveryPayload as it existed before gw_incarnation was
+ * appended. Receivers must accept payloads of this size for backward
+ * compatibility with un-upgraded peers; missing fields default to 0. */
+static constexpr size_t LEGACY_DISCOVERY_PAYLOAD_SIZE = 8;
 
 struct __attribute__((packed)) RouteErrorPayload
 {
