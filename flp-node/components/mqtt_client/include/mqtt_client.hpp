@@ -228,6 +228,31 @@ class MqttClient
     uint8_t fragment_accepted_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
     uint8_t fragment_ack_pending_bitmap_[FRAGMENT_BITMAP_BYTES] = {};
 
+    /*
+     * Recent-publish ring: tracks fragments that esp_mqtt_client_publish()
+     * accepted into its TX buffer but which may still be in the "gray zone"
+     * (not yet on the wire) if the TLS/WS transport subsequently stalls.
+     *
+     * When MQTT_EVENT_DISCONNECTED fires, any entries in this ring that
+     * are younger than the network write timeout are assumed lost and
+     * injected as synthetic CloudNackItems into nack_queue_, so
+     * TransferEngine forwards them as mesh NACKs to the source and the
+     * source's OOW retx path re-reads from the file and re-publishes.
+     *
+     * This closes the silent-loss gap introduced by QoS 0 fragment
+     * publishes without paying the outbox-memory cost of QoS 1.
+     */
+    struct RecentPublishEntry
+    {
+        uint16_t session_id = 0;
+        uint16_t seq = 0;
+        uint32_t publish_ms = 0; /* 0 = empty slot */
+    };
+    static constexpr size_t RECENT_PUBLISH_RING_SIZE = 64;
+    static constexpr uint32_t RECENT_PUBLISH_REPLAY_MS = 15000;
+    RecentPublishEntry recent_publish_ring_[RECENT_PUBLISH_RING_SIZE] = {};
+    size_t recent_publish_write_ = 0;
+
     /* Deferred ACK queue: seq numbers of relay fragments accepted by the
      * local MQTT client/outbox. Drained by TransferEngine to send mesh ACKs
      * without waiting for broker PUBACK latency. */
