@@ -45,11 +45,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Channels
-	metaCh := make(chan mqtt.FileMeta, 16)
-	chunkCh := make(chan mqtt.FileChunk, 256)
-	topoCh := make(chan mqtt.TopoMsg, 32)
-	metricCh := make(chan mqtt.MetricMsg, 64)
+	// Channels. Sized generously: the WSS MQTT tunnel can burst, and the
+	// Paho read path will drop on a full channel — larger buffers give the
+	// transfer engine room to catch up before we start losing chunks.
+	metaCh := make(chan mqtt.FileMeta, 64)
+	chunkCh := make(chan mqtt.FileChunk, 1024)
+	topoCh := make(chan mqtt.TopoMsg, 64)
+	metricCh := make(chan mqtt.MetricMsg, 128)
 
 	// Components
 	store, err := metrics.NewStore("flp_metrics.db")

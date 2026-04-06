@@ -10,14 +10,15 @@ import (
 // It tracks received chunks via a bitmap and issues NACKs for missing
 // chunks within the receive window.
 type SelectiveRepeat struct {
-	windowSize   int
-	timeoutSec   float64
-	expectedBase int
-	bitmap       []byte
-	totalChunks  int
-	lastNACKTime map[int]float64
-	AckCallback  func(msgType string, seq int)
-	NACKCount    int
+	windowSize    int
+	timeoutSec    float64
+	expectedBase  int
+	bitmap        []byte
+	totalChunks   int
+	receivedCount int // running count so Progress() is O(1), not O(n) per call
+	lastNACKTime  map[int]float64
+	AckCallback   func(msgType string, seq int)
+	NACKCount     int
 }
 
 // NewSelectiveRepeat creates a new SR instance.
@@ -35,6 +36,7 @@ func (sr *SelectiveRepeat) StartSession(totalChunks int) {
 	bitmapSize := (totalChunks + 7) / 8
 	sr.bitmap = make([]byte, bitmapSize)
 	sr.expectedBase = 0
+	sr.receivedCount = 0
 	sr.lastNACKTime = make(map[int]float64)
 	sr.NACKCount = 0
 }
@@ -47,9 +49,15 @@ func (sr *SelectiveRepeat) isReceived(seq int) bool {
 }
 
 func (sr *SelectiveRepeat) markReceived(seq int) {
-	if seq >= 0 && seq < sr.totalChunks {
-		sr.bitmap[seq/8] |= 1 << uint(seq%8)
+	if seq < 0 || seq >= sr.totalChunks {
+		return
 	}
+	mask := byte(1 << uint(seq%8))
+	if sr.bitmap[seq/8]&mask != 0 {
+		return // already marked — keep receivedCount accurate
+	}
+	sr.bitmap[seq/8] |= mask
+	sr.receivedCount++
 }
 
 // OnChunkReceived marks seq as received, advances the base, and sends an ACK.
@@ -193,15 +201,10 @@ func (sr *SelectiveRepeat) IsComplete() bool {
 }
 
 // Progress returns the fraction of chunks received (0.0 - 1.0).
+// O(1) — backed by a running count maintained in markReceived.
 func (sr *SelectiveRepeat) Progress() float64 {
 	if sr.totalChunks == 0 {
 		return 0
 	}
-	count := 0
-	for seq := 0; seq < sr.totalChunks; seq++ {
-		if sr.isReceived(seq) {
-			count++
-		}
-	}
-	return float64(count) / float64(sr.totalChunks)
+	return float64(sr.receivedCount) / float64(sr.totalChunks)
 }

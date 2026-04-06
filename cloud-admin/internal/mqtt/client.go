@@ -1,6 +1,7 @@
 package mqtt
 
 import (
+	"container/list"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,71 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
+
+// sessionSourceCap bounds how many in-flight (exit|sessionID → source) mappings
+// we retain. Chosen generously — a few hundred concurrent transfers is well
+// beyond anything the mesh will realistically produce, and each entry is tiny.
+const sessionSourceCap = 1024
+
+// sessionSourceLRU is a bounded LRU mapping exit|sessionID keys to source
+// node IDs. Previously this was an unbounded map, which leaked one entry per
+// completed transfer until process restart. True LRU (move-to-front on Get)
+// means in-flight sessions stay hot while completed ones age out the back.
+type sessionSourceLRU struct {
+	cap   int
+	ll    *list.List               // front = most recently used
+	items map[string]*list.Element // key -> element in ll
+}
+
+type sessionSourceEntry struct {
+	key string
+	val string
+}
+
+func newSessionSourceLRU(capacity int) *sessionSourceLRU {
+	return &sessionSourceLRU{
+		cap:   capacity,
+		ll:    list.New(),
+		items: make(map[string]*list.Element, capacity),
+	}
+}
+
+func (l *sessionSourceLRU) Put(key, val string) {
+	if el, ok := l.items[key]; ok {
+		el.Value.(*sessionSourceEntry).val = val
+		l.ll.MoveToFront(el)
+		return
+	}
+	el := l.ll.PushFront(&sessionSourceEntry{key: key, val: val})
+	l.items[key] = el
+	if l.ll.Len() > l.cap {
+		if back := l.ll.Back(); back != nil {
+			ent := back.Value.(*sessionSourceEntry)
+			delete(l.items, ent.key)
+			l.ll.Remove(back)
+		}
+	}
+}
+
+// Get returns the value and promotes the entry to most-recently-used.
+// Mutates the list, so callers must hold a write lock, not a read lock.
+func (l *sessionSourceLRU) Get(key string) (string, bool) {
+	el, ok := l.items[key]
+	if !ok {
+		return "", false
+	}
+	l.ll.MoveToFront(el)
+	return el.Value.(*sessionSourceEntry).val, true
+}
+
+// rawMsg holds a copied Paho payload for out-of-callback dispatch.
+// Paho's default handler runs on a single serialized goroutine per
+// connection, so any work we do inside it stalls the entire broker read
+// path. We copy the topic+payload and hand it off to a worker immediately.
+type rawMsg struct {
+	topic   string
+	payload []byte
+}
 
 // Client wraps paho MQTT and demuxes incoming messages into typed channels.
 type Client struct {
@@ -25,8 +91,17 @@ type Client struct {
 	topoCh   chan<- TopoMsg
 	metricCh chan<- MetricMsg
 
-	sourceMu            sync.RWMutex
-	sessionSourceByExit map[string]string
+	// rawCh buffers messages between the Paho callback goroutine and the
+	// dispatch worker. Sized large so a burst from the WSS tunnel does not
+	// immediately force drops on the broker read path.
+	rawCh    chan rawMsg
+	dispatchDone chan struct{}
+
+	// sourceMu guards sessionSourceByExit. It is a plain Mutex (not RWMutex)
+	// because LRU Get mutates the list (move-to-front), so even lookups need
+	// a write lock.
+	sourceMu            sync.Mutex
+	sessionSourceByExit *sessionSourceLRU
 }
 
 // NewClient creates a Client that fans out received messages to the provided channels.
@@ -35,15 +110,17 @@ func NewClient(broker string, port int, username, password string,
 	topoCh chan<- TopoMsg, metricCh chan<- MetricMsg,
 ) *Client {
 	return &Client{
-		broker:   broker,
-		port:     port,
-		username: username,
-		password: password,
-		metaCh:   metaCh,
-		chunkCh:  chunkCh,
-		topoCh:   topoCh,
-		metricCh: metricCh,
-		sessionSourceByExit: make(map[string]string),
+		broker:       broker,
+		port:         port,
+		username:     username,
+		password:     password,
+		metaCh:       metaCh,
+		chunkCh:      chunkCh,
+		topoCh:       topoCh,
+		metricCh:     metricCh,
+		rawCh:        make(chan rawMsg, 2048),
+		dispatchDone: make(chan struct{}),
+		sessionSourceByExit: newSessionSourceLRU(sessionSourceCap),
 	}
 }
 
@@ -107,7 +184,21 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("mqtt connect: %w", tok.Error())
 	}
 	log.Printf("[mqtt] connected to %s:%d", c.broker, c.port)
+
+	// Start dispatch worker. Paho's callback thread only needs to copy the
+	// payload into rawCh; all JSON/binary decoding happens here.
+	go c.dispatchLoop()
 	return nil
+}
+
+// dispatchLoop drains rawCh and does the actual topic-based demux.
+// Runs on its own goroutine so the Paho callback thread is never blocked
+// by JSON unmarshaling or a full downstream channel.
+func (c *Client) dispatchLoop() {
+	defer close(c.dispatchDone)
+	for rm := range c.rawCh {
+		c.handleMessage(rm.topic, rm.payload)
+	}
 }
 
 // Disconnect cleanly shuts down the MQTT connection.
@@ -116,12 +207,31 @@ func (c *Client) Disconnect() {
 		c.client.Disconnect(250)
 		log.Println("[mqtt] disconnected")
 	}
+	// Closing rawCh terminates dispatchLoop. Paho has already drained its
+	// callbacks by the time Disconnect(250) returns, so no writer remains.
+	close(c.rawCh)
+	<-c.dispatchDone
 }
 
+// onMessage runs on Paho's serialized callback goroutine. It MUST return
+// quickly — we just copy the payload and hand it to the dispatch worker.
 func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
-	parts := strings.Split(msg.Topic(), "/")
+	// Paho may reuse the payload slice after this callback returns.
+	payload := make([]byte, len(msg.Payload()))
+	copy(payload, msg.Payload())
+	rm := rawMsg{topic: msg.Topic(), payload: payload}
+	select {
+	case c.rawCh <- rm:
+	default:
+		log.Printf("[mqtt] rawCh full, dropping %s (dispatch worker behind)", msg.Topic())
+	}
+}
+
+// handleMessage runs on the dispatch worker goroutine.
+func (c *Client) handleMessage(topic string, payload []byte) {
+	parts := strings.Split(topic, "/")
 	if len(parts) < 3 {
-		log.Printf("[mqtt] unexpected topic format: %s", msg.Topic())
+		log.Printf("[mqtt] unexpected topic format: %s", topic)
 		return
 	}
 
@@ -131,13 +241,13 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 	switch kind {
 	case "file":
 		if len(parts) < 4 {
-			log.Printf("[mqtt] incomplete file topic: %s", msg.Topic())
+			log.Printf("[mqtt] incomplete file topic: %s", topic)
 			return
 		}
 		switch parts[3] {
 		case "meta":
 			var fm FileMeta
-			if err := json.Unmarshal(msg.Payload(), &fm); err != nil {
+			if err := json.Unmarshal(payload, &fm); err != nil {
 				log.Printf("[mqtt] failed to parse file meta from %s: %v", nodeID, err)
 				return
 			}
@@ -150,7 +260,7 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 				sid := uint16(sid64)
 				key := makeExitSessionKey(nodeID, sid)
 				c.sourceMu.Lock()
-				c.sessionSourceByExit[key] = sourceNode
+				c.sessionSourceByExit.Put(key, sourceNode)
 				c.sourceMu.Unlock()
 			}
 			select {
@@ -160,7 +270,6 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 			}
 
 		case "data":
-			payload := msg.Payload()
 			// B4 fix: wire format is now [session_id:2LE][seq:2LE][data]
 			if len(payload) < 4 {
 				log.Printf("[mqtt] file data too short from %s (%d bytes)", nodeID, len(payload))
@@ -168,15 +277,17 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 			}
 			sessionID := binary.LittleEndian.Uint16(payload[:2])
 			seq := binary.LittleEndian.Uint16(payload[2:4])
-			data := make([]byte, len(payload)-4)
-			copy(data, payload[4:])
+			// payload is already a private copy — we own it, so slice
+			// directly instead of allocating a second buffer.
+			data := payload[4:]
 			canonicalNode := nodeID
 			key := makeExitSessionKey(nodeID, sessionID)
-			c.sourceMu.RLock()
-			if src, ok := c.sessionSourceByExit[key]; ok && src != "" {
+			// LRU Get mutates (move-to-front), so full Lock, not RLock.
+			c.sourceMu.Lock()
+			if src, ok := c.sessionSourceByExit.Get(key); ok && src != "" {
 				canonicalNode = src
 			}
-			c.sourceMu.RUnlock()
+			c.sourceMu.Unlock()
 			select {
 			case c.chunkCh <- FileChunk{NodeID: canonicalNode, SessionID: sessionID, SeqNum: seq, Data: data}:
 			default:
@@ -185,11 +296,9 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 		}
 
 	case "status":
-		log.Printf("[mqtt] status from %s: %s", nodeID, string(msg.Payload()))
+		log.Printf("[mqtt] status from %s: %s", nodeID, string(payload))
 
 	case "topology":
-		payload := make([]byte, len(msg.Payload()))
-		copy(payload, msg.Payload())
 		select {
 		case c.topoCh <- TopoMsg{NodeID: nodeID, Payload: payload}:
 		default:
@@ -197,8 +306,6 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 		}
 
 	case "metrics":
-		payload := make([]byte, len(msg.Payload()))
-		copy(payload, msg.Payload())
 		select {
 		case c.metricCh <- MetricMsg{NodeID: nodeID, Kind: MetricKindNode, Payload: payload}:
 		default:
@@ -206,8 +313,6 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 		}
 
 	case "heap":
-		payload := make([]byte, len(msg.Payload()))
-		copy(payload, msg.Payload())
 		select {
 		case c.metricCh <- MetricMsg{NodeID: nodeID, Kind: MetricKindHeap, Payload: payload}:
 		default:
@@ -215,7 +320,7 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 		}
 
 	default:
-		log.Printf("[mqtt] unhandled topic: %s", msg.Topic())
+		log.Printf("[mqtt] unhandled topic: %s", topic)
 	}
 }
 
